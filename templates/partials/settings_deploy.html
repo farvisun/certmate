@@ -3,16 +3,16 @@
              class="bg-surface border-border rounded-lg shadow-sm border p-6 mt-6"
              x-data="deployManager()" x-init="loadConfig()">
 
-            <h3 class="text-lg font-semibold text-foreground flex items-center mb-6">
+             <h3 class="text-lg font-semibold text-foreground flex items-center mb-6">
                 <i class="fas fa-rocket mr-2 text-primary"></i>
-                Deploy Hooks
+                هوک‌های استقرار
             </h3>
 
             <!-- Master toggle -->
             <div class="flex items-center justify-between p-4 bg-gray-50 dark:bg-gray-700/30 rounded-lg mb-6">
                 <div>
-                    <p class="font-medium text-foreground">Enable Deploy Hooks</p>
-                    <p class="text-sm text-muted">Run shell commands after certificate issuance or renewal</p>
+                     <p class="font-medium text-foreground">فعال‌سازی هوک‌های استقرار</p>
+                    <p class="text-sm text-muted">اجرای دستورات shell پس از صدور یا تمدید گواهی</p>
                 </div>
                 <label class="relative inline-flex items-center cursor-pointer">
                     <input type="checkbox" x-model="config.enabled" class="sr-only peer" title="Enable deploy hooks">
@@ -24,12 +24,12 @@
                 <!-- Security banner -->
                 <div class="p-3 bg-warning-surface border border-warning-line rounded-lg text-sm">
                     <i class="fas fa-shield-alt text-amber-500 mr-1"></i>
-                    <span class="text-warning-strong">Commands run as the CertMate process user. Only admins can manage hooks.</span>
+                     <span class="text-warning-strong">دستورات به عنوان کاربر فرآیند CertMate اجرا می‌شوند. فقط مدیران می‌توانند هوک‌ها را مدیریت کنند.</span>
                 </div>
 
                 <!-- Environment variables reference -->
                 <div class="p-3 bg-info-surface border border-info-line rounded-lg text-sm">
-                    <p class="font-medium text-info-strong mb-1"><i class="fas fa-info-circle mr-1"></i>Available Environment Variables</p>
+                     <p class="font-medium text-info-strong mb-1"><i class="fas fa-info-circle mr-1"></i>متغیرهای محیطی موجود</p>
                     <code class="text-xs text-info-fg">CERTMATE_DOMAIN</code>,
                     <code class="text-xs text-info-fg">CERTMATE_CERT_PATH</code>,
                     <code class="text-xs text-info-fg">CERTMATE_KEY_PATH</code>,
@@ -42,9 +42,9 @@
 
                 <!-- Blocked-patterns reference (issue #102) -->
                 <div class="p-3 bg-warning-surface border border-warning-line rounded-lg text-sm">
-                    <p class="font-medium text-warning-strong mb-1"><i class="fas fa-exclamation-triangle mr-1"></i>Blocked Shell Patterns</p>
-                    <p class="text-xs text-warning-fg">
-                        For safety, the command field rejects pipes, redirects, command substitution, and chained commands:
+                     <p class="font-medium text-warning-strong mb-1"><i class="fas fa-exclamation-triangle mr-1"></i>الگوهای shell مسدود شده</p>
+                     <p class="text-xs text-warning-fg">
+                        برای ایمنی، فیلد دستور pipe‌ها، redirect‌ها، جایگزینی دستور و دستورات زنجیره‌ای را رد می‌کند:
                         <code class="text-xs">|</code>,
                         <code class="text-xs">&amp;&amp;</code>,
                         <code class="text-xs">||</code>,
@@ -56,8 +56,8 @@
                         <code class="text-xs">&lt;&lt;</code>,
                         <code class="text-xs">eval</code>,
                         <code class="text-xs">source</code>.
-                        References to sensitive files (<code class="text-xs">.pem</code>, <code class="text-xs">.env</code>, <code class="text-xs">settings.json</code>, private keys, vault tokens) are also blocked.
-                        If you need any of those, put the logic in a script file inside the container and call the script path directly (e.g. <code class="text-xs">/opt/scripts/deploy.sh</code>).
+                        مراجع به فایل‌های حساس (<code class="text-xs">.pem</code>, <code class="text-xs">.env</code>, <code class="text-xs">settings.json</code>, کلیدهای خصوصی، توکن‌های vault) نیز مسدود هستند.
+                        اگر به هر کدام از آن‌ها نیاز دارید، منطق را در یک فایل اسکریپت داخل کانتینر قرار دهید و مستقیماً مسیر اسکریپت را فراخوانی کنید (مثلاً <code class="text-xs">/opt/scripts/deploy.sh</code>).
                     </p>
                 </div>
 
@@ -65,14 +65,14 @@
                 <div class="border border-border rounded-lg overflow-hidden">
                     <button type="button" @click="showGlobal = !showGlobal"
                             class="w-full flex items-center justify-between px-4 py-3 bg-gray-50 dark:bg-gray-700/30 hover:bg-gray-100 dark:hover:bg-gray-700/50 transition text-left">
-                        <span class="font-medium text-foreground text-sm">
-                            <i class="fas fa-globe mr-2 text-blue-500"></i>Global Hooks
+                         <span class="font-medium text-foreground text-sm">
+                            <i class="fas fa-globe mr-2 text-blue-500"></i>هوک‌های سراسری
                             <span class="text-gray-400 font-normal ml-1" x-text="'(' + config.global_hooks.length + ')'"></span>
                         </span>
                         <i class="fas text-gray-400" :class="showGlobal ? 'fa-chevron-up' : 'fa-chevron-down'"></i>
                     </button>
                     <div x-show="showGlobal" x-cloak class="p-4 space-y-3">
-                        <p class="text-xs text-muted mb-2">These hooks run for every domain after certificate issuance or renewal.</p>
+                         <p class="text-xs text-muted mb-2">این هوک‌ها پس از صدور یا تمدید گواهی برای هر دامنه اجرا می‌شوند.</p>
                         <template x-for="(hook, idx) in config.global_hooks" :key="hook.id">
                             <div class="bg-gray-50 dark:bg-gray-700/30 rounded-lg p-4 border border-border">
                                 <div class="flex items-center justify-between mb-3">
@@ -126,14 +126,14 @@
                 <div class="border border-border rounded-lg overflow-hidden">
                     <button type="button" @click="showDomain = !showDomain"
                             class="w-full flex items-center justify-between px-4 py-3 bg-gray-50 dark:bg-gray-700/30 hover:bg-gray-100 dark:hover:bg-gray-700/50 transition text-left">
-                        <span class="font-medium text-foreground text-sm">
-                            <i class="fas fa-sitemap mr-2 text-purple-500"></i>Domain-Specific Hooks
+                         <span class="font-medium text-foreground text-sm">
+                            <i class="fas fa-sitemap mr-2 text-purple-500"></i>هوک‌های اختصاصی دامنه
                             <span class="text-gray-400 font-normal ml-1" x-text="'(' + Object.keys(config.domain_hooks).length + ' domains)'"></span>
                         </span>
                         <i class="fas text-gray-400" :class="showDomain ? 'fa-chevron-up' : 'fa-chevron-down'"></i>
                     </button>
                     <div x-show="showDomain" x-cloak class="p-4 space-y-3">
-                        <p class="text-xs text-muted mb-2">These hooks only run for the specified domain.</p>
+                         <p class="text-xs text-muted mb-2">این هوک‌ها فقط برای دامنه مشخص شده اجرا می‌شوند.</p>
                         <template x-for="domain in Object.keys(config.domain_hooks).sort()" :key="domain">
                             <div class="border border-border rounded-lg p-3 mb-2">
                                 <div class="flex items-center justify-between mb-3">
@@ -199,7 +199,7 @@
                                    @keydown.enter="addDomainSection()">
                             <button type="button" @click="addDomainSection()"
                                     class="px-4 py-2 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded text-sm hover:bg-purple-200 dark:hover:bg-purple-900/50 transition">
-                                <i class="fas fa-plus mr-1"></i>Add Domain
+                                <i class="fas fa-plus mr-1"></i>افزودن دامنه
                             </button>
                         </div>
                     </div>
@@ -209,14 +209,14 @@
                 <div class="border border-border rounded-lg overflow-hidden">
                     <button type="button" @click="showHistory = !showHistory; if(showHistory) loadHistory()"
                             class="w-full flex items-center justify-between px-4 py-3 bg-gray-50 dark:bg-gray-700/30 hover:bg-gray-100 dark:hover:bg-gray-700/50 transition text-left">
-                        <span class="font-medium text-foreground text-sm">
-                            <i class="fas fa-history mr-2 text-gray-500"></i>Recent Executions
+                         <span class="font-medium text-foreground text-sm">
+                            <i class="fas fa-history mr-2 text-gray-500"></i>اجراهای اخیر
                         </span>
                         <i class="fas text-gray-400" :class="showHistory ? 'fa-chevron-up' : 'fa-chevron-down'"></i>
                     </button>
                     <div x-show="showHistory" x-cloak class="p-4">
-                        <div x-show="history.length === 0" class="text-center text-sm text-muted py-4">
-                            <i class="fas fa-inbox mr-1"></i>No executions yet
+                         <div x-show="history.length === 0" class="text-center text-sm text-muted py-4">
+                            <i class="fas fa-inbox mr-1"></i>هنوز اجرایی وجود ندارد
                         </div>
                         <div x-show="history.length > 0" class="max-h-64 overflow-y-auto">
                             <table class="w-full text-xs">
@@ -266,7 +266,7 @@
             <div class="mt-6 flex justify-end">
                 <button type="button" @click="saveConfig()"
                         class="bg-primary text-white px-6 py-2 rounded-md hover:bg-secondary transition text-sm">
-                    <i class="fas fa-save mr-2"></i>Save Deploy Settings
+                     <i class="fas fa-save mr-2"></i>ذخیره تنظیمات استقرار
                 </button>
             </div>
 
@@ -279,7 +279,7 @@
                 textContent), never x-html, so untrusted stdout/stderr can't
                 introduce HTML/script.
             #}
-            {% call modal(id="executionDetailModal", title="Execution Detail", icon="fa-terminal", size="lg") %}
+             {% call modal(id="executionDetailModal", title="جزئیات اجرا", icon="fa-terminal", size="lg") %}
                 <template x-if="selectedExecution">
                     <div class="space-y-4 text-sm">
                         <!-- Header metadata -->

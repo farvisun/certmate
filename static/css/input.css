@@ -24,6 +24,15 @@
   src: url('/static/webfonts/JetBrainsMono-Regular.woff2') format('woff2');
 }
 
+/* ── Typography: Vazirmatn (Persian/Arabic) ────────────────── */
+@font-face {
+  font-family: 'Vazirmatn';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/fonts/webfonts/Vazirmatn-font-face-Regular.woff2') format('woff2');
+}
+
 /* ── Typography polish ───────────────────────────────────────── */
 /* #1+#2: Fixed-width numbers + slashed zero for data alignment */
 /* #16: Anti-aliased rendering for crisp text on dark surfaces  */
@@ -35,6 +44,14 @@
     /* Avoid typographic orphans in running text without forcing line
        breaks — degrades gracefully where text-wrap: pretty is unsupported. */
     text-wrap: pretty;
+  }
+
+  /* ── RTL support ────────────────────────────────────────────── */
+  [dir="rtl"] {
+    font-family: 'Vazirmatn', 'Inter', system-ui, sans-serif;
+  }
+  [dir="rtl"] body {
+    font-family: 'Vazirmatn', 'Inter', system-ui, sans-serif;
   }
 
   /* ── Heading refinement ──────────────────────────────────────────
@@ -485,4 +502,43 @@ button[class*="bg-red-6"]:active {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+/* ── RTL Overrides ─────────────────────────────────────────── */
+@layer utilities {
+  [dir="rtl"] .ml-1 { margin-left: 0; margin-right: 0.25rem; }
+  [dir="rtl"] .ml-2 { margin-left: 0; margin-right: 0.5rem; }
+  [dir="rtl"] .ml-3 { margin-left: 0; margin-right: 0.75rem; }
+  [dir="rtl"] .mr-1 { margin-right: 0; margin-left: 0.25rem; }
+  [dir="rtl"] .mr-2 { margin-right: 0; margin-left: 0.5rem; }
+  [dir="rtl"] .mr-3 { margin-right: 0; margin-left: 0.75rem; }
+  [dir="rtl"] .pl-3 { padding-left: 0; padding-right: 0.75rem; }
+  [dir="rtl"] .pr-2 { padding-right: 0; padding-left: 0.5rem; }
+  [dir="rtl"] .pr-3 { padding-right: 0; padding-left: 0.75rem; }
+  [dir="rtl"] .pr-6 { padding-right: 0; padding-left: 1.5rem; }
+  [dir="rtl"] .pl-6 { padding-left: 0; padding-right: 1.5rem; }
+  [dir="rtl"] .pl-10 { padding-left: 0; padding-right: 2.5rem; }
+  [dir="rtl"] .pr-10 { padding-right: 0; padding-left: 2.5rem; }
+  [dir="rtl"] .pl-7 { padding-left: 0; padding-right: 1.75rem; }
+  [dir="rtl"] .left-0 { left: auto; right: 0; }
+  [dir="rtl"] .right-0 { right: auto; left: 0; }
+  [dir="rtl"] .right-3 { right: auto; left: 0.75rem; }
+  [dir="rtl"] .left-3 { left: auto; right: 0.75rem; }
+  [dir="rtl"] .text-left { text-align: right; }
+  [dir="rtl"] .text-right { text-align: left; }
+  [dir="rtl"] .-right-1 { right: auto; left: -0.25rem; }
+  [dir="rtl"] .-top-1 { top: -0.25rem; }
+  [dir="rtl"] .translate-x-full { transform: translateX(-100%); }
+  [dir="rtl"] .translate-x-0 { transform: translateX(0); }
+  [dir="rtl"] .ml-auto { margin-left: 0; margin-right: auto; }
+  [dir="rtl"] .mr-auto { margin-right: 0; margin-left: auto; }
+  [dir="rtl"] .inset-y-0.left-0 { left: auto; right: 0; }
+  [dir="rtl"] .inset-y-0.right-0 { right: auto; left: 0; }
+}
+@layer base {
+  [dir="rtl"] .health-valid > td:first-child { border-left: none; border-right: 3px solid #22c55e; }
+  [dir="rtl"] .health-warning > td:first-child { border-left: none; border-right: 3px solid #f59e0b; }
+  [dir="rtl"] .health-expired > td:first-child { border-left: none; border-right: 3px solid #ef4444; }
+  [dir="rtl"] .health-unknown > td:first-child { border-left: none; border-right: 3px solid #6b7280; }
+  [dir="rtl"] .toast-progress { left: auto; right: 0; border-radius: 0 0 8px 0; }
 }

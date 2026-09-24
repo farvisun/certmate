@@ -8,27 +8,27 @@
                     <nav class="flex items-center text-sm" aria-label="Breadcrumb">
                         <a href="/" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"><i class="fas fa-home"></i></a>
                         <i class="fas fa-chevron-right text-[10px] text-gray-300 dark:text-gray-600 mx-2"></i>
-                        <span class="text-gray-700 dark:text-gray-200 font-medium">Activity</span>
+                         <span class="text-gray-700 dark:text-gray-200 font-medium">فعالیت</span>
                     </nav>
                     <div class="flex items-center gap-2 flex-wrap">
-                        <input type="search" id="filterSearch" aria-label="Search activity log"
-                               placeholder="Search domain, resource, user…"
+                         <input type="search" id="filterSearch" aria-label="جستجوی لاگ فعالیت"
+                               placeholder="جستجوی دامنه، منبع، کاربر…"
                                class="px-3 py-1.5 text-xs border text-foreground border-border rounded-lg bg-input placeholder-gray-400 focus:ring-2 focus:ring-primary w-44 sm:w-56">
-                        <select id="filterDate" aria-label="Filter by date range" class="px-3 py-1.5 text-xs border text-foreground border-border rounded-lg bg-input focus:ring-2 focus:ring-primary">
-                            <option value="">All time</option>
-                            <option value="today">Today</option>
-                            <option value="7d">Last 7 days</option>
-                            <option value="30d">Last 30 days</option>
+                         <select id="filterDate" aria-label="فیلتر بر اساس بازه زمانی" class="px-3 py-1.5 text-xs border text-foreground border-border rounded-lg bg-input focus:ring-2 focus:ring-primary">
+                            <option value="">همه زمان‌ها</option>
+                            <option value="today">امروز</option>
+                            <option value="7d">۷ روز گذشته</option>
+                            <option value="30d">۳۰ روز گذشته</option>
                         </select>
-                        <select id="filterOp" aria-label="Filter by operation type" class="px-3 py-1.5 text-xs border text-foreground border-border rounded-lg bg-input focus:ring-2 focus:ring-primary">
-                            <option value="">All user activity</option>
-                            <option value="create">Created</option>
-                            <option value="renew">Renewed</option>
-                            <option value="revoke">Revoked</option>
-                            <option value="download">Downloaded</option>
-                            <option value="api_request">API requests only</option>
+                         <select id="filterOp" aria-label="فیلتر بر اساس نوع عملیات" class="px-3 py-1.5 text-xs border text-foreground border-border rounded-lg bg-input focus:ring-2 focus:ring-primary">
+                            <option value="">تمام فعالیت‌های کاربر</option>
+                            <option value="create">ایجاد شده</option>
+                            <option value="renew">تمدید شده</option>
+                            <option value="revoke">لغو شده</option>
+                            <option value="download">دانلود شده</option>
+                            <option value="api_request">فقط درخواست‌های API</option>
                         </select>
-                        <button type="button" onclick="loadActivity()" class="px-2.5 py-1.5 text-xs bg-surface-2 text-muted rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 transition" title="Refresh" aria-label="Refresh activity log">
+                         <button type="button" onclick="loadActivity()" class="px-2.5 py-1.5 text-xs bg-surface-2 text-muted rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 transition" title="به‌روزرسانی" aria-label="به‌روزرسانی لاگ فعالیت">
                             <i class="fas fa-sync"></i>
                         </button>
                     </div>
@@ -282,7 +282,7 @@
             var list = document.getElementById('activityList');
             list.setAttribute('aria-busy', 'false');
             if (entries.length === 0) {
-                list.innerHTML = '<li role="presentation" class="px-6 py-12 text-center text-muted"><i class="fas fa-inbox text-3xl text-gray-300 dark:text-gray-600 mb-3 block"></i>No activity recorded yet</li>';
+                 list.innerHTML = '<li role="presentation" class="px-6 py-12 text-center text-muted"><i class="fas fa-inbox text-3xl text-gray-300 dark:text-gray-600 mb-3 block"></i>هنوز فعالیتی ثبت نشده است</li>';
                 return;
             }
 
@@ -351,9 +351,9 @@
                 // Wrap the control row in <li role="presentation"> so it
                 // is valid markup under <ul> but isn't announced as a
                 // feed article.
-                var btnHtml = '<li role="presentation" class="px-6 py-4 text-center border-t border-gray-100 dark:border-gray-700/50">' +
+                var                  btnHtml = '<li role="presentation" class="px-6 py-4 text-center border-t border-gray-100 dark:border-gray-700/50">' +
                     '<button id="loadMoreActivity" type="button" class="inline-flex items-center px-4 py-1.5 text-xs border border-border rounded-lg bg-input text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-600 transition">' +
-                        '<i class="fas fa-plus mr-2"></i>Load more' +
+                        '<i class="fas fa-plus mr-2"></i>بارگذاری بیشتر' +
                     '</button>' +
                 '</li>';
                 list.insertAdjacentHTML('beforeend', btnHtml);

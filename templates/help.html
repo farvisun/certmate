@@ -11,7 +11,7 @@
             <nav class="flex items-center text-sm" aria-label="Breadcrumb">
                 <a href="/" aria-label="Home" title="Home" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"><i class="fas fa-home" aria-hidden="true"></i></a>
                 <i class="fas fa-chevron-right text-xs text-gray-300 dark:text-gray-600 mx-2"></i>
-                <span class="text-gray-700 dark:text-gray-200 font-medium">Help</span>
+                 <span class="text-gray-700 dark:text-gray-200 font-medium">راهنما</span>
             </nav>
             <div class="flex items-center gap-3 text-xs">
                 <a href="/health" target="_blank" rel="noopener" class="text-gray-400 hover:text-primary transition-colors" title="Live health endpoint — JSON status of scheduler, cert dir, disk"><i class="fas fa-heartbeat mr-1" aria-hidden="true"></i>Health</a>
@@ -22,11 +22,11 @@
 
         <!-- In-page substring search across [data-help-section] blocks. -->
         <div class="px-4 sm:px-0 mb-4">
-            <label for="helpSearch" class="sr-only">Search help</label>
+                    <label for="helpSearch" class="sr-only">جستجوی راهنما</label>
             <div class="relative">
                 <input type="search" id="helpSearch"
-                       placeholder="Search the help page…"
-                       aria-label="Search help content"
+                       placeholder="جستجو در صفحه راهنما..."
+                       aria-label="جستجوی محتوای راهنما"
                        class="w-full pl-10 pr-3 py-2 text-sm border text-foreground border-border rounded-lg bg-input placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary">
                 <i class="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm pointer-events-none" aria-hidden="true"></i>
             </div>
@@ -36,17 +36,17 @@
              viewports). Section anchors first, then a divider, then the
              "What's New" jump-link and the external full changelog. -->
         <nav class="flex items-center gap-1 mb-6 overflow-x-auto whitespace-nowrap text-sm px-4 sm:px-0 pb-1" aria-label="Help sections">
-            <a href="#quick-start"    class="px-3 py-1.5 rounded-md text-gray-700 dark:text-gray-200 hover:bg-hover"><i class="fas fa-rocket text-green-600 mr-1.5" aria-hidden="true"></i>Quick Start</a>
+                 <a href="#quick-start"    class="px-3 py-1.5 rounded-md text-gray-700 dark:text-gray-200 hover:bg-hover"><i class="fas fa-rocket text-green-600 mr-1.5" aria-hidden="true"></i>شروع سریع</a>
             <a href="#dns-providers"  class="px-3 py-1.5 rounded-md text-gray-700 dark:text-gray-200 hover:bg-hover"><i class="fas fa-server text-blue-600 mr-1.5" aria-hidden="true"></i>DNS</a>
             <a href="#ca-providers"   class="px-3 py-1.5 rounded-md text-gray-700 dark:text-gray-200 hover:bg-hover"><i class="fas fa-certificate text-purple-600 mr-1.5" aria-hidden="true"></i>CA</a>
             <a href="#api-usage"      class="px-3 py-1.5 rounded-md text-gray-700 dark:text-gray-200 hover:bg-hover"><i class="fas fa-code text-indigo-600 mr-1.5" aria-hidden="true"></i>API</a>
-            <a href="#multi-account"  class="px-3 py-1.5 rounded-md text-gray-700 dark:text-gray-200 hover:bg-hover"><i class="fas fa-users text-green-600 mr-1.5" aria-hidden="true"></i>Multi-account</a>
-            <a href="#backup-recovery" class="px-3 py-1.5 rounded-md text-gray-700 dark:text-gray-200 hover:bg-hover"><i class="fas fa-archive text-amber-600 mr-1.5" aria-hidden="true"></i>Backup</a>
-            <a href="#troubleshooting" class="px-3 py-1.5 rounded-md text-gray-700 dark:text-gray-200 hover:bg-hover"><i class="fas fa-tools text-orange-600 mr-1.5" aria-hidden="true"></i>Troubleshooting</a>
-            <a href="#report-issue"   class="px-3 py-1.5 rounded-md text-gray-700 dark:text-gray-200 hover:bg-hover"><i class="fab fa-github text-label mr-1.5" aria-hidden="true"></i>Report an issue</a>
+            <a href="#multi-account"  class="px-3 py-1.5 rounded-md text-gray-700 dark:text-gray-200 hover:bg-hover"><i class="fas fa-users text-green-600 mr-1.5" aria-hidden="true"></i>چند حساب</a>
+            <a href="#backup-recovery" class="px-3 py-1.5 rounded-md text-gray-700 dark:text-gray-200 hover:bg-hover"><i class="fas fa-archive text-amber-600 mr-1.5" aria-hidden="true"></i>پشتیبان‌گیری</a>
+            <a href="#troubleshooting" class="px-3 py-1.5 rounded-md text-gray-700 dark:text-gray-200 hover:bg-hover"><i class="fas fa-tools text-orange-600 mr-1.5" aria-hidden="true"></i>عیب‌یابی</a>
+            <a href="#report-issue"   class="px-3 py-1.5 rounded-md text-gray-700 dark:text-gray-200 hover:bg-hover"><i class="fab fa-github text-label mr-1.5" aria-hidden="true"></i>گزارش مشکل</a>
             <span class="mx-1 h-5 w-px bg-gray-200 dark:bg-gray-700" aria-hidden="true"></span>
-            <a href="#whats-new"      class="px-3 py-1.5 rounded-md text-gray-700 dark:text-gray-200 hover:bg-hover"><i class="fas fa-star text-yellow-500 mr-1.5" aria-hidden="true"></i>What's new</a>
-            <a href="https://github.com/fabriziosalmi/certmate/blob/main/RELEASE_NOTES.md" target="_blank" rel="noopener" class="px-3 py-1.5 rounded-md text-gray-700 dark:text-gray-200 hover:bg-hover"><i class="fas fa-external-link-alt text-xs text-gray-400 mr-1.5" aria-hidden="true"></i>Full changelog</a>
+            <a href="#whats-new"      class="px-3 py-1.5 rounded-md text-gray-700 dark:text-gray-200 hover:bg-hover"><i class="fas fa-star text-yellow-500 mr-1.5" aria-hidden="true"></i>چه جدید است</a>
+            <a href="https://github.com/fabriziosalmi/certmate/blob/main/RELEASE_NOTES.md" target="_blank" rel="noopener" class="px-3 py-1.5 rounded-md text-gray-700 dark:text-gray-200 hover:bg-hover"><i class="fas fa-external-link-alt text-xs text-gray-400 mr-1.5" aria-hidden="true"></i>تغییرات کامل</a>
         </nav>
 
         <!-- Content sections. All cards use the compact px-4 py-4 padding
@@ -56,17 +56,17 @@
             <!-- Quick Start -->
             <section id="quick-start" data-help-section class="bg-surface shadow rounded-lg">
                 <div class="px-4 py-4">
-                    <h3 class="text-lg font-semibold text-foreground mb-3">
-                        <i class="fas fa-rocket text-green-600 mr-2" aria-hidden="true"></i>Quick Start
+                     <h3 class="text-lg font-semibold text-foreground mb-3">
+                        <i class="fas fa-rocket text-green-600 mr-2" aria-hidden="true"></i>شروع سریع
                     </h3>
                     <ol class="text-sm text-gray-700 dark:text-gray-200 space-y-1.5 list-decimal ml-5">
-                        <li>Open <a href="/settings" class="text-primary hover:underline">Settings → DNS</a> and add credentials for your DNS provider.</li>
-                        <li>From the <a href="/" class="text-primary hover:underline">Certificates</a> page, enter a domain and click <span class="font-medium">Create New Certificate</span>.</li>
-                        <li>Enable Local Authentication under <a href="/settings#users" class="text-primary hover:underline">Settings → Users</a> before exposing CertMate to the internet — it ships with auth off so the first run is friction-free.</li>
-                        <li>API token lives at <a href="/settings#apikeys" class="text-primary hover:underline">Settings → API Keys</a>. Auto-generated on first start; click <span class="font-medium">Reveal</span> to copy.</li>
+                        <li>به <a href="/settings" class="text-primary hover:underline">تنظیمات → DNS</a> بروید و اعتبارنامه‌های ارائه‌دهنده DNS خود را اضافه کنید.</li>
+                        <li>از صفحه <a href="/" class="text-primary hover:underline">گواهی‌ها</a>، یک دامنه وارد کنید و روی <span class="font-medium">ایجاد گواهی جدید</span> کلیک کنید.</li>
+                        <li>احراز هویت محلی را در <a href="/settings#users" class="text-primary hover:underline">تنظیمات → کاربران</a> فعال کنید قبل از اینکه CertMate را در اینترنت در معرض دید قرار دهید — در حالت پیش‌فرض احراز هویت غیرفعال است تا اولین اجرا بدون مشکل باشد.</li>
+                        <li>توکن API در <a href="/settings#apikeys" class="text-primary hover:underline">تنظیمات → کلیدهای API</a> قرار دارد. در اولین اجرا به طور خودکار تولید می‌شود؛ روی <span class="font-medium">نمایش</span> کلیک کنید تا کپی شود.</li>
                     </ol>
                     <p class="text-xs text-muted mt-3">
-                        Renewal runs daily and refreshes anything within 30 days of expiry. No cron setup needed.
+                        تمدید به طور روزانه اجرا می‌شود و هر چیزی که تا ۳۰ روز منقضی شود را بروزرسانی می‌کند. نیازی به تنظیم cron نیست.
                     </p>
                 </div>
             </section>
@@ -74,36 +74,36 @@
             <!-- DNS Providers -->
             <section id="dns-providers" data-help-section class="bg-surface shadow rounded-lg">
                 <div class="px-4 py-4">
-                    <h3 class="text-lg font-semibold text-foreground mb-3">
-                        <i class="fas fa-server text-blue-600 mr-2" aria-hidden="true"></i>DNS Providers
+                     <h3 class="text-lg font-semibold text-foreground mb-3">
+                        <i class="fas fa-server text-blue-600 mr-2" aria-hidden="true"></i>ارائه‌دهندگان DNS
                     </h3>
                     <p class="text-sm text-gray-700 dark:text-gray-200 mb-3">
-                        CertMate uses the DNS-01 challenge: it places a TXT record on your zone, Let's Encrypt (or your CA) queries DNS, and once the value matches the cert is issued. You need a credential with permission to create+delete TXT records on the target zone.
+                        CertMate از چالش DNS-01 استفاده می‌کند: یک رکورد TXT در منطقه شما قرار می‌دهد، Let's Encrypt (یا CA شما) DNS را کوئری می‌کند و پس از تطابق مقدار، گواهی صادر می‌شود. به یک اعتبارنامه با مجوز ایجاد+حذف رکوردهای TXT در منطقه هدف نیاز دارید.
                     </p>
                     <p class="text-sm text-gray-700 dark:text-gray-200 mb-3">
-                        Configure providers in <a href="/settings" class="text-primary hover:underline">Settings → DNS</a>. Common ones and the minimum API permission each needs:
+                        ارائه‌دهندگان را در <a href="/settings" class="text-primary hover:underline">تنظیمات → DNS</a> پیکربندی کنید. ارائه‌دهندگان رایج و حداقل مجوز API مورد نیاز هر کدام:
                     </p>
                     <div class="overflow-x-auto">
                         <table class="text-sm w-full">
                             <thead class="text-xs text-muted uppercase tracking-wider">
                                 <tr class="border-b border-border">
-                                    <th class="text-left py-2 pr-4">Provider</th>
-                                    <th class="text-left py-2 pr-4">Token type</th>
-                                    <th class="text-left py-2">Minimum scope</th>
+                                    <th class="text-left py-2 pr-4">ارائه‌دهنده</th>
+                                    <th class="text-left py-2 pr-4">نوع توکن</th>
+                                    <th class="text-left py-2">حداقل دسترسی</th>
                                 </tr>
                             </thead>
                             <tbody class="text-gray-700 dark:text-gray-200">
-                                <tr class="border-b border-gray-100 dark:border-gray-700/50"><td class="py-2 pr-4 font-medium">Cloudflare</td><td class="py-2 pr-4">API token (scoped)</td><td class="py-2">Zone · DNS · Edit on the target zone</td></tr>
-                                <tr class="border-b border-gray-100 dark:border-gray-700/50"><td class="py-2 pr-4 font-medium">Route 53</td><td class="py-2 pr-4">IAM access key</td><td class="py-2"><code class="text-xs">route53:ChangeResourceRecordSets</code>, <code class="text-xs">route53:GetChange</code> on the hosted zone</td></tr>
-                                <tr class="border-b border-gray-100 dark:border-gray-700/50"><td class="py-2 pr-4 font-medium">DigitalOcean</td><td class="py-2 pr-4">Personal access token</td><td class="py-2">Read + Write</td></tr>
-                                <tr class="border-b border-gray-100 dark:border-gray-700/50"><td class="py-2 pr-4 font-medium">Azure DNS</td><td class="py-2 pr-4">Service principal</td><td class="py-2">DNS Zone Contributor on the zone resource</td></tr>
-                                <tr class="border-b border-gray-100 dark:border-gray-700/50"><td class="py-2 pr-4 font-medium">Google Cloud</td><td class="py-2 pr-4">Service account JSON</td><td class="py-2">DNS Administrator (or custom role with <code class="text-xs">dns.changes.create</code>)</td></tr>
-                                <tr><td class="py-2 pr-4 font-medium">PowerDNS</td><td class="py-2 pr-4">HTTP API key</td><td class="py-2">Zone write on the configured zone</td></tr>
+                                <tr class="border-b border-gray-100 dark:border-gray-700/50"><td class="py-2 pr-4 font-medium">Cloudflare</td><td class="py-2 pr-4">توکن API (محدود شده)</td><td class="py-2">Zone · DNS · Edit در منطقه هدف</td></tr>
+                                <tr class="border-b border-gray-100 dark:border-gray-700/50"><td class="py-2 pr-4 font-medium">Route 53</td><td class="py-2 pr-4">کلید دسترسی IAM</td><td class="py-2"><code class="text-xs">route53:ChangeResourceRecordSets</code>، <code class="text-xs">route53:GetChange</code> در hosted zone</td></tr>
+                                <tr class="border-b border-gray-100 dark:border-gray-700/50"><td class="py-2 pr-4 font-medium">DigitalOcean</td><td class="py-2 pr-4">توکن دسترسی شخصی</td><td class="py-2">خواندن + نوشتن</td></tr>
+                                <tr class="border-b border-gray-100 dark:border-gray-700/50"><td class="py-2 pr-4 font-medium">Azure DNS</td><td class="py-2 pr-4">اصلی سرویس</td><td class="py-2">DNS Zone Contributor در منبع منطقه</td></tr>
+                                <tr class="border-b border-gray-100 dark:border-gray-700/50"><td class="py-2 pr-4 font-medium">Google Cloud</td><td class="py-2 pr-4">JSON حساب سرویس</td><td class="py-2">DNS Administrator (یا نقش سفارشی با <code class="text-xs">dns.changes.create</code>)</td></tr>
+                                <tr><td class="py-2 pr-4 font-medium">PowerDNS</td><td class="py-2 pr-4">کلید API HTTP</td><td class="py-2">نوشتن منطقه در منطقه پیکربندی شده</td></tr>
                             </tbody>
                         </table>
                     </div>
                     <p class="text-sm text-gray-700 dark:text-gray-200 mt-3">
-                        The dropdown lists 22 providers in total. The four major ones (Cloudflare, Route 53, DigitalOcean, Azure) plus Let's Encrypt-recommended clients ship in the default image. The rest are available via <code class="text-xs bg-surface-2 px-1 rounded">EXTRA_REQUIREMENTS</code> at build time — see the <a href="https://github.com/fabriziosalmi/certmate#dns-providers" target="_blank" rel="noopener" class="text-primary hover:underline">README</a>.
+                        لیست کشویی در مجموع ۲۲ ارائه‌دهنده دارد. چهار ارائه‌دهنده اصلی (Cloudflare, Route 53, DigitalOcean, Azure) به همراه کلاینت‌های توصیه شده Let's Encrypt در تصویر پیش‌فرض موجود هستند. بقیه از طریق <code class="text-xs bg-surface-2 px-1 rounded">EXTRA_REQUIREMENTS</code> در زمان ساخت در دسترس هستند — به <a href="https://github.com/fabriziosalmi/certmate#dns-providers" target="_blank" rel="noopener" class="text-primary hover:underline">README</a> مراجعه کنید.
                     </p>
                 </div>
             </section>
@@ -111,28 +111,28 @@
             <!-- CA Providers -->
             <section id="ca-providers" data-help-section class="bg-surface shadow rounded-lg">
                 <div class="px-4 py-4">
-                    <h3 class="text-lg font-semibold text-foreground mb-3">
-                        <i class="fas fa-certificate text-purple-600 mr-2" aria-hidden="true"></i>Certificate Authorities
+                     <h3 class="text-lg font-semibold text-foreground mb-3">
+                        <i class="fas fa-certificate text-purple-600 mr-2" aria-hidden="true"></i>مراکز صدور گواهی
                     </h3>
                     <p class="text-sm text-gray-700 dark:text-gray-200 mb-3">
-                        Pick a CA in <a href="/settings" class="text-primary hover:underline">Settings → CA</a>. You can override per-certificate at create time.
+                        یک CA در <a href="/settings" class="text-primary hover:underline">تنظیمات → CA</a> انتخاب کنید. می‌توانید در زمان ایجاد برای هر گواهی آن را تغییر دهید.
                     </p>
                     <ul class="text-sm text-gray-700 dark:text-gray-200 space-y-2">
                         <li>
-                            <span class="font-medium">Let's Encrypt</span> — Free DV certs, 90 days, no EAB. Rate limit: 50 certs per registered domain per week. Default for most users.
+                            <span class="font-medium">Let's Encrypt</span> — گواهی‌های DV رایگان، ۹۰ روز، بدون EAB. محدودیت نرخ: ۵۰ گواهی به ازای هر دامنه ثبت شده در هفته. پیش‌فرض برای بیشتر کاربران.
                         </li>
                         <li>
-                            <span class="font-medium">Actalis</span> — Free DV certs, 90 days, European (Italian) CA. <span class="font-medium">Requires EAB</span>: generate credentials in your Actalis customer area under Manage with ACME. Free plan is single-domain only (no wildcard, no SAN).
+                            <span class="font-medium">Actalis</span> — گواهی‌های DV رایگان، ۹۰ روز، CA اروپایی (ایتالیایی). <span class="font-medium">نیاز به EAB</span>: اعتبارنامه‌ها را در ناحیه مشتری Actalis خود تحت Manage with ACME تولید کنید. طرح رایگان فقط تک دامنه‌ای است (بدون wildcard، بدون SAN).
                         </li>
                         <li>
-                            <span class="font-medium">DigiCert ACME</span> — Paid DV/OV/EV. <span class="font-medium">Requires External Account Binding</span> (EAB key + HMAC). Get those from your DigiCert account portal and paste them in the CA settings.
+                            <span class="font-medium">DigiCert ACME</span> — پولی DV/OV/EV. <span class="font-medium">نیاز به External Account Binding</span> (کلید EAB + HMAC). آنها را از پورتال حساب DigiCert خود دریافت کنید و در تنظیمات CA وارد کنید.
                         </li>
                         <li>
-                            <span class="font-medium">Private CA</span> — Any ACME-compliant internal CA. Provide the ACME directory URL and, if your CA enforces it, an EAB credential.
+                            <span class="font-medium">Private CA</span> — هر CA داخلی سازگار با ACME. آدرس دایرکتوری ACME و در صورت اعمال CA، اعتبارنامه EAB را وارد کنید.
                         </li>
                     </ul>
                     <p class="text-xs text-muted mt-3">
-                        Use the <span class="font-medium">Test CA Connection</span> button in Settings to verify reachability and EAB before issuing a real cert — it counts against rate limits otherwise.
+                        از دکمه <span class="font-medium">آزمایش اتصال CA</span> در تنظیمات برای بررسی دسترسی و EAB قبل از صدور گواهی واقعی استفاده کنید — در غیر این صورت شامل محدودیت نرخ می‌شود.
                     </p>
                 </div>
             </section>
@@ -144,24 +144,24 @@
                         <i class="fas fa-code text-indigo-600 mr-2" aria-hidden="true"></i>API
                     </h3>
                     <p class="text-sm text-gray-700 dark:text-gray-200 mb-3">
-                        Every endpoint requires a bearer token from <a href="/settings#apikeys" class="text-primary hover:underline">Settings → API Keys</a>:
+                        هر اندپوینت به توکن Bearer از <a href="/settings#apikeys" class="text-primary hover:underline">تنظیمات → کلیدهای API</a> نیاز دارد:
                     </p>
                     <pre class="bg-gray-100 dark:bg-gray-900 text-gray-800 dark:text-gray-100 p-3 rounded text-xs overflow-x-auto border border-border"><code>Authorization: Bearer YOUR_TOKEN</code></pre>
                     <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
                         <div>
-                            <h4 class="text-sm font-medium text-foreground mb-2">Common endpoints</h4>
+                            <h4 class="text-sm font-medium text-foreground mb-2">اندپوینت‌های رایج</h4>
                             <ul class="text-xs text-gray-700 dark:text-gray-200 space-y-1 font-mono">
                                 <li><span class="text-blue-500">GET</span> /api/certificates</li>
                                 <li><span class="text-green-500">POST</span> /api/certificates/create</li>
                                 <li><span class="text-green-500">POST</span> /api/certificates/{domain}/renew</li>
-                                <li><span class="text-blue-500">GET</span> /{domain}/tls <span class="text-gray-400 not-italic">(ZIP bundle)</span></li>
+                                <li><span class="text-blue-500">GET</span> /{domain}/tls <span class="text-gray-400 not-italic">(بسته ZIP)</span></li>
                                 <li><span class="text-blue-500">GET</span> /{domain}/tls/{cert|key|chain|fullchain}</li>
                                 <li><span class="text-blue-500">GET</span> /api/activity</li>
                                 <li><span class="text-blue-500">GET</span> /api/deploy/history</li>
                             </ul>
                         </div>
                         <div>
-                            <h4 class="text-sm font-medium text-foreground mb-2">curl examples</h4>
+                            <h4 class="text-sm font-medium text-foreground mb-2">نمونه‌های curl</h4>
                             <pre class="bg-gray-100 dark:bg-gray-900 text-gray-800 dark:text-gray-100 p-3 rounded text-xs overflow-x-auto border border-border"><code># Create a certificate
 curl -X POST http://localhost:8000/api/certificates/create \
   -H "Authorization: Bearer $TOKEN" \
@@ -175,7 +175,7 @@ curl -H "Authorization: Bearer $TOKEN" \
                         </div>
                     </div>
                     <p class="text-sm text-gray-700 dark:text-gray-200 mt-3">
-                        Full reference: <a href="/docs/" target="_blank" rel="noopener" class="text-primary hover:underline">Swagger</a> (interactive try-it-out) or <a href="/redoc" target="_blank" rel="noopener" class="text-primary hover:underline">ReDoc</a> (read-only).
+                        مرجع کامل: <a href="/docs/" target="_blank" rel="noopener" class="text-primary hover:underline">Swagger</a> (امتحان تعاملی) یا <a href="/redoc" target="_blank" rel="noopener" class="text-primary hover:underline">ReDoc</a> (فقط خواندن).
                     </p>
                 </div>
             </section>
@@ -183,17 +183,17 @@ curl -H "Authorization: Bearer $TOKEN" \
             <!-- Multi-account -->
             <section id="multi-account" data-help-section class="bg-surface shadow rounded-lg">
                 <div class="px-4 py-4">
-                    <h3 class="text-lg font-semibold text-foreground mb-3">
-                        <i class="fas fa-users text-green-600 mr-2" aria-hidden="true"></i>Multi-account DNS
+                     <h3 class="text-lg font-semibold text-foreground mb-3">
+                        <i class="fas fa-users text-green-600 mr-2" aria-hidden="true"></i>DNS چند حسابه
                     </h3>
                     <p class="text-sm text-gray-700 dark:text-gray-200 mb-2">
-                        Useful when you manage zones under different cloud accounts (e.g. one Cloudflare tenant per customer, or separate Route 53 accounts for prod/staging).
+                        مفید زمانی است که مناطق را تحت حساب‌های ابری مختلف مدیریت می‌کنید (مثلاً یک مستأجر Cloudflare به ازای هر مشتری، یا حساب‌های جداگانه Route 53 برای تولید/آزمایش).
                     </p>
                     <ol class="text-sm text-gray-700 dark:text-gray-200 space-y-1 list-decimal ml-5">
-                        <li>In <a href="/settings" class="text-primary hover:underline">Settings → DNS</a>, click <span class="font-medium">Add Account</span> on the relevant provider. Name it (e.g. <code class="text-xs bg-surface-2 px-1 rounded">production</code>) and paste credentials.</li>
-                        <li>One account can be marked as default — used when a cert create request doesn't pick one explicitly.</li>
-                        <li>When creating a certificate, an account dropdown appears for providers with more than one configured account.</li>
-                        <li>From the API, pass <code class="text-xs bg-surface-2 px-1 rounded">account_id</code> alongside <code class="text-xs bg-surface-2 px-1 rounded">dns_provider</code>.</li>
+                        <li>در <a href="/settings" class="text-primary hover:underline">تنظیمات → DNS</a>، روی <span class="font-medium">افزودن حساب</span> در ارائه‌دهنده مربوطه کلیک کنید. آن را نام‌گذاری کنید (مثلاً <code class="text-xs bg-surface-2 px-1 rounded">production</code>) و اعتبارنامه‌ها را وارد کنید.</li>
+                        <li>یک حساب می‌تواند به عنوان پیش‌فرض علامت‌گذاری شود — زمانی استفاده می‌شود که درخواست ایجاد گواهی به طور صریح یکی را انتخاب نکند.</li>
+                        <li>هنگام ایجاد گواهی، برای ارائه‌دهندگانی که بیش از یک حساب پیکربندی شده دارند، یک منوی کشویی حساب ظاهر می‌شود.</li>
+                        <li>از طریق API، <code class="text-xs bg-surface-2 px-1 rounded">account_id</code> را در کنار <code class="text-xs bg-surface-2 px-1 rounded">dns_provider</code> ارسال کنید.</li>
                     </ol>
                 </div>
             </section>
@@ -201,15 +201,15 @@ curl -H "Authorization: Bearer $TOKEN" \
             <!-- Backup -->
             <section id="backup-recovery" data-help-section class="bg-surface shadow rounded-lg">
                 <div class="px-4 py-4">
-                    <h3 class="text-lg font-semibold text-foreground mb-3">
-                        <i class="fas fa-archive text-amber-600 mr-2" aria-hidden="true"></i>Backup &amp; Restore
+                     <h3 class="text-lg font-semibold text-foreground mb-3">
+                        <i class="fas fa-archive text-amber-600 mr-2" aria-hidden="true"></i>پشتیبان‌گیری و بازیابی
                     </h3>
                     <ul class="text-sm text-gray-700 dark:text-gray-200 space-y-1.5">
-                        <li><span class="font-medium">What's in a backup:</span> <code class="text-xs bg-surface-2 px-1 rounded">settings.json</code> (DNS credentials, CA config, domains, users) plus every certificate file (<code class="text-xs">.pem</code>, <code class="text-xs">.key</code>, full chain). One ZIP, atomic.</li>
-                        <li><span class="font-medium">Automatic:</span> A snapshot is taken before each configuration change, restore, and before destructive ops.</li>
-                        <li><span class="font-medium">Manual:</span> <a href="/settings#backup" class="text-primary hover:underline">Settings → Backup</a> → <span class="font-medium">Create Backup</span>. Download for off-host storage.</li>
-                        <li><span class="font-medium">Restore:</span> Upload or pick an existing backup, click Restore. A pre-restore snapshot is taken automatically so you can roll back.</li>
-                        <li><span class="font-medium">Retention:</span> Last 10 by default, configurable.</li>
+                        <li><span class="font-medium">محتوای پشتیبان:</span> <code class="text-xs bg-surface-2 px-1 rounded">settings.json</code> (اعتبارنامه‌های DNS، پیکربندی CA، دامنه‌ها، کاربران) به همراه هر فایل گواهی (<code class="text-xs">.pem</code>، <code class="text-xs">.key</code>، زنجیره کامل). یک ZIP، اتمیک.</li>
+                        <li><span class="font-medium">خودکار:</span> قبل از هر تغییر پیکربندی، بازیابی و قبل از عملیات مخرب، اسنپ‌شات تهیه می‌شود.</li>
+                        <li><span class="font-medium">دستی:</span> <a href="/settings#backup" class="text-primary hover:underline">تنظیمات → پشتیبان‌گیری</a> → <span class="font-medium">ایجاد پشتیبان</span>. برای ذخیره‌سازی خارج از سرور دانلود کنید.</li>
+                        <li><span class="font-medium">بازیابی:</span> یک پشتیبان موجود را آپلود یا انتخاب کنید و روی بازیابی کلیک کنید. قبل از بازیابی به طور خودکار اسنپ‌شات تهیه می‌شود تا بتوانید بازگردانید.</li>
+                        <li><span class="font-medium">نگهداری:</span> ۱۰ مورد آخر به طور پیش‌فرض، قابل پیکربندی.</li>
                     </ul>
                 </div>
             </section>
@@ -217,33 +217,33 @@ curl -H "Authorization: Bearer $TOKEN" \
             <!-- Troubleshooting -->
             <section id="troubleshooting" data-help-section class="bg-surface shadow rounded-lg">
                 <div class="px-4 py-4">
-                    <h3 class="text-lg font-semibold text-foreground mb-3">
-                        <i class="fas fa-tools text-orange-600 mr-2" aria-hidden="true"></i>Troubleshooting
+                     <h3 class="text-lg font-semibold text-foreground mb-3">
+                        <i class="fas fa-tools text-orange-600 mr-2" aria-hidden="true"></i>عیب‌یابی
                     </h3>
                     <dl class="text-sm text-gray-700 dark:text-gray-200 space-y-3">
                         <div>
-                            <dt class="font-medium text-foreground">DNS provider authentication failed</dt>
-                            <dd class="text-muted mt-0.5">Token may be wrong, expired, or scoped too narrowly. Re-check it in your provider's console and confirm it can edit DNS records on the target zone. The <span class="font-medium">Test Connection</span> button on each provider card validates without burning a real ACME attempt.</dd>
+                            <dt class="font-medium text-foreground">احراز هویت ارائه‌دهنده DNS ناموفق بود</dt>
+                            <dd class="text-muted mt-0.5">توکن ممکن است نادرست، منقضی یا خیلی محدود باشد. آن را در کنسول ارائه‌دهنده خود بررسی کنید و مطمئن شوید که می‌تواند رکوردهای DNS را در منطقه هدف ویرایش کند. دکمه <span class="font-medium">آزمایش اتصال</span> در هر کارت ارائه‌دهنده بدون صرف یک تلاش ACME واقعی اعتبارسنجی می‌کند.</dd>
                         </div>
                         <div>
-                            <dt class="font-medium text-foreground">Certificate creation hangs or times out</dt>
-                            <dd class="text-muted mt-0.5">Usually slow DNS propagation. Most providers settle within a minute or two, some take up to 10. If a particular provider is reliably slow, raise <code class="text-xs bg-surface-2 px-1 rounded">dns_propagation_seconds</code> in Settings.</dd>
+                            <dt class="font-medium text-foreground">ایجاد گواهی معلق می‌ماند یا منقضی می‌شود</dt>
+                            <dd class="text-muted mt-0.5">معمولاً انتشار DNS کند است. بیشتر ارائه‌دهندگان ظرف یک یا دو دقیقه تثبیت می‌شوند، برخی تا ۱۰ دقیقه طول می‌کشند. اگر یک ارائه‌دهنده خاص به طور قابل اعتمادی کند است، <code class="text-xs bg-surface-2 px-1 rounded">dns_propagation_seconds</code> را در تنظیمات افزایش دهید.</dd>
                         </div>
                         <div>
-                            <dt class="font-medium text-foreground">Let's Encrypt rate limit hit</dt>
-                            <dd class="text-muted mt-0.5">50 certs per registered domain per week. The error text from acme is included in the activity log. Select the "Let's Encrypt (Staging)" Certificate Authority for testing — it has generous rate limits and uses a separate trust anchor (browsers won't trust the cert, which is the point).</dd>
+                            <dt class="font-medium text-foreground">محدودیت نرخ Let's Encrypt برخورد کرد</dt>
+                            <dd class="text-muted mt-0.5">۵۰ گواهی به ازای هر دامنه ثبت شده در هفته. متن خطا از acme در لاگ فعالیت درج شده است. "Let's Encrypt (Staging)" را برای آزمایش انتخاب کنید — محدودیت نرخ سخاوتمندانه دارد و از یک.anchor اعتماد جداگانه استفاده می‌کند (مرورگرها به گواهی اعتماد نمی‌کنند، که دقیقاً هدف است).</dd>
                         </div>
                         <div>
-                            <dt class="font-medium text-foreground">Deployment status keeps showing "unknown"</dt>
-                            <dd class="text-muted mt-0.5">CertMate probes the cert at the deployment endpoint(s) you configured. If none are set, status stays unknown — that's expected. Configure deployment targets in <a href="/settings#deploy" class="text-primary hover:underline">Settings → Deploy</a> or click <span class="font-medium">Check All</span> from the dashboard.</dd>
+                            <dt class="font-medium text-foreground">وضعیت استقرار همچنان "ناشناخته" نشان می‌دهد</dt>
+                            <dd class="text-muted mt-0.5">CertMate گواهی را در اندپوینت(های) استقراری که پیکربندی کرده‌اید بررسی می‌کند. اگر هیچ‌کدام تنظیم نشده باشد، وضعیت ناشناخته باقی می‌ماند — این طبیعی است. اهداف استقرار را در <a href="/settings#deploy" class="text-primary hover:underline">تنظیمات → استقرار</a> پیکربندی کنید یا از داشبورد <span class="font-medium">بررسی همه</span> را کلیک کنید.</dd>
                         </div>
                         <div>
-                            <dt class="font-medium text-foreground">UI looks broken / Alpine.js failed to load</dt>
-                            <dd class="text-muted mt-0.5">A red banner appears at the top of the page when this happens. Usually a strict CSP blocking the Alpine CDN, or an offline container. Try a hard refresh (<kbd class="text-xs bg-surface-2 px-1 rounded">Cmd+Shift+R</kbd> / <kbd class="text-xs bg-surface-2 px-1 rounded">Ctrl+F5</kbd>) and check the browser console for the blocked URL.</dd>
+                            <dt class="font-medium text-foreground">رابط کاربری خراب به نظر می‌رسد / Alpine.js بارگذاری نشد</dt>
+                            <dd class="text-muted mt-0.5">هنگام وقوع این مشکل، یک بنر قرمز در بالای صفحه ظاهر می‌شود. معمولاً CSP سختگیرانه CDN Alpine را مسدود می‌کند، یا کانتینر آفلاین است. یک بروزرسانی سخت (<kbd class="text-xs bg-surface-2 px-1 rounded">Cmd+Shift+R</kbd> / <kbd class="text-xs bg-surface-2 px-1 rounded">Ctrl+F5</kbd>) امتحان کنید و URL مسدود شده را در کنسول مرورگر بررسی کنید.</dd>
                         </div>
                     </dl>
                     <p class="text-xs text-muted mt-4">
-                        Liveness: <a href="/health" target="_blank" rel="noopener" class="text-primary hover:underline">/health</a> returns JSON with scheduler, disk, and cert directory checks — useful as an external probe.
+                        زنده بودن: <a href="/health" target="_blank" rel="noopener" class="text-primary hover:underline">/health</a> خروجی JSON با بررسی‌های زمان‌بند، دیسک و دایرکتوری گواهی برمی‌گرداند — به عنوان sond خارجی مفید است.
                     </p>
                 </div>
             </section>
@@ -251,34 +251,34 @@ curl -H "Authorization: Bearer $TOKEN" \
             <!-- Report an issue -->
             <section id="report-issue" data-help-section class="bg-surface shadow rounded-lg">
                 <div class="px-4 py-4">
-                    <h3 class="text-lg font-semibold text-foreground mb-3">
-                        <i class="fab fa-github text-label mr-2" aria-hidden="true"></i>Report an issue
+                     <h3 class="text-lg font-semibold text-foreground mb-3">
+                        <i class="fab fa-github text-label mr-2" aria-hidden="true"></i>گزارش مشکل
                     </h3>
                     <p class="text-sm text-gray-700 dark:text-gray-200 mb-2">
-                        When something goes wrong, including the items below makes the fix faster — most reports stall on missing context, not on hard root causes.
+                        وقتی مشکلی پیش می‌آید، شامل کردن موارد زیر تعمیر را سریع‌تر می‌کند — بیشتر گزارش‌ها به دلیل عدم وجود زمینه متوقف می‌شوند، نه به دلیل دلایل سخت ریشه‌ای.
                     </p>
                     <ul class="text-sm text-gray-700 dark:text-gray-200 space-y-1 list-disc ml-5">
-                        <li>CertMate version (footer of every page, or <code class="text-xs bg-surface-2 px-1 rounded">/health</code>)</li>
-                        <li>How CertMate is running (Docker tag / Kubernetes / bare gunicorn) and host OS</li>
-                        <li>Steps to reproduce, with the domain or operation involved if relevant</li>
-                        <li>What you expected vs. what happened</li>
-                        <li>Browser console errors (<kbd class="text-xs bg-surface-2 px-1 rounded">F12</kbd> → Console) for UI issues</li>
-                        <li>Container or gunicorn logs around the failure timestamp (redact tokens before pasting)</li>
-                        <li><a href="/health" target="_blank" rel="noopener" class="text-primary hover:underline">/health</a> JSON output</li>
-                        <li>Screenshots help — especially for layout glitches</li>
+                        <li>نسخه CertMate (پایین هر صفحه، یا <code class="text-xs bg-surface-2 px-1 rounded">/health</code>)</li>
+                        <li>CertMate چگونه اجرا می‌شود (تگ Docker / Kubernetes / gunicorn خام) و سیستم عامل میزبان</li>
+                        <li>مراحل بازتولید، با دامنه یا عملیات مرتبط در صورت ارتباط</li>
+                        <li>آنچه انتظار داشتید در مقابل آنچه اتفاق افتاد</li>
+                        <li>خطاهای کنسول مرورگر (<kbd class="text-xs bg-surface-2 px-1 rounded">F12</kbd> → Console) برای مشکلات رابط کاربری</li>
+                        <li>لاگ‌های کانتینر یا gunicorn در اطراف زمان‌بندی خطا (توکن‌ها را قبل از کپی کردن ویرایش کنید)</li>
+                        <li><a href="/health" target="_blank" rel="noopener" class="text-primary hover:underline">/health</a> خروجی JSON</li>
+                        <li>اسکرین‌شات‌ها کمک می‌کنند — به ویژه برای مشکلات چیدمان</li>
                     </ul>
                     <div class="mt-4 flex flex-wrap gap-3">
                         <a href="https://github.com/fabriziosalmi/certmate/issues/new/choose"
                            target="_blank" rel="noopener"
                            class="inline-flex items-center px-4 py-2 bg-gray-900 hover:bg-gray-800 text-white text-sm font-medium rounded-md transition-colors">
                             <i class="fab fa-github mr-2" aria-hidden="true"></i>
-                            Open an issue on GitHub
+                            باز کردن issue در GitHub
                             <i class="fas fa-external-link-alt ml-2 text-xs" aria-hidden="true"></i>
                         </a>
                         <button type="button" onclick="CertMate.copyDiagnosticsSnapshot(this)"
                                 class="inline-flex items-center px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-md transition-colors">
                             <i class="fas fa-clipboard mr-2" aria-hidden="true"></i>
-                            Copy Diagnostic Snapshot
+                            کپی اسنپ‌شات عیب‌یابی
                         </button>
                     </div>
                 </div>
@@ -287,13 +287,13 @@ curl -H "Authorization: Bearer $TOKEN" \
             <!-- What's new (changelog excerpt) -->
             <section id="whats-new" data-help-section class="bg-surface shadow rounded-lg">
                 <div class="px-4 py-4">
-                    <h3 class="text-lg font-semibold text-foreground mb-2">
-                        <i class="fas fa-star text-yellow-500 mr-2" aria-hidden="true"></i>What's new
+                     <h3 class="text-lg font-semibold text-foreground mb-2">
+                        <i class="fas fa-star text-yellow-500 mr-2" aria-hidden="true"></i>چه جدید است
                     </h3>
                     <p class="text-sm text-gray-700 dark:text-gray-200">
-                        Release notes for every version live in
+                        یادداشت‌های انتشار برای هر نسخه در
                         <a href="https://github.com/fabriziosalmi/certmate/blob/main/RELEASE_NOTES.md" target="_blank" rel="noopener" class="text-primary hover:underline">RELEASE_NOTES.md</a>
-                        on the repository — kept in sync with what the running image actually contains.
+                        در مخزن موجود است — با آنچه تصویر در حال اجرا واقعاً شامل می‌شود همگام نگه داشته می‌شود.
                     </p>
                 </div>
             </section>
@@ -301,14 +301,14 @@ curl -H "Authorization: Bearer $TOKEN" \
             <!-- No-results placeholder for the in-page search. -->
             <div id="noHelpResults" class="hidden bg-surface shadow rounded-lg p-8 text-center" role="status" aria-live="polite">
                 <i class="fas fa-search text-3xl text-gray-300 dark:text-gray-600 mb-3 block" aria-hidden="true"></i>
-                <p class="text-sm font-medium text-gray-700 dark:text-gray-200">No help sections match your search.</p>
-                <p class="mt-1 text-xs text-muted">Try a different term, or clear the search to see the full guide.</p>
+                <p class="text-sm font-medium text-gray-700 dark:text-gray-200">هیچ بخش راهنمایی با جستجوی شما مطابقت ندارد.</p>
+                <p class="mt-1 text-xs text-muted">یک عبارت دیگر امتحان کنید، یا جستجو را پاک کنید تا راهنمای کامل را ببینید.</p>
             </div>
 
             <!-- Footer: one-line about + link. No marketing copy — the
                  source code is the documentation of intent. -->
             <p class="text-xs text-center text-gray-400 dark:text-gray-500 mt-6 px-4">
-                CertMate is open source.
+                CertMate یک پروژه متن‌باز است.
                 <a href="https://github.com/fabriziosalmi/certmate" target="_blank" rel="noopener" class="hover:text-primary underline">github.com/fabriziosalmi/certmate</a>
             </p>
         </div>

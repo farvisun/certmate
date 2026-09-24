@@ -13,11 +13,10 @@
             </div>
             <div class="text-center">
                 <h2 class="text-3xl font-extrabold text-foreground sm:text-4xl">
-                    Welcome to CertMate
+                    به CertMate خوش آمدید
                 </h2>
                 <p class="mt-4 text-lg text-muted">
-                    Your automated SSL certificate management system is ready. Let's get started by creating your
-                    administrator account.
+                    سیستم مدیریت خودکار گواهی SSL شما آماده است. بیایید با ایجاد حساب مدیر شروع کنیم.
                 </p>
             </div>
         </div>
@@ -26,7 +25,7 @@
             <form id="setupForm" class="space-y-6">
                 <div>
                     <label for="username" class="block text-sm font-semibold text-label">
-                        Admin Username
+                        نام کاربری مدیر
                     </label>
                     <div class="mt-1 relative rounded-md shadow-sm">
                         <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
@@ -40,7 +39,7 @@
 
                 <div>
                     <label for="password" class="block text-sm font-semibold text-label">
-                        Admin Password
+                        رمز عبور مدیر
                     </label>
                     <div class="mt-1 relative rounded-md shadow-sm">
                         <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
@@ -52,14 +51,14 @@
                     </div>
                     <p class="mt-2 text-xs text-muted">
                         <i class="fas fa-info-circle mr-1"></i>
-                        Min 12 characters, at least 1 digit and 1 symbol.
+                        حداقل ۱۲ کاراکتر، حداقل ۱ رقم و ۱ نماد.
                     </p>
                 </div>
 
                 <div class="pt-4">
                     <button type="submit"
                         class="w-full flex justify-center py-4 px-4 border border-transparent rounded-xl shadow-lg text-lg font-bold text-white bg-brand-500 hover:bg-brand-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-brand-500 btn-press transition-all duration-200">
-                        Complete Initial Setup
+                        تکمیل راه‌اندازی اولیه
                     </button>
                 </div>
             </form>
@@ -68,7 +67,7 @@
         <div class="px-6 py-4 bg-background border-t border-gray-100 dark:border-white/5">
             <div class="flex items-center justify-between text-xs text-muted">
                 <span><i class="fas fa-code-branch mr-1"></i>CertMate</span>
-                <span><i class="fas fa-lock mr-1"></i>Secure Installation</span>
+                <span><i class="fas fa-lock mr-1"></i>نصب امن</span>
             </div>
         </div>
     </div>
@@ -97,10 +96,10 @@
                 });
                 window.location.href = '/login';
             } else {
-                alert(data.error || 'Setup failed');
+                alert(data.error || 'راه‌اندازی ناموفق بود');
             }
         } catch (err) {
-            alert('Network error during setup');
+            alert('خطای شبکه در حین راه‌اندازی');
         }
     });
 </script>

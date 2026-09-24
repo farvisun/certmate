@@ -4,23 +4,23 @@
              class="bg-surface border-border rounded-lg shadow-sm border p-6 mt-6">
 
             <div class="flex items-center justify-between mb-4">
-                <h3 class="text-lg font-semibold text-foreground flex items-center">
+                 <h3 class="text-lg font-semibold text-foreground flex items-center">
                     <i class="fas fa-id-badge mr-2 text-primary"></i>
-                    Single Sign-On (OIDC)
+                    ورود تک‌نامه‌ای (OIDC)
                 </h3>
-                <span class="text-xs bg-indigo-100 dark:bg-indigo-900/30 text-indigo-800 dark:text-indigo-300 px-2 py-1 rounded-full">
-                    Identity Provider
+                 <span class="text-xs bg-indigo-100 dark:bg-indigo-900/30 text-indigo-800 dark:text-indigo-300 px-2 py-1 rounded-full">
+                    ارائه‌دهنده هویت
                 </span>
             </div>
 
-            <p class="text-muted text-sm mb-6">
-                Authenticate users against an external OpenID Connect provider (Keycloak, Authentik, Okta, Google Workspace, ...). Local authentication and API keys keep working alongside SSO. Configure the redirect URI in your provider to
+             <p class="text-muted text-sm mb-6">
+                احراز هویت کاربران بر اساس ارائه‌دهنده OpenID Connect خارجی (Keycloak, Authentik, Okta, Google Workspace, ...). احراز هویت محلی و کلیدهای API در کنار SSO به کار خود ادامه می‌دهند. URI بازگشت را در ارائه‌دهنده خود پیکربندی کنید به
                 <code class="font-mono px-1 py-0.5 rounded bg-surface-2" x-text="redirectUriHint"></code>.
             </p>
 
             <template x-if="loading">
                 <div class="text-center py-4 text-muted text-sm">
-                    <i class="fas fa-spinner fa-spin mr-2"></i> Loading SSO configuration...
+                     <i class="fas fa-spinner fa-spin mr-2"></i> در حال بارگذاری پیکربندی SSO...
                 </div>
             </template>
 
@@ -32,10 +32,10 @@
                         <label class="flex items-center space-x-2">
                             <input type="checkbox" x-model="cfg.enabled"
                                    class="h-4 w-4 text-primary focus:ring-primary border-border rounded">
-                            <span class="text-sm font-medium text-label">Enable OIDC/SSO</span>
+                             <span class="text-sm font-medium text-label">فعال‌سازی OIDC/SSO</span>
                         </label>
                         <div>
-                            <label class="block text-xs text-muted mb-1">Provider display name</label>
+                             <label class="block text-xs text-muted mb-1">نام نمایشی ارائه‌دهنده</label>
                             <input type="text" x-model="cfg.provider_name" placeholder="SSO"
                                    class="w-full px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white">
                         </div>
@@ -48,15 +48,15 @@
                             <input type="url" x-model="cfg.issuer_url"
                                    placeholder="https://idp.example.com/realms/main"
                                    class="w-full px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white">
-                            <p class="mt-1 text-xs text-muted">Base URL of the IdP; discovery doc is fetched from <code class="font-mono">{issuer}/.well-known/openid-configuration</code>.</p>
+                             <p class="mt-1 text-xs text-muted">URL پایه IdP؛ سند discovery از <code class="font-mono">{issuer}/.well-known/openid-configuration</code> دریافت می‌شود.</p>
                         </div>
                         <div>
-                            <label class="block text-xs text-muted mb-1">Client ID</label>
+                             <label class="block text-xs text-muted mb-1">شناسه کلاینت</label>
                             <input type="text" x-model="cfg.client_id"
                                    class="w-full px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white">
                         </div>
                         <div class="md:col-span-2">
-                            <label class="block text-xs text-muted mb-1">Client Secret</label>
+                             <label class="block text-xs text-muted mb-1">رمز کلاینت</label>
                             <input type="password" x-model="cfg.client_secret"
                                    autocomplete="new-password"
                                    class="w-full px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white">
@@ -67,35 +67,35 @@
                     <!-- Redirect override + scopes -->
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <div>
-                            <label class="block text-xs text-muted mb-1">Redirect URI override (optional)</label>
+                             <label class="block text-xs text-muted mb-1">بازنویسی Redirect URI (اختیاری)</label>
                             <input type="url" x-model="cfg.redirect_uri_override"
                                    :placeholder="redirectUriHint"
                                    class="w-full px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white">
-                            <p class="mt-1 text-xs text-muted">Set only if your IdP requires an absolute URL that differs from the request host (e.g. behind a CDN).</p>
+                             <p class="mt-1 text-xs text-muted">فقط در صورتی تنظیم کنید که IdP شما به URL مطلقی نیاز داشته باشد که با هاست درخواست متفاوت است (مثلاً پشت CDN).</p>
                         </div>
                         <div>
-                            <label class="block text-xs text-muted mb-1">Scopes (space- or comma-separated)</label>
+                             <label class="block text-xs text-muted mb-1">Scopes (جدا شده با فاصله یا کاما)</label>
                             <input type="text" x-model="scopesString"
                                    placeholder="openid email profile groups"
                                    class="w-full px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white">
-                            <p class="mt-1 text-xs text-muted"><code class="font-mono">openid</code> is required; the rest depend on your IdP.</p>
+                             <p class="mt-1 text-xs text-muted"><code class="font-mono">openid</code> الزامی است؛ بقیه به IdP شما بستگی دارند.</p>
                         </div>
                     </div>
 
                     <!-- Claim mapping -->
                     <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                         <div>
-                            <label class="block text-xs text-muted mb-1">Username claim</label>
+                             <label class="block text-xs text-muted mb-1">claim نام کاربری</label>
                             <input type="text" x-model="cfg.username_claim"
                                    class="w-full px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white">
                         </div>
                         <div>
-                            <label class="block text-xs text-muted mb-1">Email claim</label>
+                             <label class="block text-xs text-muted mb-1">claim ایمیل</label>
                             <input type="text" x-model="cfg.email_claim"
                                    class="w-full px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white">
                         </div>
                         <div>
-                            <label class="block text-xs text-muted mb-1">Role claim</label>
+                             <label class="block text-xs text-muted mb-1">claim نقش</label>
                             <input type="text" x-model="cfg.role_claim"
                                    class="w-full px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white">
                         </div>
@@ -104,19 +104,19 @@
                     <!-- Role mappings list -->
                     <div>
                         <div class="flex items-center justify-between mb-2">
-                            <h4 class="text-sm font-semibold text-label">
-                                <i class="fas fa-list mr-1"></i> Role mappings
+                             <h4 class="text-sm font-semibold text-label">
+                                <i class="fas fa-list mr-1"></i> نگاشت نقش‌ها
                                 <span class="ml-1 text-gray-400" title="First match wins. The claim value is matched against the role claim (handles lists and scalars).">
                                     <i class="fas fa-info-circle"></i>
                                 </span>
                             </h4>
                             <button type="button" @click="addMapping()"
                                     class="text-sm text-indigo-600 dark:text-indigo-400 hover:underline">
-                                <i class="fas fa-plus mr-1"></i> Add row
+                                <i class="fas fa-plus mr-1"></i> افزودن ردیف
                             </button>
                         </div>
                         <template x-if="!cfg.role_mappings || cfg.role_mappings.length === 0">
-                            <p class="text-xs text-muted italic">No mappings configured — every user falls through to the default role.</p>
+                             <p class="text-xs text-muted italic">هیچ نگاشتی پیکربندی نشده — هر کاربر به نقش پیش‌فرض منتقل می‌شود.</p>
                         </template>
                         <div class="space-y-2">
                             <template x-for="(m, idx) in cfg.role_mappings" :key="idx">
@@ -144,7 +144,7 @@
                     <!-- Provisioning options -->
                     <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                         <div>
-                            <label class="block text-xs text-muted mb-1">Default role</label>
+                             <label class="block text-xs text-muted mb-1">نقش پیش‌فرض</label>
                             <select x-model="cfg.default_role"
                                     title="Role assigned when no mapping rule matches"
                                     class="w-full px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white">
@@ -156,22 +156,22 @@
                         <label class="flex items-center space-x-2 mt-6">
                             <input type="checkbox" x-model="cfg.auto_create_users"
                                    class="h-4 w-4 text-primary focus:ring-primary border-border rounded">
-                            <span class="text-sm font-medium text-label">Auto-create users on first login (JIT)</span>
+                             <span class="text-sm font-medium text-label">ایجاد خودکار کاربران در اولین ورود (JIT)</span>
                         </label>
                         <label class="flex items-center space-x-2 mt-6">
                             <input type="checkbox" x-model="cfg.link_by_email"
                                    class="h-4 w-4 text-primary focus:ring-primary border-border rounded">
-                            <span class="text-sm font-medium text-label">Link to existing local user by email</span>
+                             <span class="text-sm font-medium text-label">پیوند به کاربر محلی موجود بر اساس ایمیل</span>
                         </label>
                     </div>
 
                     <!-- Post-logout redirect -->
                     <div>
-                        <label class="block text-xs text-muted mb-1">Post-logout redirect URI (optional)</label>
+                         <label class="block text-xs text-muted mb-1">Redirect URI پس از خروج (اختیاری)</label>
                         <input type="url" x-model="cfg.post_logout_redirect_uri"
                                placeholder="https://example.com/"
                                class="w-full px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white">
-                        <p class="mt-1 text-xs text-muted">Where to send the user after the IdP's end-session endpoint. Required by some providers for SLO.</p>
+                         <p class="mt-1 text-xs text-muted">مکان ارسال کاربر پس از endpoint پایان نشست IdP. توسط برخی ارائه‌دهندگان برای SLO الزامی است.</p>
                     </div>
 
                     <!-- Save button -->
@@ -179,7 +179,7 @@
                         <button type="button" @click="save()" :disabled="saving"
                                 class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-md disabled:opacity-50">
                             <i class="fas mr-1" :class="saving ? 'fa-spinner fa-spin' : 'fa-save'"></i>
-                            Save SSO settings
+                             ذخیره تنظیمات SSO
                         </button>
                     </div>
                 </div>

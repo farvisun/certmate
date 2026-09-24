@@ -115,21 +115,21 @@
                 '<div class="w-16 h-16 bg-warning-surface rounded-full flex items-center justify-center mx-auto mb-4">' +
                     '<i class="fas fa-exclamation-triangle text-warning-fg text-2xl"></i>' +
                 '</div>' +
-                '<h2 id="recoveryPromptTitle" class="text-xl font-bold text-foreground mb-2">Existing Data Detected</h2>' +
+                '<h2 id="recoveryPromptTitle" class="text-xl font-bold text-foreground mb-2">داده‌های موجود شناسایی شد</h2>' +
                 '<p class="text-sm text-muted mb-6">' +
-                    'CertMate found certificates on this volume but no matching configuration. ' +
-                    'This usually happens after a downgrade. You can restore the latest backup to recover your users and domains, or start fresh.' +
+                    'CertMate گواهی‌هایی را در این volume پیدا کرد اما پیکربندی مطابقی وجود ندارد. ' +
+                    'این معمولاً پس از downgrade رخ می‌دهد. می‌توانید آخرین پشتیبان را برای بازیابی کاربران و دامنه‌های خود بازیابی کنید، یا از نو شروع کنید.' +
                 '</p>' +
                 '<div class="space-y-3">' +
                     '<button id="recoveryRestore" class="w-full px-6 py-3 bg-primary hover:bg-secondary text-white font-medium rounded-lg text-sm transition">' +
-                        '<i class="fas fa-archive mr-2"></i>Restore from Backup' +
+                        '<i class="fas fa-archive mr-2"></i>بازیابی از پشتیبان' +
                     '</button>' +
                     '<button id="recoveryFresh" class="w-full px-6 py-3 border border-border text-label font-medium rounded-lg text-sm hover:bg-gray-50 dark:hover:bg-gray-700 transition">' +
-                        'Start Fresh Setup' +
+                        'شروع راه‌اندازی نو' +
                     '</button>' +
                 '</div>' +
                 '<p class="mt-4 text-xs text-gray-400">' +
-                    'Need help? Check the logs for <code class="bg-surface-2 px-1 rounded">DOWNGRADE DETECTED</code> or run <code class="bg-surface-2 px-1 rounded">scripts/reset_admin_password.py</code> inside the container to regain access.' +
+                    'نیاز به کمک دارید؟ لاگ‌ها را برای <code class="bg-surface-2 px-1 rounded">DOWNGRADE DETECTED</code> بررسی کنید یا <code class="bg-surface-2 px-1 rounded">scripts/reset_admin_password.py</code> را در داخل کانتینر اجرا کنید تا به دسترسی دست پیدا کنید.' +
                 '</p>' +
             '</div>';
         document.body.appendChild(overlay);
@@ -174,12 +174,12 @@
                 '<div class="px-6 py-5 border-b border-border">' +
                     '<div class="flex items-center justify-between">' +
                         '<div>' +
-                            '<h2 id="wizardTitle" class="text-xl font-bold text-foreground">Welcome to CertMate</h2>' +
-                            '<p class="text-sm text-muted mt-1">Let\'s get you set up in a few steps</p>' +
+                            '<h2 id="wizardTitle" class="text-xl font-bold text-foreground">به CertMate خوش آمدید</h2>' +
+                            '<p class="text-sm text-muted mt-1">بیایید در چند مرحله راه‌اندازی کنیم</p>' +
                         '</div>' +
                         '<div class="flex items-center gap-3">' +
                             '<div class="flex items-center gap-1.5" id="wizardSteps"></div>' +
-                            '<button type="button" id="wizClose" aria-label="Dismiss setup wizard" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 text-2xl leading-none px-1">&times;</button>' +
+                            '<button type="button" id="wizClose" aria-label="بستن راهنمای راه‌اندازی" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 text-2xl leading-none px-1">&times;</button>' +
                         '</div>' +
                     '</div>' +
                 '</div>' +
@@ -246,20 +246,20 @@
                 '<div class="w-16 h-16 bg-info-surface rounded-full flex items-center justify-center mx-auto mb-4">' +
                     '<i class="fas fa-envelope text-info-fg text-2xl"></i>' +
                 '</div>' +
-                '<h3 class="text-lg font-semibold text-foreground">Contact Email</h3>' +
-                '<p class="text-sm text-muted mt-1">Required by certificate authorities for important notifications</p>' +
+                '<h3 class="text-lg font-semibold text-foreground">ایمیل تماس</h3>' +
+                '<p class="text-sm text-muted mt-1">توسط مراجع صدور گواهی برای اعلان‌های مهم استفاده می‌شود</p>' +
             '</div>' +
             '<div>' +
-                '<label for="wizEmail" class="block text-sm font-medium text-label mb-2">Email Address</label>' +
+                '<label for="wizEmail" class="block text-sm font-medium text-label mb-2">آدرس ایمیل</label>' +
                 '<input type="email" id="wizEmail" value="' + escapeHtml(state.email) + '" placeholder="admin@example.com" ' +
                        'class="w-full px-4 py-3 border text-foreground border-border rounded-lg bg-input focus:ring-2 focus:ring-primary focus:border-primary text-sm" required>' +
-                '<p class="mt-2 text-xs text-gray-400"><i class="fas fa-info-circle mr-1"></i>Used by Let\'s Encrypt for expiry warnings and account recovery</p>' +
+                '<p class="mt-2 text-xs text-gray-400"><i class="fas fa-info-circle mr-1"></i>توسط Let\'s Encrypt برای هشدارهای انقضا و بازیابی حساب استفاده می‌شود</p>' +
             '</div>';
 
         var footer = document.getElementById('wizardFooter');
         footer.innerHTML =
-            '<button type="button" id="wizSkip" class="text-sm text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">Skip wizard</button>' +
-            '<button type="button" id="wizNext1" class="px-6 py-2.5 bg-primary hover:bg-secondary text-white font-medium rounded-lg text-sm transition">Next <i class="fas fa-arrow-right ml-1"></i></button>';
+            '<button type="button" id="wizSkip" class="text-sm text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">رد کردن راهنما</button>' +
+            '<button type="button" id="wizNext1" class="px-6 py-2.5 bg-primary hover:bg-secondary text-white font-medium rounded-lg text-sm transition">بعدی <i class="fas fa-arrow-right ml-1"></i></button>';
 
         document.getElementById('wizNext1').addEventListener('click', function() {
             var email = document.getElementById('wizEmail').value.trim();
@@ -270,7 +270,7 @@
                     var errEl = document.createElement('p');
                     errEl.id = 'wizEmailError';
                     errEl.className = 'text-xs text-red-500 mt-1';
-                    errEl.textContent = 'Please enter a valid email address';
+                    errEl.textContent = 'لطفاً یک آدرس ایمیل معتبر وارد کنید';
                     document.getElementById('wizEmail').parentNode.appendChild(errEl);
                 }
                 return;
@@ -297,8 +297,8 @@
                 '<div class="w-16 h-16 bg-success-surface rounded-full flex items-center justify-center mx-auto mb-4">' +
                     '<i class="fas fa-server text-success-fg text-2xl"></i>' +
                 '</div>' +
-                '<h3 class="text-lg font-semibold text-foreground">DNS Provider</h3>' +
-                '<p class="text-sm text-muted mt-1">Select where your domains are managed</p>' +
+                '<h3 class="text-lg font-semibold text-foreground">ارائه‌دهنده DNS</h3>' +
+                '<p class="text-sm text-muted mt-1">انتخاب کنید دامنه‌های شما کجا مدیریت می‌شوند</p>' +
             '</div>' +
             '<div class="grid grid-cols-2 sm:grid-cols-3 gap-2" id="providerGrid">';
 
@@ -332,8 +332,8 @@
 
         var footer = document.getElementById('wizardFooter');
         footer.innerHTML =
-            '<button type="button" id="wizBack2" class="px-4 py-2 text-sm text-muted hover:text-foreground"><i class="fas fa-arrow-left mr-1"></i> Back</button>' +
-            '<button type="button" id="wizNext2" class="px-6 py-2.5 bg-primary hover:bg-secondary text-white font-medium rounded-lg text-sm transition ' + (!state.provider ? 'opacity-50 cursor-not-allowed' : '') + '" ' + (!state.provider ? 'disabled' : '') + '>Save & Finish <i class="fas fa-check ml-1"></i></button>';
+            '<button type="button" id="wizBack2" class="px-4 py-2 text-sm text-muted hover:text-foreground"><i class="fas fa-arrow-left mr-1"></i> بازگشت</button>' +
+            '<button type="button" id="wizNext2" class="px-6 py-2.5 bg-primary hover:bg-secondary text-white font-medium rounded-lg text-sm transition ' + (!state.provider ? 'opacity-50 cursor-not-allowed' : '') + '" ' + (!state.provider ? 'disabled' : '') + '>ذخیره و پایان <i class="fas fa-check ml-1"></i></button>';
 
         document.getElementById('wizBack2').addEventListener('click', function() {
             state.step = 1;
@@ -365,7 +365,7 @@
         var pDef = PROVIDERS[provider];
         if (!pDef) return '';
         var html = '<div class="border-t border-border pt-4">' +
-            '<h4 class="text-sm font-medium text-label mb-3"><i class="fas fa-key mr-1.5 text-yellow-500"></i>' + escapeHtml(pDef.label) + ' Credentials</h4>';
+            '<h4 class="text-sm font-medium text-label mb-3"><i class="fas fa-key mr-1.5 text-yellow-500"></i> اعتبارنامه‌های ' + escapeHtml(pDef.label) + '</h4>';
 
         pDef.fields.forEach(function(f) {
             var savedVal = state.credentials[f.key] || '';
@@ -386,7 +386,7 @@
         var btn = document.getElementById('wizNext2');
         if (btn) {
             btn.disabled = true;
-            btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i> Saving...';
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i> در حال ذخیره...';
         }
 
         var dnsProviders = {};
@@ -407,7 +407,7 @@
             body: JSON.stringify(payload)
         })
         .then(function(r) {
-            if (!r.ok) throw new Error('Save failed');
+            if (!r.ok)             throw new Error('ذخیره ناموفق بود');
             return r.json();
         })
         .then(function() {
@@ -418,9 +418,9 @@
             console.error('Setup wizard save error:', err);
             if (btn) {
                 btn.disabled = false;
-                btn.innerHTML = 'Save & Finish <i class="fas fa-check ml-1"></i>';
+                btn.innerHTML = 'ذخیره و پایان <i class="fas fa-check ml-1"></i>';
             }
-            CertMate.toast('Failed to save settings. Please try again.', 'error');
+            CertMate.toast('ذخیره تنظیمات ناموفق بود. لطفاً دوباره تلاش کنید.', 'error');
         });
     }
 
@@ -431,19 +431,19 @@
                 '<div class="w-20 h-20 bg-success-surface rounded-full flex items-center justify-center mx-auto mb-4">' +
                     '<i class="fas fa-check-circle text-green-500 text-4xl"></i>' +
                 '</div>' +
-                '<h3 class="text-xl font-bold text-foreground mb-2">You\'re All Set!</h3>' +
-                '<p class="text-sm text-muted mb-4">CertMate is configured and ready to manage your certificates.</p>' +
+                '<h3 class="text-xl font-bold text-foreground mb-2">همه چیز آماده است!</h3>' +
+                '<p class="text-sm text-muted mb-4">CertMate پیکربندی شده و آماده مدیریت گواهی‌های شماست.</p>' +
                 '<div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-4 text-left text-sm space-y-2">' +
-                    '<div class="flex items-center"><i class="fas fa-check text-green-500 mr-2 w-4"></i><span class="text-label">Email: <strong>' + escapeHtml(state.email) + '</strong></span></div>' +
-                    '<div class="flex items-center"><i class="fas fa-check text-green-500 mr-2 w-4"></i><span class="text-label">DNS Provider: <strong>' + escapeHtml(PROVIDERS[state.provider] ? PROVIDERS[state.provider].label : state.provider) + '</strong></span></div>' +
-                    '<div class="flex items-center"><i class="fas fa-check text-green-500 mr-2 w-4"></i><span class="text-label">Auto-renewal: <strong>Enabled</strong></span></div>' +
+                    '<div class="flex items-center"><i class="fas fa-check text-green-500 mr-2 w-4"></i><span class="text-label">ایمیل: <strong>' + escapeHtml(state.email) + '</strong></span></div>' +
+                    '<div class="flex items-center"><i class="fas fa-check text-green-500 mr-2 w-4"></i><span class="text-label">ارائه‌دهنده DNS: <strong>' + escapeHtml(PROVIDERS[state.provider] ? PROVIDERS[state.provider].label : state.provider) + '</strong></span></div>' +
+                    '<div class="flex items-center"><i class="fas fa-check text-green-500 mr-2 w-4"></i><span class="text-label">تمدید خودکار: <strong>فعال</strong></span></div>' +
                 '</div>' +
             '</div>';
 
         var footer = document.getElementById('wizardFooter');
         footer.innerHTML =
-            '<a href="/settings" class="text-sm text-muted hover:text-gray-700 dark:hover:text-gray-200">Advanced Settings</a>' +
-            '<button type="button" id="wizFinish" class="px-6 py-2.5 bg-primary hover:bg-secondary text-white font-medium rounded-lg text-sm transition"><i class="fas fa-certificate mr-1"></i> Create Your First Certificate</button>';
+            '<a href="/settings" class="text-sm text-muted hover:text-gray-700 dark:hover:text-gray-200">تنظیمات پیشرفته</a>' +
+            '<button type="button" id="wizFinish" class="px-6 py-2.5 bg-primary hover:bg-secondary text-white font-medium rounded-lg text-sm transition"><i class="fas fa-certificate mr-1"></i> ایجاد اولین گواهی شما</button>';
 
         document.getElementById('wizFinish').addEventListener('click', function() {
             closeWizard();

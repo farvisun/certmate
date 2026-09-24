@@ -2,22 +2,22 @@
                     <div x-show="tab === 'ca'" x-cloak>
                     <!-- CA Providers Section -->
                     <div class="bg-gray-50 dark:bg-gray-700/50 p-4 rounded-lg">
-                        <label class="block text-sm font-medium text-label mb-3">
+                         <label class="block text-sm font-medium text-label mb-3">
                             <i class="fas fa-certificate mr-1"></i>
-                            Certificate Authority (CA) Providers
+                            ارائه‌دهندگان مرجع صدور گواهی (CA)
                         </label>
                         
                         <div class="space-y-4">
                             <!-- Default CA Selection -->
                             <div>
-                                <label class="block text-xs font-medium text-muted mb-2">
-                                    Default Certificate Authority
+                                 <label class="block text-xs font-medium text-muted mb-2">
+                                    مرجع صدور گواهی پیش‌فرض
                                 </label>
                                 <select id="default-ca" name="default_ca" 
                                         class="w-full px-3 py-2 border border-border rounded-md shadow-sm focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white text-sm"
                                         onchange="toggleCAProviderConfig()">
-                                    <option value="letsencrypt">Let's Encrypt (Default)</option>
-                                    <option value="letsencrypt_staging">Let's Encrypt (Staging)</option>
+                                     <option value="letsencrypt">Let's Encrypt (پیش‌فرض)</option>
+                                     <option value="letsencrypt_staging">Let's Encrypt (آزمایشی)</option>
                                     <option value="zerossl">ZeroSSL</option>
                                     <option value="google">Google Trust Services</option>
                                     <option value="actalis">Actalis</option>
@@ -25,8 +25,8 @@
                                     <option value="sslcom">SSL.com</option>
                                     <option value="private_ca">Private CA</option>
                                 </select>
-                                <p class="text-xs text-muted mt-1">
-                                    Select the default CA for new certificate requests. You can override this per-certificate.
+                                 <p class="text-xs text-muted mt-1">
+                                    مرجع صدور گواهی پیش‌فرض برای درخواست‌های گواهی جدید را انتخاب کنید. می‌توانید این را برای هر گواهی بازنویسی کنید.
                                 </p>
                             </div>
 
@@ -37,19 +37,19 @@
                                 <h4 class="text-sm font-semibold text-success-strong mb-2 flex items-center">
                                     <i class="fas fa-leaf mr-2 text-green-600"></i>
                                     Let's Encrypt Configuration
-                                    <span class="ml-2 text-xs bg-success-surface text-success-strong px-2 py-0.5 rounded-full">Free</span>
+                                    <span class="ml-2 text-xs bg-success-surface text-success-strong px-2 py-0.5 rounded-full">رایگان</span>
                                 </h4>
                                 <div class="space-y-3">
                                     <div>
-                                        <label class="block text-xs text-success-strong mb-1">Email (for notifications)</label>
+                                        <label class="block text-xs text-success-strong mb-1">ایمیل (برای اعلان‌ها)</label>
                                         <input type="email" id="letsencrypt-email"
                                                class="w-full px-2 py-1 text-sm border border-success-line rounded bg-surface text-foreground"
                                                placeholder="admin@example.com">
                                     </div>
                                 </div>
-                                <p class="text-xs text-success-fg mt-2">
-                                    Let's Encrypt provides free SSL certificates with automated renewal.
-                                    For testing, select "Let's Encrypt (Staging)" as the Certificate Authority instead.
+                                 <p class="text-xs text-success-fg mt-2">
+                                    Let's Encrypt گواهی‌های SSL رایگان با تمدید خودکار ارائه می‌دهد.
+                                    برای تست، به جای آن «Let's Encrypt (آزمایشی)» را به عنوان مرجع صدور گواهی انتخاب کنید.
                                 </p>
                             </div>
 
@@ -58,20 +58,20 @@
                                 <h4 class="text-sm font-semibold text-warning-strong mb-2 flex items-center">
                                     <i class="fas fa-flask mr-2 text-yellow-600"></i>
                                     Let's Encrypt (Staging) Configuration
-                                    <span class="ml-2 text-xs bg-warning-surface text-warning-strong px-2 py-0.5 rounded-full">Testing</span>
+                                    <span class="ml-2 text-xs bg-warning-surface text-warning-strong px-2 py-0.5 rounded-full">آزمایشی</span>
                                 </h4>
                                 <div class="space-y-3">
                                     <div>
-                                        <label class="block text-xs text-warning-strong mb-1">Email (for notifications)</label>
+                                        <label class="block text-xs text-warning-strong mb-1">ایمیل (برای اعلان‌ها)</label>
                                         <input type="email" id="letsencrypt-staging-email"
                                                class="w-full px-2 py-1 text-sm border border-warning-line rounded bg-surface text-foreground"
                                                placeholder="admin@example.com">
                                     </div>
                                 </div>
-                                <p class="text-xs text-warning-fg mt-2">
-                                    The staging environment issues certificates that are NOT trusted by browsers.
-                                    Use it to validate DNS and deployment setup without consuming production rate limits.
-                                    If the email is left empty, the Let's Encrypt account email is used.
+                                 <p class="text-xs text-warning-fg mt-2">
+                                    محیط آزمایشی گواهی‌هایی صادر می‌کند که توسط مرورگرها قابل اعتماد نیستند.
+                                    از آن برای اعتبارسنجی DNS و راه‌اندازی استقرار بدون مصرف نرخ تولید استفاده کنید.
+                                    اگر ایمیل خالی باشد، از ایمیل حساب Let's Encrypt استفاده می‌شود.
                                 </p>
                             </div>
 
@@ -84,7 +84,7 @@
                                 </h4>
                                 <div class="space-y-3">
                                     <div>
-                                        <label class="block text-xs text-warning-strong mb-1">External Account Binding (EAB) Key ID</label>
+                                        <label class="block text-xs text-warning-strong mb-1">شناسه کلید External Account Binding (EAB)</label>
                                         <input type="text" id="zerossl-eab-kid" 
                                                class="w-full px-2 py-1 text-sm border border-warning-line rounded bg-surface text-foreground"
                                                placeholder="Your EAB Key ID from ZeroSSL">
@@ -106,7 +106,7 @@
                                     </div>
                                 </div>
                                 <p class="text-xs text-warning-fg mt-2">
-                                    ZeroSSL requires EAB credentials, which you can generate from your ZeroSSL Developer Dashboard.
+                                    ZeroSSL به اعتبارنامه‌های EAB نیاز دارد که می‌توانید آنها را از داشبورد توسعه‌دهنده ZeroSSL خود تولید کنید.
                                 </p>
                             </div>
 
@@ -141,7 +141,7 @@
                                     </div>
                                 </div>
                                 <p class="text-xs text-info-fg mt-2">
-                                    Google Trust Services requires EAB credentials, which you can request in Google Cloud Console under Certificate Authority Service.
+                                    Google Trust Services به اعتبارنامه‌های EAB نیاز دارد که می‌توانید آنها را در کنسول Google Cloud تحت Certificate Authority Service درخواست کنید.
                                 </p>
                             </div>
 
@@ -176,9 +176,9 @@
                                     </div>
                                 </div>
                                 <p class="text-xs text-info-fg mt-2">
-                                    Actalis is a European (Italian) CA offering free 90-day DV certificates via ACME.
-                                    Generate EAB credentials in your Actalis customer area under Manage with ACME, then ACME Credentials.
-                                    The free plan covers single-domain certificates only (no wildcard, no SAN).
+                                    Actalis یک CA اروپایی (ایتالیایی) است که گواهی‌های DV رایگان ۹۰ روزه از طریق ACME ارائه می‌دهد.
+                                    اعتبارنامه‌های EAB را در ناحیه مشتری Actalis خود تحت Manage with ACME و سپس ACME Credentials تولید کنید.
+                                    طرح رایگان فقط گواهی‌های تک دامنه‌ای را پوشش می‌دهد (بدون wildcard، بدون SAN).
                                 </p>
                             </div>
 
@@ -220,7 +220,7 @@
                                     </div>
                                 </div>
                                 <p class="text-xs text-info-fg mt-2">
-                                    DigiCert provides enterprise-grade SSL certificates via ACME. Requires EAB credentials from DigiCert.
+                                    DigiCert گواهی‌های SSL سطح سازمانی از طریق ACME ارائه می‌دهد. نیاز به اعتبارنامه‌های EAB از DigiCert دارد.
                                 </p>
                             </div>
 
@@ -255,7 +255,7 @@
                                     </div>
                                 </div>
                                 <p class="text-xs text-indigo-700 dark:text-indigo-300 mt-2">
-                                    SSL.com provides enterprise-grade SSL certificates via ACME. Requires EAB credentials.
+                                    SSL.com گواهی‌های SSL سطح سازمانی از طریق ACME ارائه می‌دهد. نیاز به اعتبارنامه‌های EAB دارد.
                                 </p>
                             </div>
 
@@ -269,21 +269,21 @@
                                 <div class="space-y-3">
                                     <div>
                                         <label class="block text-xs text-purple-800 dark:text-purple-200 mb-1" for="private-ca-preset">
-                                            Known ACME CA (preset) - Optional
-                                            <i class="fas fa-info-circle ml-1 cursor-help" title="Pre-fills the directory URL for public ACME CAs that work through the Private CA entry"></i>
+                                            CA خصوصی شناخته شده (پیش‌فرض) - اختیاری
+                                            <i class="fas fa-info-circle ml-1 cursor-help" title="آدرس دایرکتوری را برای CA‌های عمومی ACME که از طریق ورودی Private CA کار می‌کنند پر می‌کند"></i>
                                         </label>
                                         <select id="private-ca-preset" onchange="applyPrivateCaPreset()"
                                                 class="w-full px-2 py-1 text-sm border border-purple-300 dark:border-purple-600 rounded bg-surface text-foreground">
-                                            <option value="">Custom / self-hosted (default)</option>
-                                            <option value="actalis">Actalis (EU public CA, EAB required)</option>
+                                            <option value="">سفارشی / میزبانی خودی (پیش‌فرض)</option>
+                                            <option value="actalis">Actalis (CA عمومی اتحادیه اروپا، نیاز به EAB)</option>
                                         </select>
                                         <p id="private-ca-preset-hint" class="text-xs text-purple-600 dark:text-purple-400 mt-1"></p>
                                     </div>
                                     <div>
                                         <label class="block text-xs text-purple-800 dark:text-purple-200 mb-1">
-                                            ACME Directory URL
+                                            آدرس دایرکتوری ACME
                                             <span class="text-red-500">*</span>
-                                            <i class="fas fa-info-circle ml-1 cursor-help" title="URL to your private CA's ACME directory endpoint (e.g., step-ca, Smallstep, or custom ACME server)"></i>
+                                            <i class="fas fa-info-circle ml-1 cursor-help" title="آدرس اندپوینت دایرکتوری ACME CA خصوصی شما (مثلاً step-ca، Smallstep یا سرور ACME سفارشی)"></i>
                                         </label>
                                         <input type="url" id="private-ca-acme-url" 
                                                class="w-full px-2 py-1 text-sm border-2 border-purple-300 dark:border-purple-600 rounded bg-surface text-foreground focus:border-purple-500 focus:ring-2 focus:ring-purple-200"
@@ -298,32 +298,32 @@
                                         </p>
                                     </div>
                                     <div>
-                                        <label class="block text-xs text-purple-800 dark:text-purple-200 mb-1">CA Certificate (PEM format) - Optional</label>
+                                        <label class="block text-xs text-purple-800 dark:text-purple-200 mb-1">گواهی CA (فرمت PEM) - اختیاری</label>
                                         <textarea id="private-ca-cert" rows="3"
                                                   class="w-full px-2 py-1 text-sm border border-purple-300 dark:border-purple-600 rounded bg-surface text-foreground"
                                                   placeholder="-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----"></textarea>
                                         <p class="text-xs text-purple-600 dark:text-purple-400 mt-1">
-                                            Upload your private CA root certificate if using self-signed or internal CA
+                                            گواهی ریشه CA خصوصی خود را آپلود کنید اگر از CA خودامضا یا داخلی استفاده می‌کنید
                                         </p>
                                     </div>
                                     <div>
-                                        <label class="block text-xs text-purple-800 dark:text-purple-200 mb-1">External Account Binding (EAB) Key ID - Optional</label>
+                                        <label class="block text-xs text-purple-800 dark:text-purple-200 mb-1">شناسه کلید External Account Binding (EAB) - اختیاری</label>
                                         <input type="text" id="private-ca-eab-kid" 
                                                class="w-full px-2 py-1 text-sm border border-purple-300 dark:border-purple-600 rounded bg-surface text-foreground"
-                                               placeholder="EAB Key ID (if required by your CA)">
+                                                placeholder="شناسه کلید EAB (اگر توسط CA شما الزامی باشد)">
                                     </div>
                                     <div>
-                                        <label class="block text-xs text-purple-800 dark:text-purple-200 mb-1">External Account Binding (EAB) HMAC Key - Optional</label>
+                                        <label class="block text-xs text-purple-800 dark:text-purple-200 mb-1">کلید HMAC External Account Binding (EAB) - اختیاری</label>
                                         <input type="password" id="private-ca-eab-hmac" 
                                                class="w-full px-2 py-1 text-sm border border-purple-300 dark:border-purple-600 rounded bg-surface text-foreground"
-                                               placeholder="EAB HMAC Key (if required by your CA)"
+                                                placeholder="کلید HMAC EAB (اگر توسط CA شما الزامی باشد)"
                                                autocomplete="new-password" 
                                                spellcheck="false"
                                                data-lpignore="true">
                                     </div>
                                     <div>
                                         <label class="block text-xs text-purple-800 dark:text-purple-200 mb-1">
-                                            Email (for notifications)
+                                            ایمیل (برای اعلان‌ها)
                                             <span class="text-red-500">*</span>
                                         </label>
                                         <input type="email" id="private-ca-email" 
@@ -333,12 +333,12 @@
                                     </div>
                                 </div>
                                 <p class="text-xs text-purple-700 dark:text-purple-300 mt-2">
-                                    Configure your private or corporate CA. Supports ACME-compatible CAs like step-ca, Smallstep, Boulder, and others.
-                                    <br><strong>🚀 Quick Start:</strong>
-                                    <br>1. Enter your CA's ACME directory URL above
-                                    <br>2. Enter your email address
-                                    <br>3. Click "Test CA Connection" to verify
-                                    <br>4. Save settings once test succeeds
+                                    پیکربندی CA خصوصی یا سازمانی خود. از CA‌های سازگار با ACME مانند step-ca، Smallstep، Boulder و غیره پشتیبانی می‌کند.
+                                    <br><strong>🚀 شروع سریع:</strong>
+                                    <br>۱. آدرس دایرکتوری ACME CA خود را در بالا وارد کنید
+                                    <br>۲. آدرس ایمیل خود را وارد کنید
+                                    <br>۳. روی "آزمایش اتصال CA" کلیک کنید تا بررسی شود
+                                    <br>۴. پس از موفقیت آزمایش، تنظیمات را ذخیره کنید
                                 </p>
                             </div>
 
@@ -346,11 +346,11 @@
                             <div class="flex flex-wrap gap-3 pt-2 border-t border-border">
                                 <button type="button" onclick="testCAProvider()" 
                                         class="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 transition-colors text-sm font-medium">
-                                    <i class="fas fa-plug mr-1"></i> Test CA Connection
+                                    <i class="fas fa-plug mr-1"></i> آزمایش اتصال CA
                                 </button>
                                 <div class="text-xs text-muted flex items-center">
                                     <i class="fas fa-info-circle mr-1"></i>
-                                    <span id="ca-test-hint">Select a CA provider and fill in required fields, then test the connection</span>
+                                    <span id="ca-test-hint">ارائه‌دهنده CA را انتخاب کنید و فیلدهای الزامی را پر کنید، سپس اتصال را آزمایش کنید</span>
                                 </div>
                             </div>
                         </div>

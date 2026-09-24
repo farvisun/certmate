@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="fa" dir="rtl">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -48,7 +48,7 @@
          landmark below. -->
     <a href="#main-content"
        class="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[100] focus:px-3 focus:py-2 focus:bg-primary focus:text-white focus:rounded-md focus:shadow-lg focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary">
-        Skip to main content
+        رفتن به محتوای اصلی
     </a>
     <!-- Top Navigation -->
     <nav class="bg-surface shadow-card border-b border-gray-200/60 dark:border-white/5">
@@ -62,31 +62,31 @@
                     </div>
                     <div class="ml-2 md:ml-3">
                         <h1 class="text-lg md:text-xl font-semibold text-foreground">CertMate</h1>
-                        <p class="text-xs md:text-sm text-muted hidden sm:block">SSL Certificate Manager</p>
+                        <p class="text-xs md:text-sm text-muted hidden sm:block">مدیریت گواهی SSL</p>
                     </div>
                 </div>
                 <div class="flex items-center space-x-1 sm:space-x-4">
                     <!-- Desktop nav links (hidden on mobile — bottom tab bar used instead) -->
                     <a href="/" {% if request.path == '/' %}aria-current="page"{% endif %} class="hidden md:inline-flex items-center px-3 py-2 text-sm {% if request.path == '/' %}nav-active{% else %}nav-inactive{% endif %}">
-                        <i class="fas fa-certificate mr-1.5 text-[0.85em] leading-none"></i> Certificates
+                        <i class="fas fa-certificate mr-1.5 text-[0.85em] leading-none"></i> گواهی‌ها
                     </a>
 
                     <a href="/settings" {% if request.path == '/settings' %}aria-current="page"{% endif %} class="hidden md:inline-flex items-center px-3 py-2 text-sm {% if request.path == '/settings' %}nav-active{% else %}nav-inactive{% endif %}">
-                        <i class="fas fa-cog mr-1.5 text-[0.85em] leading-none"></i> Settings
+                        <i class="fas fa-cog mr-1.5 text-[0.85em] leading-none"></i> تنظیمات
                     </a>
                     <a href="/help" {% if request.path == '/help' %}aria-current="page"{% endif %} class="hidden md:inline-flex items-center px-3 py-2 text-sm {% if request.path == '/help' %}nav-active{% else %}nav-inactive{% endif %}">
-                        <i class="fas fa-question-circle mr-1.5 text-[0.85em] leading-none"></i> Help
+                        <i class="fas fa-question-circle mr-1.5 text-[0.85em] leading-none"></i> راهنما
                     </a>
                     <a href="/activity" {% if request.path == '/activity' %}aria-current="page"{% endif %} class="hidden md:inline-flex items-center px-3 py-2 text-sm {% if request.path == '/activity' %}nav-active{% else %}nav-inactive{% endif %}">
-                        <i class="fas fa-history mr-1.5 text-[0.85em] leading-none"></i> Activity
+                        <i class="fas fa-history mr-1.5 text-[0.85em] leading-none"></i> فعالیت
                     </a>
                     <a href="/redoc" {% if request.path == '/redoc' %}aria-current="page"{% endif %} class="hidden md:inline-flex items-center px-3 py-2 text-sm {% if request.path == '/redoc' %}nav-active{% else %}nav-inactive{% endif %}">
-                        <i class="fas fa-code mr-1.5 text-[0.85em] leading-none"></i> API Docs
+                        <i class="fas fa-code mr-1.5 text-[0.85em] leading-none"></i> مستندات API
                     </a>
                     <!-- Search (Cmd+K) — desktop variant with visible label + kbd hint -->
                     <button type="button" onclick="document.dispatchEvent(new KeyboardEvent('keydown',{key:'k',metaKey:true}))" class="hidden sm:inline-flex items-center px-2.5 py-1.5 text-sm text-gray-400 bg-surface-2 border-border border rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 transition" title="Search (Cmd+K)" aria-label="Open search">
                         <i class="fas fa-search mr-1.5 text-xs"></i>
-                        <span class="text-xs">Search</span>
+                        <span class="text-xs">جستجو</span>
                         <kbd class="ml-2 px-1.5 py-0.5 text-[10px] bg-surface border-border rounded border">&#8984;K</kbd>
                     </button>
                     <!-- Search — compact icon-only mobile variant. Same keydown dispatch
@@ -100,21 +100,21 @@
                     </button>
                     <!-- Notification bell -->
                     <div class="relative">
-                        <button type="button" id="notifBtn" onclick="toggleNotifications()" class="px-2 py-2 rounded-md text-muted hover:bg-hover relative" title="Notifications" aria-label="Open notifications" aria-haspopup="true" aria-expanded="false" aria-controls="notifPanel">
+                        <button type="button" id="notifBtn" onclick="toggleNotifications()" class="px-2 py-2 rounded-md text-muted hover:bg-hover relative" title="اعلان‌ها" aria-label="Open notifications" aria-haspopup="true" aria-expanded="false" aria-controls="notifPanel">
                             <i class="fas fa-bell"></i>
                             <span id="notifBadge" class="hidden absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full h-5 w-5 flex items-center justify-center font-bold badge-pulse">0</span>
                         </button>
                         <div id="notifPanel" role="region" aria-label="Notifications" class="hidden absolute right-0 mt-2 w-[calc(100vw-2rem)] max-w-sm md:w-80 bg-surface border-border rounded-lg shadow-xl border z-50 max-h-96 overflow-y-auto">
                             <div class="px-4 py-3 border-b border-border">
-                                <h3 class="text-sm font-semibold text-foreground">Notifications</h3>
+                                <h3 class="text-sm font-semibold text-foreground">اعلان‌ها</h3>
                             </div>
                             <div id="notifList" class="py-2">
-                                <p class="px-4 py-3 text-sm text-muted">No notifications</p>
+                                <p class="px-4 py-3 text-sm text-muted">بدون اعلان</p>
                             </div>
                         </div>
                     </div>
                     <!-- Dark mode toggle -->
-                    <button type="button" id="themeToggle" onclick="toggleTheme()" class="px-2 py-2 rounded-md text-muted hover:bg-hover" title="Toggle theme" aria-label="Toggle dark mode">
+                    <button type="button" id="themeToggle" onclick="toggleTheme()" class="px-2 py-2 rounded-md text-muted hover:bg-hover" title="تغییر پوسته" aria-label="Toggle dark mode">
                         <i class="fas fa-moon" id="theme-icon-moon"></i>
                         <i class="fas fa-sun" id="theme-icon-sun"></i>
                     </button>
@@ -123,8 +123,8 @@
                          the button no longer flashes in then out as the
                          old JS auth-check completed 500 ms after paint). -->
                     {% if current_user %}
-                    <button type="button" id="logoutBtn" onclick="doLogout()" class="px-3 py-2 rounded-md text-sm font-medium text-danger-fg hover:bg-red-50 dark:hover:bg-red-900/30 border border-danger-line" title="Logout" aria-label="Log out">
-                        <i class="fas fa-sign-out-alt mr-1"></i><span class="hidden sm:inline"> Logout</span>
+                    <button type="button" id="logoutBtn" onclick="doLogout()" class="px-3 py-2 rounded-md text-sm font-medium text-danger-fg hover:bg-red-50 dark:hover:bg-red-900/30 border border-danger-line" title="خروج" aria-label="Log out">
+                        <i class="fas fa-sign-out-alt mr-1"></i><span class="hidden sm:inline"> خروج</span>
                     </button>
                     {% endif %}
                 </div>
@@ -137,7 +137,7 @@
         <div class="flex justify-around h-14">
             <a href="/" {% if request.path == '/' %}aria-current="page"{% endif %} class="flex flex-col items-center justify-center flex-1 py-1 transition-colors duration-150 {% if request.path == '/' %}text-primary{% else %}text-muted{% endif %}">
                 <i class="fas fa-certificate text-lg"></i>
-                <span class="text-xs mt-0.5 font-medium">Certs</span>
+                <span class="text-xs mt-0.5 font-medium">گواهی‌ها</span>
             </a>
             <a href="/settings" {% if request.path == '/settings' %}aria-current="page"{% endif %} class="flex flex-col items-center justify-center flex-1 py-1 transition-colors duration-150 {% if request.path == '/settings' %}text-primary{% else %}text-muted{% endif %}">
                 <i class="fas fa-cog text-lg"></i>
@@ -234,7 +234,7 @@
         var list = document.getElementById('notifList');
         if (warnings.length === 0) {
             badge.classList.add('hidden');
-            list.innerHTML = '<p class="px-4 py-3 text-sm text-muted"><i class="fas fa-check-circle text-green-500 mr-2"></i>All certificates healthy</p>';
+            list.innerHTML = '<p class="px-4 py-3 text-sm text-muted"><i class="fas fa-check-circle text-green-500 mr-2"></i>همه گواهی‌ها سالم هستند</p>';
             return;
         }
         badge.textContent = warnings.length > 9 ? '9+' : warnings.length;
@@ -303,7 +303,7 @@
             sse.addEventListener('certificate_created', function(e) {
                 try {
                     var d = JSON.parse(e.data);
-                    CertMate.toast('Certificate created: ' + (d.domain || ''), 'success');
+                    CertMate.toast('گواهی ایجاد شد: ' + (d.domain || ''), 'success');
                     checkNotifications(true);
                     if (typeof loadCertificates === 'function') loadCertificates();
                 } catch(err) {}
@@ -311,7 +311,7 @@
             sse.addEventListener('certificate_renewed', function(e) {
                 try {
                     var d = JSON.parse(e.data);
-                    CertMate.toast('Certificate renewed: ' + (d.domain || ''), 'success');
+                    CertMate.toast('گواهی تمدید شد: ' + (d.domain || ''), 'success');
                     checkNotifications(true);
                     if (typeof loadCertificates === 'function') loadCertificates();
                 } catch(err) {}
@@ -319,12 +319,12 @@
             sse.addEventListener('certificate_revoked', function(e) {
                 try {
                     var d = JSON.parse(e.data);
-                    CertMate.toast('Certificate revoked: ' + (d.domain || ''), 'warning');
+                    CertMate.toast('گواهی لغو شد: ' + (d.domain || ''), 'warning');
                     checkNotifications(true);
                 } catch(err) {}
             });
             sse.addEventListener('settings_updated', function() {
-                CertMate.toast('Settings updated', 'info');
+                CertMate.toast('تنظیمات به‌روزرسانی شد', 'info');
             });
             sse.onerror = function() {
                 sse.close();
@@ -365,9 +365,8 @@
             banner.className = 'fixed top-0 left-0 right-0 z-[200] bg-red-600 text-white text-sm px-4 py-2 text-center shadow-lg';
             banner.innerHTML =
                 '<i class="fas fa-exclamation-triangle mr-2" aria-hidden="true"></i>' +
-                'Interactive UI failed to load (Alpine.js missing). ' +
-                'Some tabs, dropdowns, and toggles won\'t work — try refreshing the page, ' +
-                'or check the browser console for blocked-resource errors.';
+                'رابط کاربری تعاملی بارگذاری نشد (Alpine.js موجود نیست). ' +
+                'برخی از تب‌ها، کشوها و کلیدها کار نمی‌کنند — صفحه را رفرش کنید یا خطاهای منابع مسدود شده را در کنسول مرورگر بررسی کنید.';
             document.body.insertBefore(banner, document.body.firstChild);
         }
     });

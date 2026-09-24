@@ -87,37 +87,37 @@
 
         var out = [];
 
-        out.push('### Environment');
+        out.push('### محیط');
         out.push(line('CertMate', snap.certmate_version ? 'v' + snap.certmate_version : null));
-        out.push(line('Python', snap.python_version));
-        out.push(line('OS', snap.os_platform + (snap.container ? ' (Docker)' : '')));
-        out.push(line('Browser', _browserLabel(cc.userAgent) + (cc.viewport ? ' — ' + cc.viewport : '')));
-        out.push(line('Page', cc.path));
+        out.push(line('پایتون', snap.python_version));
+        out.push(line('سیستم‌عامل', snap.os_platform + (snap.container ? ' (Docker)' : '')));
+        out.push(line('مرورگر', _browserLabel(cc.userAgent) + (cc.viewport ? ' — ' + cc.viewport : '')));
+        out.push(line('صفحه', cc.path));
         out.push('');
 
-        out.push('### Error');
-        out.push(line('Endpoint', ec.endpoint));
+        out.push('### خطا');
+        out.push(line('اندپوینت', ec.endpoint));
         out.push(line('Status', ec.status));
         if (ec.code) out.push(line('Code', '`' + ec.code + '`'));
         if (ec.message) out.push(line('Message', ec.message));
         if (ec.hint) out.push(line('Hint', ec.hint));
         out.push('');
 
-        out.push('### Diagnostics');
-        out.push(line('Scheduler', snap.scheduler_running ? 'running' : 'not running'));
-        out.push(line('Certificates', snap.certificate_count));
-        out.push(line('DNS Provider', snap.dns_provider));
+        out.push('### عیب‌یابی');
+        out.push(line('برنامه زمان‌بندی', snap.scheduler_running ? 'در حال اجرا' : 'در حال اجرا نیست'));
+        out.push(line('گواهی‌ها', snap.certificate_count));
+        out.push(line('ارائه‌دهنده DNS', snap.dns_provider));
         out.push(line('CA', snap.default_ca));
-        out.push(line('Challenge', snap.challenge_type));
-        out.push(line('Storage', snap.storage_backend));
-        out.push(line('Disk free', _humanBytes(snap.disk_free_bytes) +
+        out.push(line('چالش', snap.challenge_type));
+        out.push(line('ذخیره‌سازی', snap.storage_backend));
+        out.push(line('فضای خالی دیسک', _humanBytes(snap.disk_free_bytes) +
             (snap.disk_total_bytes ? ' / ' + _humanBytes(snap.disk_total_bytes) : '')));
         out.push('');
 
-        out.push('### Recent activity (sanitized — identifiers stripped)');
+        out.push('### فعالیت اخیر (پاکسازی شده — شناسه‌ها حذف شده‌اند)');
         var entries = Array.isArray(snap.recent_audit) ? snap.recent_audit : [];
         if (entries.length === 0) {
-            out.push('_(no recent audit entries)_');
+            out.push('_(بدون رکوردهای اخیر)');
         } else {
             entries.forEach(function (e, i) {
                 var ts = (e && e.timestamp) ? e.timestamp.replace('T', ' ').replace('Z', '') : '?';
@@ -127,7 +127,7 @@
 
         if (snap.errors && Object.keys(snap.errors).length) {
             out.push('');
-            out.push('### Snapshot partial failures');
+            out.push('### خروجی‌های ناموفق اسنپ‌شات');
             Object.keys(snap.errors).forEach(function (k) {
                 out.push('- `' + k + '`: ' + snap.errors[k]);
             });
@@ -191,9 +191,9 @@
             ta.select();
             try {
                 document.execCommand('copy');
-                if (CM.toast) CM.toast('Copied to clipboard', 'success', 2000);
+                if (CM.toast) CM.toast('در کلیپ‌بورد کپی شد', 'success', 2000);
             } catch (e) {
-                if (CM.toast) CM.toast('Copy failed — please select and Cmd/Ctrl+C', 'warning', 4000);
+                if (CM.toast) CM.toast('کپی ناموفق بود — لطفاً انتخاب کنید و Cmd/Ctrl+C بزنید', 'warning', 4000);
             }
         });
         box.querySelector('[data-action="close"]').addEventListener('click', function () {
@@ -265,7 +265,7 @@
                         // (which has a clickable link inside it).
                         _openFallbackModal(markdown, url);
                     } else if (CM.toast) {
-                        CM.toast('Bug report copied. GitHub opened in a new tab — paste and review before submitting.', 'success', 8000);
+                        CM.toast('گزارش باگ کپی شد. GitHub در تب جدید باز شد — قبل از ارسال بچسبانید و بررسی کنید.', 'success', 8000);
                     }
                 }).catch(function () {
                     // Clipboard write rejected (HTTP, permission, browser policy)

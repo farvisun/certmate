@@ -2,29 +2,29 @@
                     <div x-show="tab === 'storage'" x-cloak>
                     <!-- Certificate Storage Backend Section -->
                     <div class="bg-gray-50 dark:bg-gray-700/50 p-4 rounded-lg">
-                        <label class="block text-sm font-medium text-label mb-3">
+                         <label class="block text-sm font-medium text-label mb-3">
                             <i class="fas fa-database mr-1"></i>
-                            Certificate Storage Backend
+                            بک‌اند ذخیره‌سازی گواهی
                         </label>
                         
                         <div class="space-y-4">
                             <!-- Backend Selection -->
                             <div>
-                                <label class="block text-xs font-medium text-muted mb-2">
-                                    Storage Backend Type
+                                 <label class="block text-xs font-medium text-muted mb-2">
+                                    نوع بک‌اند ذخیره‌سازی
                                 </label>
                                 <select id="storage-backend" name="storage_backend" 
                                         class="w-full px-3 py-2 border border-border rounded-md shadow-sm focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white text-sm"
                                         onchange="toggleStorageBackendConfig()">
-                                    <option value="local_filesystem">Local Filesystem (Default)</option>
+                                     <option value="local_filesystem">سیستم فایل محلی (پیش‌فرض)</option>
                                     <option value="azure_keyvault">Azure Key Vault</option>
                                     <option value="aws_secrets_manager">AWS Secrets Manager</option>
                                     <option value="hashicorp_vault">HashiCorp Vault</option>
                                     <option value="infisical">Infisical</option>
                                     <option value="s3_compatible">S3-Compatible (Hetzner, Contabo, OVH, Scaleway, MinIO, AWS)</option>
                                 </select>
-                                <p class="mt-1 text-xs text-muted">
-                                    Choose where to store your SSL certificates. Local filesystem is the default and most compatible option.
+                                 <p class="mt-1 text-xs text-muted">
+                                    مکان ذخیره گواهی‌های SSL خود را انتخاب کنید. سیستم فایل محلی پیش‌فرض و سازگارترین گزینه است.
                                 </p>
                             </div>
 
@@ -32,17 +32,17 @@
                             <div id="storage-local-config" class="storage-config">
                                 <div class="bg-info-surface p-3 rounded-md border border-info-line">
                                     <h5 class="text-sm font-medium text-info-strong mb-2">
-                                        <i class="fas fa-folder mr-1"></i> Local Filesystem Storage
+                                         <i class="fas fa-folder mr-1"></i> ذخیره‌سازی سیستم فایل محلی
                                     </h5>
                                     <div class="space-y-2">
                                         <div>
-                                            <label class="block text-xs text-info-strong mb-1">Certificate Directory</label>
+                                             <label class="block text-xs text-info-strong mb-1">پوشه گواهی‌ها</label>
                                             <input type="text" id="storage-cert-dir" 
                                                    class="w-full px-2 py-1 text-sm border border-info-line rounded bg-surface text-foreground"
                                                    placeholder="certificates" value="certificates">
                                         </div>
-                                        <p class="text-xs text-info-fg">
-                                            Certificates are stored locally in the specified directory with secure file permissions.
+                                         <p class="text-xs text-info-fg">
+                                            گواهی‌ها به صورت محلی در پوشه مشخص شده با مجوزهای فایل امن ذخیره می‌شوند.
                                         </p>
                                     </div>
                                 </div>
@@ -294,15 +294,15 @@
                             <div class="flex flex-wrap gap-3 pt-2 border-t border-border">
                                 <button type="button" onclick="testStorageBackend()" 
                                         class="bg-blue-600 text-white px-3 py-2 rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-colors text-sm">
-                                    <i class="fas fa-plug mr-1"></i> Test Connection
+                                         <i class="fas fa-plug mr-1"></i> تست اتصال
                                 </button>
                                 <button type="button" onclick="showStorageMigrationModal()" 
                                         class="bg-yellow-600 text-white px-3 py-2 rounded-md hover:bg-yellow-700 focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:ring-offset-2 transition-colors text-sm">
-                                    <i class="fas fa-exchange-alt mr-1"></i> Migrate Certificates
+                                    <i class="fas fa-exchange-alt mr-1"></i> مهاجرت گواهی‌ها
                                 </button>
                                 <div class="text-xs text-muted flex items-center">
                                     <i class="fas fa-info-circle mr-1"></i>
-                                    Test connection before saving settings
+                                    تست اتصال قبل از ذخیره تنظیمات
                                 </div>
                             </div>
                         </div>
@@ -321,8 +321,8 @@
                         <!-- Submit Button -->
                         <div class="flex justify-end mt-6">
                             <button type="submit" id="saveBtn" class="bg-primary text-white px-6 py-2 rounded-md hover:bg-secondary focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 dark:focus:ring-offset-gray-800 transition-colors">
-                                <i class="fas fa-save mr-2"></i>
-                                Save Settings
+                                 <i class="fas fa-save mr-2"></i>
+                                ذخیره تنظیمات
                             </button>
                         </div>
                     </div>

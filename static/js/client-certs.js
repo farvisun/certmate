@@ -70,7 +70,7 @@
                 if (el('activeCount')) el('activeCount').textContent = stats.active || 0;
                 if (el('revokedCount')) el('revokedCount').textContent = stats.revoked || 0;
                 var byUsage = stats.by_usage || {};
-                var usageText = Object.entries(byUsage).map(function(e) { return e[1] + ' ' + e[0]; }).join(', ') || 'No certs';
+                var usageText = Object.entries(byUsage).map(function(e) { return e[1] + ' ' + e[0]; }).join(', ') || 'بدون گواهی';
                 if (el('usageBreakdown')) el('usageBreakdown').textContent = usageText;
             })
             .catch(function(e) { console.error('Error loading client cert statistics:', e); });
@@ -90,7 +90,7 @@
         var tbody = document.getElementById('certTableBody');
         if (!tbody) return;
         if (certificatesData.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="7" class="px-6 py-8 text-center text-muted">No client certificates found</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="7" class="px-6 py-8 text-center text-muted">گواهی کلاینتی یافت نشد</td></tr>';
             return;
         }
 
@@ -111,14 +111,14 @@
                 '<td class="px-6 py-4 text-sm ' + (isExpiringSoon ? 'text-danger-fg font-semibold' : 'text-muted') + '">' + expiresDate.toLocaleDateString() + '</td>' +
                 '<td class="px-6 py-4 text-sm">' +
                     (cert.revoked
-                        ? '<span class="px-2 py-1 bg-danger-surface text-danger-strong rounded text-xs font-medium">Revoked</span>'
-                        : '<span class="px-2 py-1 bg-success-surface text-success-strong rounded text-xs font-medium">Active</span>') +
+                        ? '<span class="px-2 py-1 bg-danger-surface text-danger-strong rounded text-xs font-medium">لغو شده</span>'
+                        : '<span class="px-2 py-1 bg-success-surface text-success-strong rounded text-xs font-medium">فعال</span>') +
                 '</td>' +
                 '<td class="px-6 py-4 text-sm text-right">' +
                     '<div class="flex items-center justify-end gap-1">' +
-                        '<button type="button" data-cc-action="details" data-id="' + safeId + '" class="p-1.5 text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 rounded hover:bg-hover" title="Details"><i class="fas fa-eye"></i></button>' +
-                        (!cert.revoked ? '<button type="button" data-cc-action="revoke" data-id="' + safeId + '" class="p-1.5 text-gray-400 hover:text-red-600 dark:hover:text-red-400 rounded hover:bg-hover" title="Revoke"><i class="fas fa-ban"></i></button>' : '') +
-                        '<button type="button" data-cc-action="renew" data-id="' + safeId + '" class="p-1.5 text-gray-400 hover:text-green-600 dark:hover:text-green-400 rounded hover:bg-hover" title="Renew"><i class="fas fa-sync"></i></button>' +
+                        '<button type="button" data-cc-action="details" data-id="' + safeId + '" class="p-1.5 text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 rounded hover:bg-hover" title="جزئیات"><i class="fas fa-eye"></i></button>' +
+                        (!cert.revoked ? '<button type="button" data-cc-action="revoke" data-id="' + safeId + '" class="p-1.5 text-gray-400 hover:text-red-600 dark:hover:text-red-400 rounded hover:bg-hover" title="لغو"><i class="fas fa-ban"></i></button>' : '') +
+                        '<button type="button" data-cc-action="renew" data-id="' + safeId + '" class="p-1.5 text-gray-400 hover:text-green-600 dark:hover:text-green-400 rounded hover:bg-hover" title="تمدید"><i class="fas fa-sync"></i></button>' +
                     '</div>' +
                 '</td>' +
             '</tr>';
@@ -178,21 +178,21 @@
             body: JSON.stringify(data)
         }).then(function(response) {
             if (response.ok) {
-                CertMate.toast('Client certificate created!', 'success');
+                CertMate.toast('گواهی کلاینت ایجاد شد!', 'success');
                 document.getElementById('createClientCertForm').reset();
                 ccLoadCertificates();
                 ccLoadStatistics();
             } else {
-                CertMate.toast('Error creating certificate', 'error');
+                CertMate.toast('خطا در ایجاد گواهی', 'error');
             }
         }).catch(function() {
-            CertMate.toast('Error creating certificate', 'error');
+            CertMate.toast('خطا در ایجاد گواهی', 'error');
         });
     }
 
     function ccHandleBatchSubmit() {
         if (!window.csvData || !window.csvData.rows || window.csvData.rows.length === 0) {
-            CertMate.toast('No CSV data to upload', 'warning');
+            CertMate.toast('داده CSV برای آپلود وجود ندارد', 'warning');
             return;
         }
         var btn = document.getElementById('submitBatchBtn');
@@ -212,8 +212,8 @@
         }).then(function(res) {
             if (res.ok) {
                 var b = res.body || {};
-                var msg = (b.successful || 0) + '/' + (b.total || 0) + ' certificates created';
-                if (b.failed) msg += ' (' + b.failed + ' failed)';
+                var msg = (b.successful || 0) + '/' + (b.total || 0) + ' گواهی ایجاد شد';
+                if (b.failed) msg += ' (' + b.failed + ' ناموفق)';
                 CertMate.toast(msg, b.failed ? 'warning' : 'success');
                 document.getElementById('csvPreview').classList.add('hidden');
                 document.getElementById('submitBatchBtn').classList.add('hidden');
@@ -222,11 +222,11 @@
                 ccLoadCertificates();
                 ccLoadStatistics();
             } else {
-                var err = (res.body && (res.body.message || res.body.error)) || 'Batch upload failed';
+                var err = (res.body && (res.body.message || res.body.error)) || 'آپلود دسته‌ای ناموفق بود';
                 CertMate.toast(err, 'error');
             }
         }).catch(function() {
-            CertMate.toast('Batch upload failed', 'error');
+            CertMate.toast('آپلود دسته‌ای ناموفق بود', 'error');
         }).finally(function() {
             if (btn) btn.disabled = false;
         });
@@ -234,7 +234,7 @@
 
     function ccHandleCSVFile(file) {
         if (file.size > 5 * 1024 * 1024) {
-            CertMate.toast('CSV file too large (max 5 MB)', 'warning');
+            CertMate.toast('فایل CSV بیش از حد بزرگ است (حداکثر 5 مگابایت)', 'warning');
             return;
         }
         var reader = new FileReader();
@@ -250,7 +250,7 @@
             document.getElementById('rowCount').textContent = dataRows.length;
             document.getElementById('csvPreview').classList.remove('hidden');
             document.getElementById('submitBatchBtn').classList.remove('hidden');
-            document.getElementById('certCountText').textContent = ' ' + dataRows.length + ' Certificates';
+            document.getElementById('certCountText').textContent = ' ' + dataRows.length + ' گواهی';
             window.csvData = { headers: headers, rows: dataRows };
         };
         reader.readAsText(file);
@@ -283,19 +283,19 @@
         currentCertId = id;
         var content = document.getElementById('modalContent');
         content.innerHTML =
-            '<div><strong>Identifier:</strong> ' + escapeHtml(cert.identifier || '') + '</div>' +
-            '<div><strong>Common Name:</strong> ' + escapeHtml(cert.common_name || '') + '</div>' +
-            '<div><strong>Email:</strong> ' + escapeHtml(cert.email || 'N/A') + '</div>' +
-            '<div><strong>Organization:</strong> ' + escapeHtml(cert.organization || '') + '</div>' +
-            '<div><strong>Usage:</strong> ' + escapeHtml(cert.cert_usage || '') + '</div>' +
+            '<div><strong>شناسه:</strong> ' + escapeHtml(cert.identifier || '') + '</div>' +
+            '<div><strong>نام رایج:</strong> ' + escapeHtml(cert.common_name || '') + '</div>' +
+            '<div><strong>ایمیل:</strong> ' + escapeHtml(cert.email || 'ندارد') + '</div>' +
+            '<div><strong>سازمان:</strong> ' + escapeHtml(cert.organization || '') + '</div>' +
+            '<div><strong>کاربرد:</strong> ' + escapeHtml(cert.cert_usage || '') + '</div>' +
             // Serial numbers are 30+ digit integers with no natural break points,
             // so the browser wouldn't wrap them and they'd overflow the modal on
             // the right edge. Render in a smaller monospace span with break-all
             // so the number wraps cleanly to a second line when needed.
-            '<div><strong>Serial:</strong> <span class="font-mono text-xs break-all">' + escapeHtml(String(cert.serial_number || '')) + '</span></div>' +
-            '<div><strong>Created:</strong> ' + escapeHtml(new Date(cert.created_at).toLocaleString()) + '</div>' +
-            '<div><strong>Expires:</strong> ' + escapeHtml(new Date(cert.expires_at).toLocaleString()) + '</div>' +
-            '<div><strong>Status:</strong> ' + (cert.revoked ? 'Revoked' : 'Active') + '</div>';
+            '<div><strong>شماره سریال:</strong> <span class="font-mono text-xs break-all">' + escapeHtml(String(cert.serial_number || '')) + '</span></div>' +
+            '<div><strong>تاریخ ایجاد:</strong> ' + escapeHtml(new Date(cert.created_at).toLocaleString()) + '</div>' +
+            '<div><strong>تاریخ انقضا:</strong> ' + escapeHtml(new Date(cert.expires_at).toLocaleString()) + '</div>' +
+            '<div><strong>وضعیت:</strong> ' + (cert.revoked ? 'لغو شده' : 'فعال') + '</div>';
         document.getElementById('certModal').classList.remove('hidden');
     }
 
@@ -312,7 +312,7 @@
     };
 
     function ccRevokeCert(id) {
-        CertMate.confirm('Are you sure you want to revoke this certificate?', 'Revoke Certificate').then(function(confirmed) {
+        CertMate.confirm('آیا مطمئن هستید که می‌خواهید این گواهی را لغو کنید؟', 'لغو گواهی').then(function(confirmed) {
             if (!confirmed) return;
             fetch('/api/client-certs/' + id + '/revoke', {
                 method: 'POST',
@@ -320,14 +320,14 @@
                 body: JSON.stringify({ reason: 'User requested' })
             }).then(function(response) {
                 if (response.ok) {
-                    CertMate.toast('Certificate revoked', 'success');
+                    CertMate.toast('گواهی لغو شد', 'success');
                     ccLoadCertificates();
                     ccLoadStatistics();
                 } else {
-                    CertMate.toast('Error revoking certificate', 'error');
+                    CertMate.toast('خطا در لغو گواهی', 'error');
                 }
             }).catch(function() {
-                CertMate.toast('Error revoking certificate', 'error');
+                CertMate.toast('خطا در لغو گواهی', 'error');
             });
         });
     }
@@ -338,14 +338,14 @@
             headers: { 'Content-Type': 'application/json' }
         }).then(function(response) {
             if (response.ok) {
-                CertMate.toast('Certificate renewed!', 'success');
+                CertMate.toast('گواهی تمدید شد!', 'success');
                 ccLoadCertificates();
                 ccLoadStatistics();
             } else {
-                CertMate.toast('Error renewing certificate', 'error');
+                CertMate.toast('خطا در تمدید گواهی', 'error');
             }
         }).catch(function() {
-            CertMate.toast('Error renewing certificate', 'error');
+            CertMate.toast('خطا در تمدید گواهی', 'error');
         });
     }
 })();

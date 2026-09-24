@@ -2,9 +2,9 @@
                     <div x-show="tab === 'dns'" x-cloak>
                     <!-- Challenge Type Selection -->
                     <div class="bg-gray-50 dark:bg-gray-700/50 p-4 rounded-lg mb-4">
-                        <label class="block text-sm font-medium text-label mb-3">
+                         <label class="block text-sm font-medium text-label mb-3">
                             <i class="fas fa-shield-alt mr-1"></i>
-                            ACME Challenge Type
+                            نوع چالش ACME
                         </label>
                         <div class="flex gap-4">
                             <label class="relative cursor-pointer">
@@ -14,7 +14,7 @@
                                         <i class="fas fa-globe-americas text-blue-500"></i>
                                         <span class="text-sm font-medium dark:text-white">DNS-01</span>
                                     </div>
-                                    <p class="text-xs text-muted mt-1">Requires DNS provider credentials. Supports wildcards.</p>
+                                     <p class="text-xs text-muted mt-1">نیاز به اعتبارنامه‌های ارائه‌دهنده DNS دارد. از wildcard پشتیبانی می‌کند.</p>
                                 </div>
                             </label>
                             <label class="relative cursor-pointer">
@@ -24,7 +24,7 @@
                                         <i class="fas fa-globe text-green-500"></i>
                                         <span class="text-sm font-medium dark:text-white">HTTP-01</span>
                                     </div>
-                                    <p class="text-xs text-muted mt-1">Domain must point to this server. No wildcards.</p>
+                                     <p class="text-xs text-muted mt-1">دامنه باید به این سرور اشاره کند. بدون wildcard.</p>
                                 </div>
                             </label>
                         </div>
@@ -32,17 +32,17 @@
 
                     <!-- DNS Provider Selection (hidden when HTTP-01) -->
                     <div id="dns-provider-section" class="bg-gray-50 dark:bg-gray-700/50 p-4 rounded-lg">
-                        <label class="block text-sm font-medium text-label mb-3" id="dns-provider-label">
+                         <label class="block text-sm font-medium text-label mb-3" id="dns-provider-label">
                             <i class="fas fa-server mr-1"></i>
-                            DNS Providers
+                            ارائه‌دهندگان DNS
                         </label>
                         
                         <!-- Multi-Account Providers -->
                         <div class="mb-6">
-                            <h4 class="text-sm font-semibold text-label mb-2 flex items-center">
+                             <h4 class="text-sm font-semibold text-label mb-2 flex items-center">
                                 <i class="fas fa-users mr-2 text-blue-500"></i>
-                                Multi-Account Support
-                                <span class="ml-2 text-xs bg-info-surface text-info-strong px-2 py-0.5 rounded-full">Advanced</span>
+                                پشتیبانی از چند حساب
+                                <span class="ml-2 text-xs bg-info-surface text-info-strong px-2 py-0.5 rounded-full">پیشرفته</span>
                             </h4>
                             <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-7 gap-2 mb-4" role="radiogroup" aria-labelledby="dns-provider-label">
                                 <label class="relative">
@@ -51,11 +51,11 @@
                                         <div class="text-center">
                                             <i class="fab fa-cloudflare text-lg text-orange-500 mb-1"></i>
                                             <div class="text-xs font-medium dark:text-white">Cloudflare</div>
-                                            <div class="text-xs text-muted mt-1" id="cloudflare-status">Not configured</div>
+                                             <div class="text-xs text-muted mt-1" id="cloudflare-status">پیکربندی نشده</div>
                                             <!-- Multi-account indicator -->
                                             <div class="text-xs text-info-fg mt-1 hidden" id="cloudflare-accounts">
                                                 <i class="fas fa-users text-xs mr-1"></i>
-                                                <span id="cloudflare-account-count">0</span> accounts
+                                                 <span id="cloudflare-account-count">0</span> حساب
                                             </div>
                                         </div>
                                     </div>
@@ -66,11 +66,11 @@
                                         <div class="text-center">
                                             <i class="fab fa-aws text-lg text-orange-400 mb-1"></i>
                                             <div class="text-xs font-medium dark:text-white">Route53</div>
-                                            <div class="text-xs text-muted mt-1" id="route53-status">Not configured</div>
+                                             <div class="text-xs text-muted mt-1" id="route53-status">پیکربندی نشده</div>
                                             <!-- Multi-account indicator -->
                                             <div class="text-xs text-info-fg mt-1 hidden" id="route53-accounts">
                                                 <i class="fas fa-users text-xs mr-1"></i>
-                                                <span id="route53-account-count">0</span> accounts
+                                                 <span id="route53-account-count">0</span> حساب
                                             </div>
                                         </div>
                                     </div>
@@ -81,11 +81,11 @@
                                         <div class="text-center">
                                             <i class="fab fa-digital-ocean text-lg text-blue-600 mb-1"></i>
                                             <div class="text-xs font-medium dark:text-white">DigitalOcean</div>
-                                            <div class="text-xs text-muted mt-1" id="digitalocean-status">Not configured</div>
+                                             <div class="text-xs text-muted mt-1" id="digitalocean-status">پیکربندی نشده</div>
                                             <!-- Multi-account indicator -->
                                             <div class="text-xs text-info-fg mt-1 hidden" id="digitalocean-accounts">
                                                 <i class="fas fa-users text-xs mr-1"></i>
-                                                <span id="digitalocean-account-count">0</span> accounts
+                                                 <span id="digitalocean-account-count">0</span> حساب
                                             </div>
                                         </div>
                                     </div>
@@ -96,11 +96,11 @@
                                         <div class="text-center">
                                             <i class="fab fa-microsoft text-lg text-blue-600 mb-1"></i>
                                             <div class="text-xs font-medium dark:text-white">Azure DNS</div>
-                                            <div class="text-xs text-muted mt-1" id="azure-status">Not configured</div>
+                                             <div class="text-xs text-muted mt-1" id="azure-status">پیکربندی نشده</div>
                                             <!-- Multi-account indicator -->
                                             <div class="text-xs text-info-fg mt-1 hidden" id="azure-accounts">
                                                 <i class="fas fa-users text-xs mr-1"></i>
-                                                <span id="azure-account-count">0</span> accounts
+                                                 <span id="azure-account-count">0</span> حساب
                                             </div>
                                         </div>
                                     </div>
@@ -111,11 +111,11 @@
                                         <div class="text-center">
                                             <i class="fab fa-google text-lg text-blue-500 mb-1"></i>
                                             <div class="text-xs font-medium dark:text-white">Google DNS</div>
-                                            <div class="text-xs text-muted mt-1" id="google-status">Not configured</div>
+                                             <div class="text-xs text-muted mt-1" id="google-status">پیکربندی نشده</div>
                                             <!-- Multi-account indicator -->
                                             <div class="text-xs text-info-fg mt-1 hidden" id="google-accounts">
                                                 <i class="fas fa-users text-xs mr-1"></i>
-                                                <span id="google-account-count">0</span> accounts
+                                                 <span id="google-account-count">0</span> حساب
                                             </div>
                                         </div>
                                     </div>
@@ -126,11 +126,11 @@
                                         <div class="text-center">
                                             <i class="fas fa-server text-lg text-muted mb-1"></i>
                                             <div class="text-xs font-medium dark:text-white">PowerDNS</div>
-                                            <div class="text-xs text-muted mt-1" id="powerdns-status">Not configured</div>
+                                             <div class="text-xs text-muted mt-1" id="powerdns-status">پیکربندی نشده</div>
                                             <!-- Multi-account indicator -->
                                             <div class="text-xs text-info-fg mt-1 hidden" id="powerdns-accounts">
                                                 <i class="fas fa-users text-xs mr-1"></i>
-                                                <span id="powerdns-account-count">0</span> accounts
+                                                 <span id="powerdns-account-count">0</span> حساب
                                             </div>
                                         </div>
                                     </div>
@@ -141,11 +141,11 @@
                                         <div class="text-center">
                                             <i class="fas fa-exchange-alt text-lg text-muted mb-1"></i>
                                             <div class="text-xs font-medium dark:text-white">RFC2136</div>
-                                            <div class="text-xs text-muted mt-1" id="rfc2136-status">Not configured</div>
+                                             <div class="text-xs text-muted mt-1" id="rfc2136-status">پیکربندی نشده</div>
                                             <!-- Multi-account indicator -->
                                             <div class="text-xs text-info-fg mt-1 hidden" id="rfc2136-accounts">
                                                 <i class="fas fa-users text-xs mr-1"></i>
-                                                <span id="rfc2136-account-count">0</span> accounts
+                                                 <span id="rfc2136-account-count">0</span> حساب
                                             </div>
                                         </div>
                                     </div>
@@ -155,10 +155,10 @@
                         
                         <!-- Single-Account Providers -->
                         <div>
-                            <h4 class="text-sm font-semibold text-label mb-2 flex items-center">
+                             <h4 class="text-sm font-semibold text-label mb-2 flex items-center">
                                 <i class="fas fa-user mr-2 text-gray-500"></i>
-                                Single Account Providers
-                                <span class="ml-2 text-xs bg-surface-2 text-label px-2 py-0.5 rounded-full">Standard</span>
+                                ارائه‌دهندگان حساب تکی
+                                <span class="ml-2 text-xs bg-surface-2 text-label px-2 py-0.5 rounded-full">استاندارد</span>
                             </h4>
                             <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-2" role="radiogroup" aria-labelledby="dns-provider-label">
                                 <label class="relative">
@@ -167,7 +167,7 @@
                                         <div class="text-center">
                                             <i class="fas fa-cloud text-lg text-green-600 mb-1"></i>
                                             <div class="text-xs font-medium dark:text-white">Akamai Connected Cloud (Linode)</div>
-                                            <div class="text-xs text-muted mt-1" id="linode-status">Not configured</div>
+                                            <div class="text-xs text-muted mt-1" id="linode-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
                                 </label>
@@ -177,7 +177,7 @@
                                         <div class="text-center">
                                             <i class="fas fa-cloud text-lg text-orange-600 mb-1"></i>
                                             <div class="text-xs font-medium dark:text-white">Akamai Edge DNS</div>
-                                            <div class="text-xs text-muted mt-1" id="edgedns-status">Not configured</div>
+                                            <div class="text-xs text-muted mt-1" id="edgedns-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
                                 </label>
@@ -187,7 +187,7 @@
                                         <div class="text-center">
                                             <i class="fas fa-cloud text-lg text-blue-600 mb-1"></i>
                                             <div class="text-xs font-medium dark:text-white">Vultr</div>
-                                            <div class="text-xs text-muted mt-1" id="vultr-status">Not configured</div>
+                                            <div class="text-xs text-muted mt-1" id="vultr-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
                                 </label>
@@ -197,7 +197,7 @@
                                         <div class="text-center">
                                             <i class="fas fa-server text-lg text-red-600 mb-1"></i>
                                             <div class="text-xs font-medium dark:text-white">Hetzner</div>
-                                            <div class="text-xs text-muted mt-1" id="hetzner-status">Not configured</div>
+                                            <div class="text-xs text-muted mt-1" id="hetzner-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
                                 </label>
@@ -207,7 +207,7 @@
                                         <div class="text-center">
                                             <i class="fas fa-server text-lg text-red-600 mb-1"></i>
                                             <div class="text-xs font-medium dark:text-white">Hetzner Cloud</div>
-                                            <div class="text-xs text-muted mt-1" id="hetzner-cloud-status">Not configured</div>
+                                            <div class="text-xs text-muted mt-1" id="hetzner-cloud-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
                                 </label>
@@ -217,7 +217,7 @@
                                         <div class="text-center">
                                             <i class="fas fa-cloud text-lg text-blue-600 mb-1"></i>
                                             <div class="text-xs font-medium dark:text-white">ArvanCloud</div>
-                                            <div class="text-xs text-muted mt-1" id="arvancloud-status">Not configured</div>
+                                            <div class="text-xs text-muted mt-1" id="arvancloud-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
                                 </label>
@@ -227,7 +227,7 @@
                                         <div class="text-center">
                                             <i class="fas fa-cloud text-lg text-purple-600 mb-1"></i>
                                             <div class="text-xs font-medium dark:text-white">Infomaniak</div>
-                                            <div class="text-xs text-muted mt-1" id="infomaniak-status">Not configured</div>
+                                            <div class="text-xs text-muted mt-1" id="infomaniak-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
                                 </label>
@@ -237,7 +237,7 @@
                                         <div class="text-center">
                                             <i class="fas fa-network-wired text-lg text-green-600 mb-1"></i>
                                             <div class="text-xs font-medium dark:text-white">ACME-DNS</div>
-                                            <div class="text-xs text-muted mt-1" id="acme-dns-status">Not configured</div>
+                                            <div class="text-xs text-muted mt-1" id="acme-dns-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
                                 </label>
@@ -247,7 +247,7 @@
                                         <div class="text-center">
                                             <i class="fas fa-shield-alt text-lg text-green-600 mb-1"></i>
                                             <div class="text-xs font-medium dark:text-white">deSEC</div>
-                                            <div class="text-xs text-muted mt-1" id="desec-status">Not configured</div>
+                                            <div class="text-xs text-muted mt-1" id="desec-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
                                 </label>
@@ -257,7 +257,7 @@
                                         <div class="text-center">
                                             <i class="fas fa-cloud text-lg text-purple-600 mb-1"></i>
                                             <div class="text-xs font-medium dark:text-white">Scaleway</div>
-                                            <div class="text-xs text-muted mt-1" id="scaleway-status">Not configured</div>
+                                            <div class="text-xs text-muted mt-1" id="scaleway-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
                                 </label>
@@ -267,7 +267,7 @@
                                         <div class="text-center">
                                             <i class="fas fa-globe text-lg text-orange-600 mb-1"></i>
                                             <div class="text-xs font-medium dark:text-white">Gandi</div>
-                                            <div class="text-xs text-muted mt-1" id="gandi-status">Not configured</div>
+                                            <div class="text-xs text-muted mt-1" id="gandi-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
                                 </label>
@@ -277,7 +277,7 @@
                                         <div class="text-center">
                                             <i class="fas fa-server text-lg text-purple-600 mb-1"></i>
                                             <div class="text-xs font-medium dark:text-white">OVH</div>
-                                            <div class="text-xs text-muted mt-1" id="ovh-status">Not configured</div>
+                                            <div class="text-xs text-muted mt-1" id="ovh-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
                                 </label>
@@ -287,7 +287,7 @@
                                         <div class="text-center">
                                             <i class="fas fa-shopping-cart text-lg text-red-600 mb-1"></i>
                                             <div class="text-xs font-medium dark:text-white">Namecheap</div>
-                                            <div class="text-xs text-muted mt-1" id="namecheap-status">Not configured</div>
+                                            <div class="text-xs text-muted mt-1" id="namecheap-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
                                 </label>
@@ -297,7 +297,7 @@
                                         <div class="text-center">
                                             <i class="fas fa-paw text-lg text-pink-600 mb-1"></i>
                                             <div class="text-xs font-medium dark:text-white">Porkbun</div>
-                                            <div class="text-xs text-muted mt-1" id="porkbun-status">Not configured</div>
+                                            <div class="text-xs text-muted mt-1" id="porkbun-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
                                 </label>
@@ -307,7 +307,7 @@
                                         <div class="text-center">
                                             <i class="fas fa-globe text-lg text-green-600 mb-1"></i>
                                             <div class="text-xs font-medium dark:text-white">GoDaddy</div>
-                                            <div class="text-xs text-muted mt-1" id="godaddy-status">Not configured</div>
+                                            <div class="text-xs text-muted mt-1" id="godaddy-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
                                 </label>
@@ -317,7 +317,7 @@
                                         <div class="text-center">
                                             <i class="fas fa-cogs text-lg text-green-600 mb-1"></i>
                                             <div class="text-xs font-medium dark:text-white">DNS Made Easy</div>
-                                            <div class="text-xs text-muted mt-1" id="dnsmadeeasy-status">Not configured</div>
+                                            <div class="text-xs text-muted mt-1" id="dnsmadeeasy-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
                                 </label>
@@ -327,7 +327,7 @@
                                         <div class="text-center">
                                             <i class="fas fa-network-wired text-lg text-indigo-600 mb-1"></i>
                                             <div class="text-xs font-medium dark:text-white">NS1</div>
-                                            <div class="text-xs text-muted mt-1" id="nsone-status">Not configured</div>
+                                            <div class="text-xs text-muted mt-1" id="nsone-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
                                 </label>
@@ -337,7 +337,7 @@
                                         <div class="text-center">
                                             <i class="fas fa-bolt text-lg text-yellow-600 mb-1"></i>
                                             <div class="text-xs font-medium dark:text-white">Hurricane Electric</div>
-                                            <div class="text-xs text-muted mt-1" id="he-ddns-status">Not configured</div>
+                                            <div class="text-xs text-muted mt-1" id="he-ddns-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
                                 </label>
@@ -347,7 +347,7 @@
                                         <div class="text-center">
                                             <i class="fas fa-sync-alt text-lg text-purple-600 mb-1"></i>
                                             <div class="text-xs font-medium dark:text-white">Dynu</div>
-                                            <div class="text-xs text-muted mt-1" id="dynudns-status">Not configured</div>
+                                            <div class="text-xs text-muted mt-1" id="dynudns-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
                                 </label>
@@ -357,7 +357,7 @@
                                         <div class="text-center">
                                             <i class="fas fa-feather text-lg text-yellow-500 mb-1"></i>
                                             <div class="text-xs font-medium dark:text-white">DuckDNS</div>
-                                            <div class="text-xs text-muted mt-1" id="duckdns-status">Not configured</div>
+                                            <div class="text-xs text-muted mt-1" id="duckdns-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
                                 </label>
@@ -367,7 +367,7 @@
                                         <div class="text-center">
                                             <i class="fas fa-terminal text-lg text-gray-600 mb-1"></i>
                                             <div class="text-xs font-medium dark:text-white">Custom Script</div>
-                                            <div class="text-xs text-muted mt-1" id="custom-script-status">Not configured</div>
+                                            <div class="text-xs text-muted mt-1" id="custom-script-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
                                 </label>
@@ -391,8 +391,8 @@
                                 </h4>
                                 <button type="button" id="cloudflare-add-account" onclick="showAddAccountModal('cloudflare')" 
                                         class="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md text-white bg-primary hover:bg-secondary focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary">
-                                    <i class="fas fa-plus mr-1"></i>
-                                    Add Account
+                                     <i class="fas fa-plus mr-1"></i>
+                                    افزودن حساب
                                 </button>
                             </div>
                             
@@ -403,19 +403,19 @@
                             
                             <!-- Legacy single account fields (hidden when multi-account mode is active) -->
                             <div id="cloudflare-legacy-config">
-                                <label for="cloudflare_api_token" class="block text-sm font-medium text-label">
-                                    API Token
+                                 <label for="cloudflare_api_token" class="block text-sm font-medium text-label">
+                                    کلید API
                                 </label>
                                 <div class="mt-1">
                                     <input type="password" id="cloudflare_api_token" name="cloudflare_api_token" 
                                            class="block w-full border border-border dark:bg-gray-700 dark:text-white rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
-                                           placeholder="Enter your Cloudflare API token"
+                                            placeholder="کلید API Cloudflare خود را وارد کنید"
                                            autocomplete="new-password" 
                                            spellcheck="false"
                                            data-lpignore="true">
                                 </div>
-                                <p class="mt-2 text-sm text-muted">
-                                    Create an API token at <a href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" class="text-primary hover:underline">Cloudflare Dashboard</a> with <strong>Zone:DNS:Edit</strong> permissions.
+                                 <p class="mt-2 text-sm text-muted">
+                                    یک کلید API در <a href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" class="text-primary hover:underline">داشبورد Cloudflare</a> با مجوزهای <strong>Zone:DNS:Edit</strong> ایجاد کنید.
                                 </p>
                             </div>
                         </div>
@@ -431,8 +431,8 @@
                                 </h4>
                                 <button type="button" id="route53-add-account" onclick="showAddAccountModal('route53')" 
                                         class="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md text-white bg-primary hover:bg-secondary focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary">
-                                    <i class="fas fa-plus mr-1"></i>
-                                    Add Account
+                                     <i class="fas fa-plus mr-1"></i>
+                                    افزودن حساب
                                 </button>
                             </div>
                             
@@ -445,8 +445,8 @@
                             <div id="route53-legacy-config">
                                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                                     <div>
-                                        <label for="route53_access_key_id" class="block text-sm font-medium text-label">
-                                            Access Key ID
+                                             <label for="route53_access_key_id" class="block text-sm font-medium text-label">
+                                            شناسه کلید دسترسی
                                         </label>
                                         <input type="password" id="route53_access_key_id" name="route53_access_key_id" 
                                                class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
@@ -456,27 +456,27 @@
                                                data-lpignore="true">
                                     </div>
                                     <div>
-                                        <label for="route53_secret_access_key" class="block text-sm font-medium text-label">
-                                            Secret Access Key
+                                             <label for="route53_secret_access_key" class="block text-sm font-medium text-label">
+                                            کلید دسترسی مخفی
                                         </label>
                                         <input type="password" id="route53_secret_access_key" name="route53_secret_access_key" 
                                                class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
-                                               placeholder="Your AWS secret access key"
+                                               placeholder="کلید دسترسی مخفی AWS شما"
                                                autocomplete="new-password" 
                                                spellcheck="false"
                                                data-lpignore="true">
                                     </div>
                                     <div>
-                                        <label for="route53_region" class="block text-sm font-medium text-label">
-                                            Region (Optional)
+                                             <label for="route53_region" class="block text-sm font-medium text-label">
+                                            منطقه (اختیاری)
                                         </label>
                                         <input type="text" id="route53_region" name="route53_region" 
                                                class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
                                                placeholder="us-east-1" value="us-east-1">
                                     </div>
                                 </div>
-                                <p class="mt-2 text-sm text-muted">
-                                    Create IAM credentials with <strong>Route53FullAccess</strong> policy or a custom policy with Route53 DNS permissions.
+                                 <p class="mt-2 text-sm text-muted">
+                                    اعتبارنامه‌های IAM با سیاست <strong>Route53FullAccess</strong> یا سیاست سفارشی با مجوزهای DNS Route53 ایجاد کنید.
                                 </p>
                             </div>
                         </div>
@@ -492,8 +492,8 @@
                                 </h4>
                                 <button type="button" id="azure-add-account" onclick="showAddAccountModal('azure')" 
                                         class="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md text-white bg-primary hover:bg-secondary focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary">
-                                    <i class="fas fa-plus mr-1"></i>
-                                    Add Account
+                                     <i class="fas fa-plus mr-1"></i>
+                                    افزودن حساب
                                 </button>
                             </div>
                             
@@ -507,7 +507,7 @@
                                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                                     <div>
                                         <label for="azure_subscription_id" class="block text-sm font-medium text-label">
-                                            Subscription ID
+                                            شناسه اشتراک
                                         </label>
                                         <input type="text" id="azure_subscription_id" name="azure_subscription_id" 
                                                class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
@@ -515,7 +515,7 @@
                                     </div>
                                     <div>
                                         <label for="azure_resource_group" class="block text-sm font-medium text-label">
-                                            Resource Group
+                                            گروه منابع
                                         </label>
                                         <input type="text" id="azure_resource_group" name="azure_resource_group" 
                                                class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
@@ -523,7 +523,7 @@
                                     </div>
                                     <div>
                                         <label for="azure_tenant_id" class="block text-sm font-medium text-label">
-                                            Tenant ID
+                                            شناسه کارگزار
                                         </label>
                                         <input type="text" id="azure_tenant_id" name="azure_tenant_id" 
                                                class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
@@ -531,26 +531,26 @@
                                     </div>
                                     <div>
                                         <label for="azure_client_id" class="block text-sm font-medium text-label">
-                                            Client ID
+                                            شناسه کلاینت
                                         </label>
                                         <input type="text" id="azure_client_id" name="azure_client_id" 
                                                class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
                                                placeholder="12345678-1234-1234-1234-123456789012">
                                     </div>
                                     <div class="md:col-span-2">
-                                        <label for="azure_client_secret" class="block text-sm font-medium text-label">
-                                            Client Secret
+                                         <label for="azure_client_secret" class="block text-sm font-medium text-label">
+                                            رمز کلاینت
                                         </label>
                                         <input type="password" id="azure_client_secret" name="azure_client_secret" 
                                                class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
-                                               placeholder="Your Azure client secret"
+                                                placeholder="رمز کلاینت Azure شما"
                                                autocomplete="new-password" 
                                                spellcheck="false"
                                                data-lpignore="true">
                                     </div>
                                 </div>
-                                <p class="mt-2 text-sm text-muted">
-                                    Create a Service Principal with <strong>DNS Zone Contributor</strong> role for your DNS zones.
+                                 <p class="mt-2 text-sm text-muted">
+                                    یک Service Principal با نقش <strong>DNS Zone Contributor</strong> برای مناطق DNS خود ایجاد کنید.
                                 </p>
                             </div>
                         </div>
@@ -566,8 +566,8 @@
                                 </h4>
                                 <button type="button" id="google-add-account" onclick="showAddAccountModal('google')" 
                                         class="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md text-white bg-primary hover:bg-secondary focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary">
-                                    <i class="fas fa-plus mr-1"></i>
-                                    Add Account
+                                     <i class="fas fa-plus mr-1"></i>
+                                    افزودن حساب
                                 </button>
                             </div>
                             
@@ -581,7 +581,7 @@
                                 <div class="space-y-4">
                                     <div>
                                         <label for="google_project_id" class="block text-sm font-medium text-label">
-                                            Project ID
+                                            شناسه پروژه
                                         </label>
                                         <input type="text" id="google_project_id" name="google_project_id" 
                                                class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
@@ -589,7 +589,7 @@
                                     </div>
                                     <div>
                                         <label for="google_service_account_key" class="block text-sm font-medium text-label">
-                                            Service Account JSON Key
+                                            کلید JSON حساب سرویس
                                         </label>
                                         <textarea id="google_service_account_key" name="google_service_account_key" rows="4"
                                                class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
@@ -613,8 +613,8 @@
                                 </h4>
                                 <button type="button" id="powerdns-add-account" onclick="showAddAccountModal('powerdns')" 
                                         class="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md text-white bg-primary hover:bg-secondary focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary">
-                                    <i class="fas fa-plus mr-1"></i>
-                                    Add Account
+                                     <i class="fas fa-plus mr-1"></i>
+                                    افزودن حساب
                                 </button>
                             </div>
                             
@@ -663,8 +663,8 @@
                                 </h4>
                                 <button type="button" id="digitalocean-add-account" onclick="showAddAccountModal('digitalocean')" 
                                         class="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md text-white bg-primary hover:bg-secondary focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary">
-                                    <i class="fas fa-plus mr-1"></i>
-                                    Add Account
+                                     <i class="fas fa-plus mr-1"></i>
+                                    افزودن حساب
                                 </button>
                             </div>
                             
@@ -705,8 +705,8 @@
                                 </h4>
                                 <button type="button" id="vultr-add-account" onclick="showAddAccountModal('vultr')" 
                                         class="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md text-white bg-primary hover:bg-secondary focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary">
-                                    <i class="fas fa-plus mr-1"></i>
-                                    Add Account
+                                     <i class="fas fa-plus mr-1"></i>
+                                    افزودن حساب
                                 </button>
                             </div>
                             
@@ -1293,8 +1293,8 @@
                                 </h4>
                                 <button type="button" id="duckdns-add-account" onclick="showAddAccountModal('duckdns')"
                                         class="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md text-white bg-primary hover:bg-secondary focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary">
-                                    <i class="fas fa-plus mr-1"></i>
-                                    Add Account
+                                     <i class="fas fa-plus mr-1"></i>
+                                    افزودن حساب
                                 </button>
                             </div>
 
@@ -1331,8 +1331,8 @@
                                 </h4>
                                 <button type="button" id="custom-script-add-account" onclick="showAddAccountModal('custom-script')"
                                         class="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md text-white bg-primary hover:bg-secondary focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary">
-                                    <i class="fas fa-plus mr-1"></i>
-                                    Add Account
+                                     <i class="fas fa-plus mr-1"></i>
+                                    افزودن حساب
                                 </button>
                             </div>
 
@@ -1377,8 +1377,8 @@
                                 </h4>
                                 <button type="button" id="nsone-add-account" onclick="showAddAccountModal('nsone')"
                                         class="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md text-white bg-primary hover:bg-secondary focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary">
-                                    <i class="fas fa-plus mr-1"></i>
-                                    Add Account
+                                     <i class="fas fa-plus mr-1"></i>
+                                    افزودن حساب
                                 </button>
                             </div>
 
@@ -1414,8 +1414,8 @@
                                 </h4>
                                 <button type="button" id="dnsmadeeasy-add-account" onclick="showAddAccountModal('dnsmadeeasy')"
                                         class="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md text-white bg-primary hover:bg-secondary focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary">
-                                    <i class="fas fa-plus mr-1"></i>
-                                    Add Account
+                                     <i class="fas fa-plus mr-1"></i>
+                                    افزودن حساب
                                 </button>
                             </div>
 

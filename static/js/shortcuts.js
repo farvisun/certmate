@@ -9,17 +9,17 @@
     var shortcutOverlay = null;
 
     var shortcuts = [
-        { key: '?', desc: 'Show keyboard shortcuts' },
-        { key: '/', desc: 'Focus search / filter' },
-        { key: 'n', desc: 'New certificate (focus domain input)' },
-        { key: 'r', desc: 'Refresh certificate list' },
-        { key: 't', desc: 'Toggle dark mode' },
-        { key: 'g h', desc: 'Go to Certificates' },
-        { key: 'g c', desc: 'Go to Client Certificates' },
-        { key: 'g s', desc: 'Go to Settings' },
-        { key: 'g a', desc: 'Go to Activity' },
-        { key: 'g d', desc: 'Go to API Docs' },
-        { key: 'Esc', desc: 'Close panel / overlay' }
+        { key: '?', desc: 'نمایش میانبرهای صفحه‌کلید' },
+        { key: '/', desc: 'تمرکز روی جستجو / فیلتر' },
+        { key: 'n', desc: 'گواهی جدید (تمرکز روی ورودی دامنه)' },
+        { key: 'r', desc: 'بروزرسانی لیست گواهی‌ها' },
+        { key: 't', desc: 'تغییر حالت تاریک' },
+        { key: 'g h', desc: 'رفتن به گواهی‌ها' },
+        { key: 'g c', desc: 'رفتن به گواهی‌های کلاینت' },
+        { key: 'g s', desc: 'رفتن به تنظیمات' },
+        { key: 'g a', desc: 'رفتن به فعالیت' },
+        { key: 'g d', desc: 'رفتن به مستندات API' },
+        { key: 'Esc', desc: 'بستن پنل / لایه' }
     ];
 
     // "g" prefix state for two-key navigation combos
@@ -45,7 +45,7 @@
             var kbds = keys.map(function(k) {
                 return '<kbd class="inline-flex items-center justify-center min-w-[28px] px-2 py-1 text-xs font-mono font-semibold ' + 'bg-surface-2 text-gray-700 dark:text-gray-200 border border-border rounded shadow-sm">' +
                     CertMate.escapeHtml(k) + '</kbd>';
-            }).join('<span class="mx-1 text-gray-400 text-xs">then</span>');
+            }).join('<span class="mx-1 text-gray-400 text-xs">سپس</span>');
             cols += '<div class="flex items-center justify-between py-1.5">' +
                 '<span class="text-sm text-label">' + CertMate.escapeHtml(s.desc) + '</span>' +
                 '<span class="ml-4 flex items-center gap-1">' + kbds + '</span>' +
@@ -173,7 +173,7 @@
                 if (typeof window.loadCertificates === 'function') {
                     window.loadCertificates();
                     if (typeof CertMate !== 'undefined' && CertMate.toast) {
-                        CertMate.toast('Refreshing certificates...', 'info');
+                        CertMate.toast('در حال بروزرسانی گواهی‌ها...', 'info');
                     }
                 }
                 break;

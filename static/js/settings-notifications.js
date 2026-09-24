@@ -54,7 +54,7 @@
                 if (btn) {
                     originalHTML = btn.innerHTML;
                     btn.disabled = true;
-                    btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i> Saving...';
+                    btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i> در حال ذخیره...';
                 }
                 fetch('/api/notifications/config', {
                     method: 'POST',
@@ -63,8 +63,8 @@
                     body: JSON.stringify(self.config)
                 })
                     .then(function (r) { return r.json(); })
-                    .then(function () { CertMate.toast('Notification settings saved', 'success'); })
-                    .catch(function () { CertMate.toast('Failed to save', 'error'); })
+                    .then(function () { CertMate.toast('تنظیمات اعلان‌ها ذخیره شد', 'success'); })
+                    .catch(function () { CertMate.toast('ذخیره ناموفق بود', 'error'); })
                     .then(function () {
                         if (btn) {
                             btn.disabled = false;
@@ -79,7 +79,7 @@
                 if (btn) {
                     originalHTML = btn.innerHTML;
                     btn.disabled = true;
-                    btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i> Testing...';
+                    btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i> در حال آزمایش...';
                 }
                 fetch('/api/notifications/test', {
                     method: 'POST',
@@ -88,8 +88,8 @@
                     body: JSON.stringify({ channel_type: 'smtp', config: self.config.channels.smtp })
                 })
                     .then(function (r) { return r.json(); })
-                    .then(function (d) { CertMate.toast(d.success ? 'Test email sent!' : ('Email failed: ' + (d.error || 'unknown')), d.success ? 'success' : 'error'); })
-                    .catch(function () { CertMate.toast('Test failed', 'error'); })
+                    .then(function (d) { CertMate.toast(d.success ? 'ایمیل آزمایشی ارسال شد!' : ('ایمیل ناموفق بود: ' + (d.error || 'ناشناخته')), d.success ? 'success' : 'error'); })
+                    .catch(function () { CertMate.toast('آزمایش ناموفق بود', 'error'); })
                     .then(function () {
                         if (btn) {
                             btn.disabled = false;
@@ -103,7 +103,7 @@
                 if (btn) {
                     originalHTML = btn.innerHTML;
                     btn.disabled = true;
-                    btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i> Sending...';
+                    btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i> در حال ارسال...';
                 }
                 fetch('/api/digest/send', {
                     method: 'POST',
@@ -112,10 +112,10 @@
                 })
                     .then(function (r) { return r.json(); })
                     .then(function (d) {
-                        if (d.success) CertMate.toast('Weekly digest sent!', 'success');
-                        else CertMate.toast('Digest: ' + (d.error || d.skipped || 'unknown error'), d.skipped ? 'warning' : 'error');
+                        if (d.success) CertMate.toast('خلاصه هفتگی ارسال شد!', 'success');
+                        else CertMate.toast('خلاصه: ' + (d.error || d.skipped || 'خطای ناشناخته'), d.skipped ? 'warning' : 'error');
                     })
-                    .catch(function () { CertMate.toast('Failed to send digest', 'error'); })
+                    .catch(function () { CertMate.toast('ارسال خلاصه ناموفق بود', 'error'); })
                     .then(function () {
                         if (btn) {
                             btn.disabled = false;
@@ -129,7 +129,7 @@
                 if (btn) {
                     originalHTML = btn.innerHTML;
                     btn.disabled = true;
-                    btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i> Testing...';
+                    btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i> در حال آزمایش...';
                 }
                 fetch('/api/notifications/test', {
                     method: 'POST',
@@ -138,8 +138,8 @@
                     body: JSON.stringify({ channel_type: 'webhook', config: wh })
                 })
                     .then(function (r) { return r.json(); })
-                    .then(function (d) { CertMate.toast(d.success ? 'Webhook test sent!' : ('Webhook failed: ' + (d.error || 'unknown')), d.success ? 'success' : 'error'); })
-                    .catch(function () { CertMate.toast('Test failed', 'error'); })
+                    .then(function (d) { CertMate.toast(d.success ? 'هوک وب ارسال شد!' : ('هوک وب ناموفق بود: ' + (d.error || 'ناشناخته')), d.success ? 'success' : 'error'); })
+                    .catch(function () { CertMate.toast('آزمایش ناموفق بود', 'error'); })
                     .then(function () {
                         if (btn) {
                             btn.disabled = false;

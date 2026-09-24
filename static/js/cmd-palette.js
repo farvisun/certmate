@@ -17,19 +17,19 @@
     var staticItems = [
         { type: 'nav', icon: 'fa-certificate', label: 'Server Certificates', desc: 'Manage SSL/TLS certificates', url: '/' },
         { type: 'nav', icon: 'fa-id-card', label: 'Client Certificates', desc: 'mTLS, VPN, user auth certificates', url: '/#client' },
-        { type: 'nav', icon: 'fa-cog', label: 'Settings', desc: 'Configure DNS, CA, storage', url: '/settings' },
-        { type: 'nav', icon: 'fa-question-circle', label: 'Help & Documentation', desc: 'Getting started, guides', url: '/help' },
-        { type: 'nav', icon: 'fa-history', label: 'Activity Log', desc: 'Recent operations and events', url: '/activity' },
-        { type: 'nav', icon: 'fa-book', label: 'API Documentation', desc: 'ReDoc API reference', url: '/redoc' },
-        { type: 'settings', icon: 'fa-server', label: 'DNS Provider Settings', desc: 'Configure DNS providers', url: '/settings#dns' },
-        { type: 'settings', icon: 'fa-shield-alt', label: 'CA Settings', desc: 'Certificate authority configuration', url: '/settings#ca' },
-        { type: 'settings', icon: 'fa-sliders-h', label: 'General Settings', desc: 'Notifications, defaults', url: '/settings#general' },
-        { type: 'settings', icon: 'fa-database', label: 'Storage Settings', desc: 'Certificate storage paths', url: '/settings#storage' },
-        { type: 'settings', icon: 'fa-users', label: 'User Management', desc: 'Manage user accounts', url: '/settings#users' },
-        { type: 'settings', icon: 'fa-archive', label: 'Backup & Restore', desc: 'Backup configuration and certificates', url: '/settings#backup' },
-        { type: 'action', icon: 'fa-plus-circle', label: 'Create Certificate', desc: 'Issue a new SSL certificate', url: '/', action: 'focusCreate' },
-        { type: 'action', icon: 'fa-moon', label: 'Toggle Dark Mode', desc: 'Switch theme', action: 'toggleTheme' },
-        { type: 'action', icon: 'fa-bell', label: 'Notifications', desc: 'Check certificate alerts', action: 'toggleNotifs' }
+        { type: 'nav', icon: 'fa-cog', label: 'تنظیمات', desc: 'پیکربندی DNS، CA، ذخیره‌سازی', url: '/settings' },
+        { type: 'nav', icon: 'fa-question-circle', label: 'راهنما و مستندات', desc: 'شروع سریع، راهنماها', url: '/help' },
+        { type: 'nav', icon: 'fa-history', label: 'گزارش فعالیت', desc: 'عملیات و رویدادهای اخیر', url: '/activity' },
+        { type: 'nav', icon: 'fa-book', label: 'مستندات API', desc: 'مرجع ReDoc API', url: '/redoc' },
+        { type: 'settings', icon: 'fa-server', label: 'تنظیمات ارائه‌دهنده DNS', desc: 'پیکربندی ارائه‌دهندگان DNS', url: '/settings#dns' },
+        { type: 'settings', icon: 'fa-shield-alt', label: 'تنظیمات CA', desc: 'پیکربندی مرجع صدور گواهی', url: '/settings#ca' },
+        { type: 'settings', icon: 'fa-sliders-h', label: 'تنظیمات عمومی', desc: 'اعلان‌ها، پیش‌فرض‌ها', url: '/settings#general' },
+        { type: 'settings', icon: 'fa-database', label: 'تنظیمات ذخیره‌سازی', desc: 'مسیرهای ذخیره‌سازی گواهی', url: '/settings#storage' },
+        { type: 'settings', icon: 'fa-users', label: 'مدیریت کاربران', desc: 'مدیریت حساب‌های کاربری', url: '/settings#users' },
+        { type: 'settings', icon: 'fa-archive', label: 'پشتیبان و بازیابی', desc: 'پیکربندی پشتیبان و گواهی‌ها', url: '/settings#backup' },
+        { type: 'action', icon: 'fa-plus-circle', label: 'ایجاد گواهی', desc: 'صدور گواهی SSL جدید', url: '/', action: 'focusCreate' },
+        { type: 'action', icon: 'fa-moon', label: 'تغییر حالت تاریک', desc: 'تغییر پوسته', action: 'toggleTheme' },
+        { type: 'action', icon: 'fa-bell', label: 'اعلان‌ها', desc: 'بررسی هشدارهای گواهی', action: 'toggleNotifs' }
     ];
 
     function createPaletteHTML() {
@@ -41,7 +41,7 @@
             '<div class="fixed inset-x-4 top-[15vh] sm:inset-x-auto sm:left-1/2 sm:-translate-x-1/2 sm:w-full sm:max-w-lg bg-surface border-border rounded-xl shadow-2xl border overflow-hidden">' +
                 '<div class="flex items-center px-4 border-b border-border">' +
                     '<i class="fas fa-search text-gray-400 mr-3"></i>' +
-                    '<input id="cmdPaletteInput" type="text" placeholder="Search pages, settings, certificates..." ' +
+                    '<input id="cmdPaletteInput" type="text" placeholder="جستجوی صفحات، تنظیمات، گواهی‌ها..." ' +
                            'class="flex-1 py-3 bg-transparent text-foreground placeholder-gray-400 outline-none text-sm">' +
                     '<kbd class="hidden sm:inline-flex items-center px-2 py-0.5 text-xs text-gray-400 bg-surface-2 rounded">ESC</kbd>' +
                 '</div>' +
@@ -108,7 +108,7 @@
                         type: 'cert',
                         icon: 'fa-lock',
                         label: c.domain,
-                        desc: (c.exists ? (c.days_until_expiry > 0 ? c.days_until_expiry + ' days left' : 'Expired') : 'Not found'),
+                        desc: (c.exists ? (c.days_until_expiry > 0 ? c.days_until_expiry + ' روز باقی‌مانده' : 'منقضی شده') : 'یافت نشد'),
                         url: '/',
                         domain: c.domain
                     };

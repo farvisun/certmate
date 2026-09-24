@@ -83,7 +83,7 @@
                     })
                     .catch(function (err) {
                         self.loading = false;
-                        showMessage('Failed to load SSO settings: ' + (err && err.message ? err.message : err), 'error');
+                        showMessage('بارگذاری تنظیمات SSO ناموفق بود: ' + (err && err.message ? err.message : err), 'error');
                     });
             },
 
@@ -125,10 +125,10 @@
                     .then(function (res) {
                         self.saving = false;
                         if (!res.ok) {
-                            showMessage('Save failed: ' + (res.data && res.data.error ? res.data.error : 'unknown'), 'error');
+                            showMessage('ذخیره ناموفق بود: ' + (res.data && res.data.error ? res.data.error : 'ناشناخته'), 'error');
                             return;
                         }
-                        showMessage('SSO settings saved', 'success');
+                        showMessage('تنظیمات SSO ذخیره شد', 'success');
                         // Re-fetch so masked client_secret comes back as the
                         // sentinel and any normalisation from the server is
                         // reflected in the UI.
@@ -136,7 +136,7 @@
                     })
                     .catch(function (err) {
                         self.saving = false;
-                        showMessage('Save failed: ' + (err && err.message ? err.message : err), 'error');
+                        showMessage('ذخیره ناموفق بود: ' + (err && err.message ? err.message : err), 'error');
                     });
             }
         };

@@ -111,7 +111,7 @@
         var reportRowHtml = canReport
             ? '<div class="pl-7 flex justify-start">' +
                   '<button data-action="report" class="text-xs font-medium underline opacity-80 hover:opacity-100 disabled:opacity-40 disabled:no-underline disabled:cursor-wait">' +
-                      '<i class="fas fa-bug mr-1"></i>Report this issue' +
+                       '<i class="fas fa-bug mr-1"></i>گزارش این مشکل' +
                   '</button>' +
               '</div>'
             : '';
@@ -132,10 +132,10 @@
             var reportBtn = toast.querySelector('[data-action="report"]');
             reportBtn.addEventListener('click', function () {
                 reportBtn.disabled = true;
-                reportBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Preparing…';
+                reportBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>در حال آماده‌سازی…';
                 CM.reportIssue(opts.errorContext)['finally'](function () {
                     reportBtn.disabled = false;
-                    reportBtn.innerHTML = '<i class="fas fa-bug mr-1"></i>Report this issue';
+                    reportBtn.innerHTML = '<i class="fas fa-bug mr-1"></i>گزارش این مشکل';
                 });
             });
         }
@@ -227,7 +227,7 @@
     var BTN_PRIMARY = BTN_BASE + ' bg-blue-600 text-white hover:bg-blue-700 focus:ring-blue-500';
 
     CM.confirm = function(message, title, options) {
-        title = title || 'Confirm';
+        title = title || 'تایید';
         options = options || {};
         var danger = options.danger !== false; // default to danger styling
 
@@ -236,8 +236,8 @@
             var bodyHtml =
                 '<p class="text-muted text-sm">' + CM.escapeHtml(message) + '</p>' +
                 '<div class="flex justify-end gap-3 mt-6">' +
-                    '<button data-action="cancel" class="' + BTN_CANCEL + '">Cancel</button>' +
-                    '<button data-action="confirm" class="' + (danger ? BTN_DANGER : BTN_PRIMARY) + '">' + CM.escapeHtml(options.confirmText || 'Confirm') + '</button>' +
+                    '<button data-action="cancel" class="' + BTN_CANCEL + '">لغو</button>' +
+                    '<button data-action="confirm" class="' + (danger ? BTN_DANGER : BTN_PRIMARY) + '">' + CM.escapeHtml(options.confirmText || 'تایید') + '</button>' +
                 '</div>';
 
             var box = createDialogBox(title, bodyHtml);
@@ -266,7 +266,7 @@
 
     // ── Styled Prompt Dialog ─────────────────────────────────────
     CM.prompt = function(message, title, defaultValue) {
-        title = title || 'Input';
+        title = title || 'ورودی';
         defaultValue = defaultValue || '';
 
         return new Promise(function(resolve) {
@@ -277,8 +277,8 @@
                 '<input id="' + inputId + '" type="text" value="' + CM.escapeHtml(defaultValue) + '" ' +
                     'class="w-full px-3 py-2 border text-foreground border-border rounded-lg bg-input text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none">' +
                 '<div class="flex justify-end gap-3 mt-6">' +
-                    '<button data-action="cancel" class="' + BTN_CANCEL + '">Cancel</button>' +
-                    '<button data-action="confirm" class="' + BTN_PRIMARY + '">OK</button>' +
+                    '<button data-action="cancel" class="' + BTN_CANCEL + '">لغو</button>' +
+                    '<button data-action="confirm" class="' + BTN_PRIMARY + '">تایید</button>' +
                 '</div>';
 
             var box = createDialogBox(title, bodyHtml);
@@ -552,14 +552,14 @@
         var originalText = buttonEl ? buttonEl.innerHTML : '';
         if (buttonEl) {
             buttonEl.disabled = true;
-            buttonEl.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Copying…';
+                buttonEl.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>در حال کپی…';
         }
         return CM.api('GET', '/api/diagnostics/snapshot')
             .then(function(data) {
                 var text = JSON.stringify(data, null, 2);
                 if (navigator.clipboard && navigator.clipboard.writeText) {
                     return navigator.clipboard.writeText(text).then(function() {
-                        CM.toast('Diagnostic snapshot copied to clipboard!', 'success');
+                        CM.toast('اسنپ‌شات عیب‌یابی در کلیپ‌بورد کپی شد!', 'success');
                     });
                 } else {
                     // Fallback using temporary textarea
@@ -571,16 +571,16 @@
                     textarea.select();
                     try {
                         document.execCommand('copy');
-                        CM.toast('Diagnostic snapshot copied to clipboard!', 'success');
+                        CM.toast('اسنپ‌شات عیب‌یابی در کلیپ‌بورد کپی شد!', 'success');
                     } catch (err) {
-                        CM.toast('Failed to copy snapshot. Copy it manually from the console.', 'error');
+                        CM.toast('کپی اسنپ‌شات ناموفق بود. آن را به صورت دستی از کنسول کپی کنید.', 'error');
                         console.info('[CertMate] clipboard fallback used — snapshot text available in variable');
                     }
                     document.body.removeChild(textarea);
                 }
             })
             .catch(function(err) {
-                CM.toast('Failed to retrieve diagnostic snapshot: ' + (err.message || err), 'error');
+                CM.toast('بازیابی اسنپ‌شات عیب‌یابی ناموفق بود: ' + (err.message || err), 'error');
             })
             .finally(function() {
                 if (buttonEl) {

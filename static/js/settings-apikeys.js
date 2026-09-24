@@ -48,7 +48,7 @@
             createKey: function () {
                 var self = this;
                 if (!self.newKey.name.trim()) {
-                    showMessage('Key name is required', 'error');
+                    showMessage('نام کلید الزامی است', 'error');
                     return;
                 }
 
@@ -65,13 +65,13 @@
                 var proceed;
                 if (domains === undefined) {
                     proceed = CertMate.confirm(
-                        'This key will have no domain restrictions and will be ' +
-                        'authorized to operate on every certificate on this CertMate ' +
-                        'instance, scoped only by the role you selected. ' +
-                        'To restrict the key to specific domains, cancel and fill in ' +
-                        'the Allowed Domains field (comma-separated, supports wildcards ' +
-                        'like *.example.com). Create this unrestricted key?',
-                        'Create Unrestricted API Key'
+                        'این کلید هیچ محدودیت دامنه‌ای نخواهد داشت و ' +
+                        'مجاز به عملیات روی تمام گواهی‌های این نمونه CertMate ' +
+                        'خواهد بود، فقط بر اساس نقش انتخابی شما محدود می‌شود. ' +
+                        'برای محدود کردن کلید به دامنه‌های خاص، لغو کنید و فیلد ' +
+                        'دامنه‌های مجاز را پر کنید (با کاما جدا شده، از wildcard ' +
+                        'مانند *.example.com پشتیبانی می‌کند). این کلید بدون محدودیت ایجاد شود؟',
+                        'ایجاد کلید API بدون محدودیت'
                     );
                 } else {
                     proceed = Promise.resolve(true);
@@ -120,9 +120,9 @@
                                 self.createdToken = data.token;
                                 self.newKey = { name: '', role: 'viewer', expires_at: '', allowed_domains: '', is_agent: false };
                                 self.loadKeys();
-                                showMessage('API key "' + data.name + '" created', 'success');
+                                showMessage('کلید API "' + data.name + '" ایجاد شد', 'success');
                             } else {
-                                showMessage(data.error || 'Failed to create API key', 'error', {
+                                showMessage(data.error || 'ایجاد کلید API ناموفق بود', 'error', {
                                     errorContext: {
                                         endpoint: 'POST /api/keys',
                                         status: r.status,
@@ -135,7 +135,7 @@
                         });
                     })
                     .catch(function () {
-                        showMessage('Failed to create API key', 'error', {
+                        showMessage('ایجاد کلید API ناموفق بود', 'error', {
                             errorContext: {
                                 endpoint: 'POST /api/keys',
                                 status: 0,
@@ -149,8 +149,8 @@
             revokeKey: function (keyId, keyName) {
                 var self = this;
                 CertMate.confirm(
-                    'Are you sure you want to revoke API key "' + CertMate.escapeHtml(keyName) + '"? This cannot be undone.',
-                    'Revoke API Key'
+                    'آیا مطمئن هستید که می‌خواهید کلید API "' + CertMate.escapeHtml(keyName) + '" را لغو کنید؟ این عمل غیرقابل بازگشت است.',
+                    'لغو کلید API'
                 ).then(function (confirmed) {
                     if (!confirmed) return;
                     fetch('/api/keys/' + keyId, {
@@ -160,14 +160,14 @@
                         .then(function (r) {
                             return r.json().then(function (data) {
                                 if (r.ok) {
-                                    showMessage('API key revoked', 'success');
+                                    showMessage('کلید API لغو شد', 'success');
                                     self.loadKeys();
                                 } else {
-                                    showMessage(data.error || 'Failed to revoke key', 'error');
+                                    showMessage(data.error || 'لغو کلید ناموفق بود', 'error');
                                 }
                             });
                         })
-                        .catch(function () { showMessage('Failed to revoke API key', 'error'); });
+                        .catch(function () { showMessage('لغو کلید API ناموفق بود', 'error'); });
                 });
             },
 
@@ -175,7 +175,7 @@
                 var self = this;
                 if (navigator.clipboard && self.createdToken) {
                     navigator.clipboard.writeText(self.createdToken).then(function () {
-                        showMessage('Token copied to clipboard', 'success');
+                        showMessage('توکن در کلیپ‌بورد کپی شد', 'success');
                     });
                 }
             }

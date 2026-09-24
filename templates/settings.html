@@ -12,7 +12,7 @@
                     <nav class="flex items-center text-sm" aria-label="Breadcrumb">
                         <a href="/" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"><i class="fas fa-home"></i></a>
                         <i class="fas fa-chevron-right text-[10px] text-gray-300 dark:text-gray-600 mx-2"></i>
-                        <span class="text-gray-700 dark:text-gray-200 font-medium">Settings</span>
+                         <span class="text-gray-700 dark:text-gray-200 font-medium">تنظیمات</span>
                     </nav>
                     <!-- DNS-provider status indicators. No JS path
                          currently toggles these on (they sit hidden in
@@ -27,18 +27,18 @@
                          refer to CA or storage). -->
                     <div class="flex items-center text-xs gap-3" aria-live="polite">
                         <div class="hidden text-success-fg" id="connectionStatus">
-                            <i class="fas fa-check-circle mr-1" aria-hidden="true"></i><span>DNS: Connected</span>
+                             <i class="fas fa-check-circle mr-1" aria-hidden="true"></i><span>DNS: متصل</span>
                         </div>
                         <div class="hidden text-warning-fg" id="partialStatus">
-                            <i class="fas fa-exclamation-triangle mr-1" aria-hidden="true"></i><span>DNS: Partial</span>
+                             <i class="fas fa-exclamation-triangle mr-1" aria-hidden="true"></i><span>DNS: ناقص</span>
                         </div>
                         <div class="hidden text-danger-fg" id="disconnectedStatus">
-                            <i class="fas fa-times-circle mr-1" aria-hidden="true"></i><span>DNS: Not configured</span>
+                             <i class="fas fa-times-circle mr-1" aria-hidden="true"></i><span>DNS: پیکربندی نشده</span>
                         </div>
                     </div>
                 </div>
                 <nav class="flex space-x-1 min-w-max" role="tablist">
-                    <template x-for="t in [{id:'dns',icon:'fa-server',label:'DNS'},{id:'ca',icon:'fa-shield-alt',label:'CA'},{id:'general',icon:'fa-cogs',label:'General'},{id:'storage',icon:'fa-database',label:'Storage'},{id:'notifications',icon:'fa-bell',label:'Notifications'},{id:'deploy',icon:'fa-rocket',label:'Deploy'},{id:'users',icon:'fa-users',label:'Users'},{id:'apikeys',icon:'fa-key',label:'API Keys'},{id:'oidc',icon:'fa-id-badge',label:'SSO'},{id:'backup',icon:'fa-archive',label:'Backup'}]">
+                     <template x-for="t in [{id:'dns',icon:'fa-server',label:'DNS'},{id:'ca',icon:'fa-shield-alt',label:'CA'},{id:'general',icon:'fa-cogs',label:'عمومی'},{id:'storage',icon:'fa-database',label:'ذخیره‌سازی'},{id:'notifications',icon:'fa-bell',label:'اعلان‌ها'},{id:'deploy',icon:'fa-rocket',label:'استقرار'},{id:'users',icon:'fa-users',label:'کاربران'},{id:'apikeys',icon:'fa-key',label:'کلیدهای API'},{id:'oidc',icon:'fa-id-badge',label:'SSO'},{id:'backup',icon:'fa-archive',label:'پشتیبان‌گیری'}]">
                         <button type="button" @click="tab = t.id" role="tab"
                                 :title="t.label"
                                 :aria-label="t.label"
@@ -72,56 +72,56 @@
                     <!-- TAB: Backup & Restore Section -->
                     <div x-show="tab === 'backup'" x-cloak class="bg-surface rounded-xl shadow-card p-6 mt-6">
             <div class="flex items-center justify-between mb-4">
-                <h3 class="text-lg font-semibold text-foreground flex items-center">
+                     <h3 class="text-lg font-semibold text-foreground flex items-center">
                     <i class="fas fa-database mr-2 text-blue-500"></i>
-                    Backup & Restore
+                    پشتیبان‌گیری و بازیابی
                 </h3>
-                <span class="text-xs bg-info-surface text-info-strong px-2 py-1 rounded-full">
-                    Data Protection
+                 <span class="text-xs bg-info-surface text-info-strong px-2 py-1 rounded-full">
+                    حفاظت از داده‌ها
                 </span>
             </div>
             
-            <p class="text-muted text-sm mb-6">
-                Create backups of your settings and certificates to prevent data loss. Restore from previous backups when needed.
+             <p class="text-muted text-sm mb-6">
+                از تنظیمات و گواهی‌های خود نسخه پشتیبان تهیه کنید تا از دست رفتن داده‌ها جلوگیری شود. در صورت نیاز از نسخه‌های پشتیبان قبلی بازیابی کنید.
             </p>
 
             <!-- Create Backup Section -->
             <div class="grid md:grid-cols-2 gap-6 mb-6">
                 <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-4">
-                    <h4 class="font-medium text-foreground mb-3 flex items-center">
+                     <h4 class="font-medium text-foreground mb-3 flex items-center">
                         <i class="fas fa-plus-circle mr-2 text-green-500"></i>
-                        Create Backup
+                        ایجاد پشتیبان
                     </h4>
                     <p class="text-sm text-muted mb-4">
-                        Create atomic backups that include both settings and certificates to ensure data consistency.
+                        پشتیبان‌های اتمی ایجاد کنید که هم تنظیمات و هم گواهی‌ها را شامل می‌شود تا از سازگاری داده‌ها اطمینان حاصل شود.
                     </p>
                     <div class="space-y-3">
                         <button type="button" onclick="createBackup('unified', this)" 
                                 class="w-full bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 transition-colors text-sm">
-                            <i class="fas fa-archive mr-2"></i>
-                            Create Unified Backup (Recommended)
+                             <i class="fas fa-archive mr-2"></i>
+                            ایجاد پشتیبان یکپارچه (توصیه شده)
                         </button>
                         <button type="button" onclick="CertMate.copyDiagnosticsSnapshot(this)"
                                 class="w-full bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-colors text-sm">
-                            <i class="fas fa-clipboard mr-2"></i>
-                            Copy Diagnostic Snapshot
+                             <i class="fas fa-clipboard mr-2"></i>
+                            کپی اسنپ‌شات عیب‌یابی
                         </button>
                     </div>
                 </div>
 
                 <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-4">
-                    <h4 class="font-medium text-foreground mb-3 flex items-center">
+                     <h4 class="font-medium text-foreground mb-3 flex items-center">
                         <i class="fas fa-info-circle mr-2 text-blue-500"></i>
-                        Backup Information
+                        اطلاعات پشتیبان
                     </h4>
                     <div class="space-y-2 text-sm text-muted">
                         <div class="flex items-start">
                             <i class="fas fa-check text-green-500 mr-2 mt-0.5 text-xs"></i>
-                            <span><strong>Unified Backup:</strong> Atomic backup of both settings and certificates ensuring data consistency and preventing configuration mismatches</span>
+                             <span><strong>پشتیبان یکپارچه:</strong> پشتیبان اتمی از تنظیمات و گواهی‌ها که از سازگاری داده‌ها و جلوگیری از عدم تطابق پیکربندی اطمینان حاصل می‌کند</span>
                         </div>
                         <div class="flex items-start mt-3 pt-2 border-t border-border">
                             <i class="fas fa-shield-alt text-yellow-500 mr-2 mt-0.5 text-xs"></i>
-                            <span class="text-xs">Backups contain sensitive data. Keep them secure and stored safely.</span>
+                             <span class="text-xs">نسخه‌های پشتیبان حاوی داده‌های حساس هستند. آن‌ها را ایمن نگه دارید و به صورت امن ذخیره کنید.</span>
                         </div>
                     </div>
                 </div>
@@ -130,14 +130,14 @@
             <!-- Existing Backups Section -->
             <div class="border-t border-border pt-6">
                 <div class="flex items-center justify-between mb-4">
-                    <h4 class="font-medium text-foreground flex items-center">
+                     <h4 class="font-medium text-foreground flex items-center">
                         <i class="fas fa-history mr-2 text-orange-500"></i>
-                        Existing Backups
+                        نسخه‌های پشتیبان موجود
                     </h4>
                     <button type="button" onclick="refreshBackupList()" 
                             class="text-sm text-info-fg hover:text-blue-800 dark:hover:text-blue-300">
-                        <i class="fas fa-sync-alt mr-1"></i>
-                        Refresh
+                         <i class="fas fa-sync-alt mr-1"></i>
+                        به‌روزرسانی
                     </button>
                 </div>
 
@@ -145,14 +145,14 @@
                 <div class="space-y-6">
                     <!-- Unified Backups (Recommended) -->
                     <div>
-                        <h5 class="text-sm font-medium text-label mb-3">
+                         <h5 class="text-sm font-medium text-label mb-3">
                             <i class="fas fa-archive mr-1 text-green-500"></i>
-                            Unified Backups (Recommended)
-                            <span class="text-xs bg-success-surface text-success-strong px-2 py-1 rounded-full ml-2">Atomic</span>
+                            پشتیبان‌های یکپارچه (توصیه شده)
+                            <span class="text-xs bg-success-surface text-success-strong px-2 py-1 rounded-full ml-2">اتمی</span>
                         </h5>
                         <div id="unified-backup-list" class="space-y-2 max-h-64 overflow-y-auto">
-                            <div class="text-sm text-muted text-center py-4">
-                                Loading unified backups...
+                             <div class="text-sm text-muted text-center py-4">
+                                در حال بارگذاری پشتیبان‌های یکپارچه...
                             </div>
                         </div>
                     </div>
@@ -166,24 +166,24 @@
         <div id="statusMessage" class="mt-4 hidden"></div>
     </div>
 
-    {% call modal(id="addAccountModal", title="Add Account", size="sm") %}
+     {% call modal(id="addAccountModal", title="افزودن حساب", size="sm") %}
         <form id="addAccountForm" class="space-y-4">
             <div>
-                <label for="account-name" class="block text-sm font-medium text-label">
-                    Account Name *
+                     <label for="account-name" class="block text-sm font-medium text-label">
+                    نام حساب *
                 </label>
                 <input type="text" id="account-name" name="name" required
                        class="mt-1 block w-full border border-border dark:bg-gray-700 dark:text-white rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
-                       placeholder="e.g., Production, Development, Client-A">
+                       placeholder="مثال: Production, Development, Client-A">
             </div>
 
             <div>
-                <label for="account-description" class="block text-sm font-medium text-label">
-                    Description (optional)
+                     <label for="account-description" class="block text-sm font-medium text-label">
+                    توضیحات (اختیاری)
                 </label>
                 <input type="text" id="account-description" name="description"
                        class="mt-1 block w-full border border-border dark:bg-gray-700 dark:text-white rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
-                       placeholder="Brief description of this account">
+                       placeholder="توضیحات مختصر این حساب">
             </div>
 
             <!-- Dynamic fields will be populated here based on provider -->
@@ -192,8 +192,8 @@
             <div class="flex items-center">
                 <input type="checkbox" id="set-as-default" name="set_as_default"
                        class="h-4 w-4 text-primary focus:ring-primary border-gray-300 rounded">
-                <label for="set-as-default" class="ml-2 block text-sm text-label">
-                    Set as default account
+                 <label for="set-as-default" class="ml-2 block text-sm text-label">
+                    تنظیم به عنوان حساب پیش‌فرض
                 </label>
             </div>
 
@@ -204,28 +204,28 @@
                 </button>
                 <button type="button" onclick="saveAccount()"
                         class="px-4 py-2 bg-primary text-white rounded-md hover:bg-secondary focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary">
-                    Add Account
+                     افزودن حساب
                 </button>
             </div>
         </form>
     {% endcall %}
 
-    {% call modal(id="editAccountModal", title="Edit Account", size="sm") %}
+     {% call modal(id="editAccountModal", title="ویرایش حساب", size="sm") %}
         <form id="editAccountForm" class="space-y-4">
             <input type="hidden" id="edit-account-id" name="edit-account-id">
             <input type="hidden" id="edit-provider-name" name="edit-provider-name">
 
             <div>
-                <label for="edit-account-name" class="block text-sm font-medium text-label">
-                    Account Name *
+                 <label for="edit-account-name" class="block text-sm font-medium text-label">
+                    نام حساب *
                 </label>
                 <input type="text" id="edit-account-name" name="name" required
                        class="mt-1 block w-full border border-border dark:bg-gray-700 dark:text-white rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary">
             </div>
 
             <div>
-                <label for="edit-account-description" class="block text-sm font-medium text-label">
-                    Description (optional)
+                 <label for="edit-account-description" class="block text-sm font-medium text-label">
+                    توضیحات (اختیاری)
                 </label>
                 <input type="text" id="edit-account-description" name="description"
                        class="mt-1 block w-full border border-border dark:bg-gray-700 dark:text-white rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary">
@@ -237,19 +237,19 @@
             <div class="flex items-center">
                 <input type="checkbox" id="edit-set-as-default" name="set_as_default"
                        class="h-4 w-4 text-primary focus:ring-primary border-gray-300 rounded">
-                <label for="edit-set-as-default" class="ml-2 block text-sm text-label">
-                    Set as default account
+                 <label for="edit-set-as-default" class="ml-2 block text-sm text-label">
+                    تنظیم به عنوان حساب پیش‌فرض
                 </label>
             </div>
 
             <div class="flex justify-end space-x-3 pt-4">
-                <button type="button" data-modal-close
+                 <button type="button" data-modal-close
                         class="px-4 py-2 border border-border rounded-md text-label hover:bg-gray-50 dark:hover:bg-gray-700">
-                    Cancel
+                    لغو
                 </button>
                 <button type="button" onclick="saveEditAccount()"
                         class="px-4 py-2 bg-primary text-white rounded-md hover:bg-secondary focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary">
-                    Update Account
+                     به‌روزرسانی حساب
                 </button>
             </div>
         </form>
@@ -258,22 +258,22 @@
     <!-- Debug Console -->
     <div id="settingsDebugConsole" class="fixed bottom-4 left-4 right-4 bg-black text-green-400 font-mono text-xs rounded-lg shadow-lg border border-gray-600 hidden z-40">
         <div class="flex justify-between items-center px-3 py-2 border-b border-gray-700">
-            <span class="text-white font-semibold">Settings Debug Console</span>
-            <button type="button" onclick="clearSettingsDebugConsole()" class="text-yellow-400 hover:text-yellow-300" title="Clear console" aria-label="Clear debug console">
+             <span class="text-white font-semibold">کنسول اشکال‌زدایی تنظیمات</span>
+             <button type="button" onclick="clearSettingsDebugConsole()" class="text-yellow-400 hover:text-yellow-300" title="پاک کردن کنسول" aria-label="پاک کردن کنسول اشکال‌زدایی">
                 <i class="fas fa-eraser"></i>
             </button>
-            <button type="button" onclick="toggleSettingsDebugConsole()" class="text-gray-400 hover:text-white ml-2" title="Close console" aria-label="Close debug console">
+             <button type="button" onclick="toggleSettingsDebugConsole()" class="text-gray-400 hover:text-white ml-2" title="بستن کنسول" aria-label="بستن کنسول اشکال‌زدایی">
                 <i class="fas fa-times"></i>
             </button>
         </div>
         <div id="settingsDebugOutput" class="p-3 max-h-64 overflow-y-auto">
-            <div class="text-gray-500">Debug console ready. All settings actions will be logged here...</div>
+             <div class="text-gray-500">کنسول اشکال‌زدایی آماده است. تمام اعمال تنظیمات در اینجا ثبت می‌شوند...</div>
         </div>
     </div>
-    <button type="button" data-debug-control onclick="toggleSettingsDebugConsole()"
+     <button type="button" data-debug-control onclick="toggleSettingsDebugConsole()"
             class="hidden fixed bottom-4 right-4 bg-gray-800 text-white px-3 py-2 rounded-full shadow-lg z-50 hover:bg-primary"
-            aria-label="Open settings debug console">
-        <i class="fas fa-bug"></i> Debug
+            aria-label="باز کردن کنسول اشکال‌زدایی تنظیمات">
+        <i class="fas fa-bug"></i> اشکال‌زدایی
     </button>
     <script src="/static/js/settings.js"></script>
     <script src="/static/js/settings-notifications.js"></script>

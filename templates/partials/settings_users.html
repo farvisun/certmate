@@ -1,17 +1,17 @@
 <!-- TAB: User Management Section -->
         <div x-show="tab === 'users'" x-cloak class="bg-surface border-border rounded-lg shadow-sm border p-6 mt-6">
             <div class="flex items-center justify-between mb-4">
-                <h3 class="text-lg font-semibold text-foreground flex items-center">
+                 <h3 class="text-lg font-semibold text-foreground flex items-center">
                     <i class="fas fa-users mr-2 text-primary"></i>
-                    User Management
+                    مدیریت کاربران
                 </h3>
-                <span class="text-xs bg-purple-100 dark:bg-purple-900/30 text-purple-800 dark:text-purple-300 px-2 py-1 rounded-full">
-                    Local Authentication
+                 <span class="text-xs bg-purple-100 dark:bg-purple-900/30 text-purple-800 dark:text-purple-300 px-2 py-1 rounded-full">
+                    احراز هویت محلی
                 </span>
             </div>
             
-            <p class="text-muted text-sm mb-6">
-                Manage local user accounts for CertMate. Enable local authentication to require username/password login.
+             <p class="text-muted text-sm mb-6">
+                مدیریت حساب‌های کاربری محلی برای CertMate. احراز هویت محلی را برای نیاز به ورود نام کاربری/رمز عبور فعال کنید.
             </p>
 
             <!-- Security reminder (shown when auth is disabled) -->
@@ -19,9 +19,9 @@
                 <div class="flex items-start">
                     <i class="fas fa-exclamation-triangle text-amber-500 mt-0.5 mr-3 flex-shrink-0"></i>
                     <div>
-                        <h4 class="text-sm font-medium text-warning-strong">Authentication is disabled</h4>
+                         <h4 class="text-sm font-medium text-warning-strong">احراز هویت غیرفعال است</h4>
                         <p class="text-xs text-warning-fg mt-1">
-                            Anyone with network access can manage certificates and settings. Enable Local Authentication below and create an admin user to secure your instance.
+                            هر کسی با دسترسی شبکه می‌تواند گواهی‌ها و تنظیمات را مدیریت کند. احراز هویت محلی را در زیر فعال کرده و یک کاربر مدیر ایجاد کنید تا نمونه خود را ایمن کنید.
                         </p>
                     </div>
                 </div>
@@ -31,8 +31,8 @@
             <div class="mb-6 p-4 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
                 <div class="flex items-center justify-between">
                     <div>
-                        <label class="text-sm font-medium text-label">Enable Local Authentication</label>
-                        <p class="text-xs text-muted mt-1">Require username/password login for web access</p>
+                         <label class="text-sm font-medium text-label">فعال‌سازی احراز هویت محلی</label>
+                        <p class="text-xs text-muted mt-1">نیاز به ورود نام کاربری/رمز عبور برای دسترسی وب</p>
                     </div>
                     <label class="relative inline-flex items-center cursor-pointer">
                         <input type="checkbox" id="localAuthToggle" class="sr-only peer" onchange="toggleLocalAuth()">
@@ -44,38 +44,38 @@
             <!-- Add User Form -->
             <div class="mb-6">
                 <h4 class="text-sm font-semibold text-label mb-3">
-                    <i class="fas fa-user-plus mr-1"></i> Add New User
+                     <i class="fas fa-user-plus mr-1"></i> افزودن کاربر جدید
                 </h4>
                 <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
                     <div>
-                        <label class="block text-xs text-muted mb-1">Username</label>
+                         <label class="block text-xs text-muted mb-1">نام کاربری</label>
                         <input type="text" id="newUserUsername" placeholder="username"
                                class="w-full px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white">
                     </div>
                     <div>
-                        <label class="block text-xs text-muted mb-1">Password</label>
+                         <label class="block text-xs text-muted mb-1">رمز عبور</label>
                         <input type="password" id="newUserPassword" placeholder="password"
                                autocomplete="new-password"
                                class="w-full px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white focus:outline-none focus:ring-primary focus:border-primary">
-                        <p class="text-xs text-gray-400 dark:text-gray-500 mt-1">Min 12 chars, 1 digit, 1 symbol</p>
+                         <p class="text-xs text-gray-400 dark:text-gray-500 mt-1">حداقل ۱۲ کاراکتر، ۱ رقم، ۱ نماد</p>
                     </div>
                     <div>
-                        <label class="block text-xs text-muted mb-1">Email (optional)</label>
+                         <label class="block text-xs text-muted mb-1">ایمیل (اختیاری)</label>
                         <input type="email" id="newUserEmail" placeholder="user@example.com"
                                class="w-full px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white">
                     </div>
                     <div>
-                        <label class="block text-xs text-muted mb-1">Role</label>
+                         <label class="block text-xs text-muted mb-1">نقش</label>
                         <div class="flex items-center space-x-2">
                             <select id="newUserRole" 
                                     class="flex-1 px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white">
-                                <option value="viewer">Viewer</option>
-                                <option value="operator" selected>Operator</option>
-                                <option value="admin">Admin</option>
+                                 <option value="viewer">مشاهده‌گر</option>
+                                <option value="operator" selected>اپراتور</option>
+                                <option value="admin">مدیر</option>
                             </select>
                             <button type="button" onclick="createUser()" 
                                     class="px-4 py-2 bg-purple-600 text-white rounded-md hover:bg-purple-700 text-sm">
-                                <i class="fas fa-plus mr-1"></i> Add
+                                <i class="fas fa-plus mr-1"></i> افزودن
                             </button>
                         </div>
                     </div>
@@ -86,16 +86,16 @@
             <div>
                 <div class="flex items-center justify-between mb-3">
                     <h4 class="text-sm font-semibold text-label">
-                        <i class="fas fa-list mr-1"></i> Existing Users
+                         <i class="fas fa-list mr-1"></i> کاربران موجود
                     </h4>
                     <button type="button" onclick="refreshUserList()" 
                             class="text-sm text-info-fg hover:underline">
-                        <i class="fas fa-sync-alt mr-1"></i> Refresh
+                         <i class="fas fa-sync-alt mr-1"></i> به‌روزرسانی
                     </button>
                 </div>
                 <div id="userList" class="space-y-2 max-h-64 overflow-y-auto">
-                    <div class="text-center py-4 text-muted text-sm">
-                        <i class="fas fa-spinner fa-spin mr-2"></i> Loading users...
+                     <div class="text-center py-4 text-muted text-sm">
+                        <i class="fas fa-spinner fa-spin mr-2"></i> در حال بارگذاری کاربران...
                     </div>
                 </div>
             </div>

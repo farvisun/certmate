@@ -46,8 +46,8 @@
 
     // Show enhanced loading modal with progress
     function showLoadingModal(title, message) {
-        title = title || 'Processing Certificate...';
-        message = message || 'This may take a few minutes';
+        title = title || 'در حال پردازش گواهی...';
+        message = message || 'این ممکن است چند دقیقه طول بکشد';
         var modal = document.getElementById('loadingModal');
         document.getElementById('loadingTitle').textContent = title;
         document.getElementById('loadingMessage').textContent = message;
@@ -183,10 +183,10 @@
         }
 
         statsContainer.innerHTML = [
-            statCard('Total', total, 'text-foreground', 'fa-certificate text-blue-500 dark:text-blue-400'),
-            statCard('Valid', valid, 'text-success-fg', 'fa-check-circle text-green-500 dark:text-green-400', null, valid + ' of ' + total),
-            statCard('Expiring', expiring, 'text-warning-fg', 'fa-exclamation-triangle text-yellow-500 dark:text-yellow-400'),
-            statCard('Deployed', '<span class="text-gray-300 dark:text-gray-600 animate-pulse">...</span>', 'text-indigo-600 dark:text-indigo-400', 'fa-globe text-indigo-500 dark:text-indigo-400', 'deploymentCount')
+            statCard('کل', total, 'text-foreground', 'fa-certificate text-blue-500 dark:text-blue-400'),
+            statCard('معتبر', valid, 'text-success-fg', 'fa-check-circle text-green-500 dark:text-green-400', null, valid + ' از ' + total),
+            statCard('در حال انقضا', expiring, 'text-warning-fg', 'fa-exclamation-triangle text-yellow-500 dark:text-yellow-400'),
+            statCard('مستقر شده', '<span class="text-gray-300 dark:text-gray-600 animate-pulse">...</span>', 'text-indigo-600 dark:text-indigo-400', 'fa-globe text-indigo-500 dark:text-indigo-400', 'deploymentCount')
         ].join('');
     }
 
@@ -377,7 +377,7 @@
 
     function deploymentStatusDisplay(role, result) {
         var isBrowser = role === 'browser';
-        var roleLabel = isBrowser ? 'Browser' : 'Backend';
+        var roleLabel = isBrowser ? 'مرورگر' : 'بک‌اند';
         var roleIcon = isBrowser ? 'fa-globe' : 'fa-server';
         var statusClass;
         var statusIcon = roleIcon;
@@ -386,31 +386,31 @@
         if (isBrowser) {
             if (result && result.reachable) {
                 statusClass = 'bg-info-surface text-blue-800 dark:text-blue-400';
-                statusText = 'Reachable';
+                statusText = 'قابل دسترسی';
             } else if (result && result.reachable === false) {
                 statusClass = 'bg-danger-surface text-red-800 dark:text-red-400';
-                statusText = 'Unreachable';
+                statusText = 'غیرقابل دسترسی';
             } else {
                 statusClass = 'bg-surface-2 text-muted';
-                statusText = 'Not Checked';
+                statusText = 'بررسی نشده';
             }
         } else {
             if (result && result.error === 'backend-unavailable') {
                 statusClass = 'bg-surface-2 text-muted';
                 statusIcon = 'fa-exclamation-circle';
-                statusText = 'Unavailable';
+                statusText = 'در دسترس نیست';
             } else if (result && result.deployed && result.certificate_match === true) {
                 statusClass = 'bg-success-surface text-green-800 dark:text-green-400';
-                statusText = 'Deployed';
+                statusText = 'مستقر شده';
             } else if (result && result.reachable && result.certificate_match === false) {
                 statusClass = 'bg-warning-surface text-yellow-800 dark:text-yellow-400';
-                statusText = 'Wrong Cert';
+                statusText = 'گواهی نادرست';
             } else if (result && result.reachable === false) {
                 statusClass = 'bg-danger-surface text-red-800 dark:text-red-400';
-                statusText = 'Unreachable';
+                statusText = 'غیرقابل دسترسی';
             } else {
                 statusClass = 'bg-surface-2 text-muted';
-                statusText = 'Unknown';
+                statusText = 'ناشناخته';
             }
         }
 
@@ -471,10 +471,10 @@
                     '<div class="mx-auto h-16 w-16 flex items-center justify-center bg-surface-2 rounded-full mb-4">' +
                     '<i class="fas fa-search text-gray-400 text-2xl"></i>' +
                     '</div>' +
-                    '<h3 class="text-lg font-medium text-foreground mb-2">No matching certificates</h3>' +
-                    '<p class="text-muted mb-6">Try adjusting your search criteria or filters.</p>' +
+                    '<h3 class="text-lg font-medium text-foreground mb-2">گواهی مطابقی یافت نشد</h3>' +
+                    '<p class="text-muted mb-6">معیارهای جستجو یا فیلترهای خود را تنظیم کنید.</p>' +
                     '<button onclick="clearFilters()" class="inline-flex items-center px-4 py-2 border border-border shadow-sm text-sm font-medium rounded-md text-label bg-input hover:bg-gray-50 dark:hover:bg-gray-600">' +
-                    '<i class="fas fa-times mr-2"></i>Clear Filters</button>' +
+                    '<i class="fas fa-times mr-2"></i>پاک کردن فیلترها</button>' +
                     '</div>' +
                     '</div>' +
                     '</td></tr>';
@@ -483,19 +483,19 @@
                     '<div class="px-6 py-8"><div class="mx-auto max-w-lg">' +
                     '<div class="text-center mb-6">' +
                     '<div class="mx-auto h-16 w-16 flex items-center justify-center bg-info-surface rounded-full mb-4"><i class="fas fa-rocket text-blue-500 text-2xl"></i></div>' +
-                    '<h3 class="text-lg font-medium text-foreground mb-2">Welcome to CertMate</h3>' +
-                    '<p class="text-muted">Follow these steps to get started:</p>' +
+                    '<h3 class="text-lg font-medium text-foreground mb-2">به CertMate خوش آمدید</h3>' +
+                    '<p class="text-muted">برای شروع این مراحل را دنبال کنید:</p>' +
                     '</div>' +
                     '<ol class="space-y-3 mb-6 text-sm">' +
                     '<li class="flex items-start"><span class="flex-shrink-0 w-6 h-6 flex items-center justify-center bg-blue-500 text-white rounded-full text-xs font-bold mr-3 mt-0.5">1</span>' +
-                    '<span class="text-label"><a href="/settings" class="text-info-fg font-medium hover:underline">Go to Settings</a> and configure your DNS provider</span></li>' +
+                    '<span class="text-label"><a href="/settings" class="text-info-fg font-medium hover:underline">رفتن به تنظیمات</a> و پیکربندی ارائه‌دهنده DNS خود</span></li>' +
                     '<li class="flex items-start"><span class="flex-shrink-0 w-6 h-6 flex items-center justify-center bg-blue-500 text-white rounded-full text-xs font-bold mr-3 mt-0.5">2</span>' +
-                    '<span class="text-label">Add a domain above and create your first SSL certificate</span></li>' +
+                    '<span class="text-label">دامنه‌ای در بالا اضافه کنید و اولین گواهی SSL خود را ایجاد کنید</span></li>' +
                     '<li class="flex items-start"><span class="flex-shrink-0 w-6 h-6 flex items-center justify-center bg-blue-500 text-white rounded-full text-xs font-bold mr-3 mt-0.5">3</span>' +
-                    '<span class="text-label">Enable <a href="/settings#users" class="text-info-fg font-medium hover:underline">Local Authentication</a> in Settings to secure your instance</span></li>' +
+                    '<span class="text-label"><a href="/settings#users" class="text-info-fg font-medium hover:underline">احراز هویت محلی</a> را در تنظیمات فعال کنید تا نمونه خود را ایمن کنید</span></li>' +
                     '</ol>' +
                     '<div class="bg-warning-surface border border-warning-line rounded-lg p-3 mb-6">' +
-                    '<p class="text-xs text-warning-strong"><i class="fas fa-shield-alt mr-1"></i><strong>Security:</strong> Authentication is disabled by default. Enable it before exposing CertMate to the internet.</p>' +
+                    '<p class="text-xs text-warning-strong"><i class="fas fa-shield-alt mr-1"></i><strong>امنیت:</strong> احراز هویت به طور پیش‌فرض غیرفعال است. قبل از در معرض اینترنت قرار دادن CertMate آن را فعال کنید.</p>' +
                     '</div>' +
                     '<div class="text-center"><button type="button" onclick="openCreateCertForm()" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-primary hover:bg-secondary"><i class="fas fa-plus mr-2"></i>Create Certificate</button></div>' +
                     '</div></div>' +
@@ -550,11 +550,11 @@
             var isExpiringSoon = daysKnown && cert.days_until_expiry > 0 && cert.days_until_expiry <= 30;
             var statusClass, statusIcon, statusText, healthClass;
             if (isExpired) {
-                statusClass = 'bg-red-500/10 text-danger-fg ring-1 ring-inset ring-red-500/20'; statusIcon = 'fa-times-circle'; statusText = 'Expired'; healthClass = 'health-expired';
+                statusClass = 'bg-red-500/10 text-danger-fg ring-1 ring-inset ring-red-500/20'; statusIcon = 'fa-times-circle'; statusText = 'منقضی شده'; healthClass = 'health-expired';
             } else if (isExpiringSoon) {
-                statusClass = 'bg-yellow-500/10 text-warning-fg ring-1 ring-inset ring-yellow-500/20'; statusIcon = 'fa-exclamation-triangle'; statusText = 'Expiring'; healthClass = 'health-warning';
+                statusClass = 'bg-yellow-500/10 text-warning-fg ring-1 ring-inset ring-yellow-500/20'; statusIcon = 'fa-exclamation-triangle'; statusText = 'در حال انقضا'; healthClass = 'health-warning';
             } else {
-                statusClass = 'bg-green-500/10 text-success-fg ring-1 ring-inset ring-green-500/20'; statusIcon = 'fa-check-circle'; statusText = 'Valid'; healthClass = 'health-valid';
+                statusClass = 'bg-green-500/10 text-success-fg ring-1 ring-inset ring-green-500/20'; statusIcon = 'fa-check-circle'; statusText = 'معتبر'; healthClass = 'health-valid';
             }
 
             var expiryDate = new Date(cert.expiry_date);
@@ -728,14 +728,14 @@
                 '<div class="space-y-3">' +
                 '<h4 class="text-sm font-semibold text-foreground uppercase tracking-wider">Details</h4>' +
                 '<dl class="space-y-2">' +
-                '<div class="flex justify-between gap-4 py-2 border-b border-border"><dt class="text-sm text-muted">Domain</dt><dd class="text-sm font-medium text-right text-foreground">' + safeDomain + '</dd></div>' +
+                '<div class="flex justify-between gap-4 py-2 border-b border-border"><dt class="text-sm text-muted">دامنه</dt><dd class="text-sm font-medium text-right text-foreground">' + safeDomain + '</dd></div>' +
                 (sanDomains.length ? '<div class="flex justify-between gap-4 py-2 border-b border-border"><dt class="text-sm text-muted">SANs</dt><dd class="text-sm font-medium text-right text-foreground">' + sanDomainsHtml + '</dd></div>' : '') +
-                '<div class="flex justify-between gap-4 py-2 border-b border-border"><dt class="text-sm text-muted">Expires</dt><dd class="text-sm font-medium text-right text-foreground">' + expiryDate.toLocaleDateString(undefined, { weekday: 'short', month: 'long', day: 'numeric', year: 'numeric' }) + '</dd></div>' +
-                (providerLabel ? '<div class="flex justify-between gap-4 py-2 border-b border-border"><dt class="text-sm text-muted">DNS Provider</dt><dd class="text-sm font-medium text-right text-foreground">' + providerLabel + '</dd></div>' : '') +
-                (safeDomainAlias ? '<div class="flex justify-between gap-4 py-2 border-b border-border"><dt class="text-sm text-muted">DNS-01 Alias</dt><dd class="text-sm font-medium text-right break-all text-info-fg">' + safeDomainAlias + '</dd></div>' : '') +
-                (safeDomainAlias && aliasProviderLabel ? '<div class="flex justify-between gap-4 py-2 border-b border-border"><dt class="text-sm text-muted">Alias Provider</dt><dd class="text-sm font-medium text-right text-foreground">' + aliasProviderLabel + '</dd></div>' : '') +
-                '<div class="flex justify-between gap-4 py-2 border-b border-border"><dt class="text-sm text-muted">Auto-Renew</dt><dd class="text-sm font-medium text-right ' + (cert.auto_renew !== false ? 'text-success-fg' : 'text-warning-fg') + '">' + (cert.auto_renew !== false ? 'Enabled' : 'Disabled') + '</dd></div>' +
-                '<div class="flex justify-between gap-4 py-2 border-b border-border"><dt class="text-sm text-muted">Deployment</dt><dd>' + deploymentBadgesHtml(cert) + '</dd></div>' +
+                '<div class="flex justify-between gap-4 py-2 border-b border-border"><dt class="text-sm text-muted">انقضا</dt><dd class="text-sm font-medium text-right text-foreground">' + expiryDate.toLocaleDateString(undefined, { weekday: 'short', month: 'long', day: 'numeric', year: 'numeric' }) + '</dd></div>' +
+                (providerLabel ? '<div class="flex justify-between gap-4 py-2 border-b border-border"><dt class="text-sm text-muted">ارائه‌دهنده DNS</dt><dd class="text-sm font-medium text-right text-foreground">' + providerLabel + '</dd></div>' : '') +
+                (safeDomainAlias ? '<div class="flex justify-between gap-4 py-2 border-b border-border"><dt class="text-sm text-muted">alia DNS-01</dt><dd class="text-sm font-medium text-right break-all text-info-fg">' + safeDomainAlias + '</dd></div>' : '') +
+                (safeDomainAlias && aliasProviderLabel ? '<div class="flex justify-between gap-4 py-2 border-b border-border"><dt class="text-sm text-muted">ارائه‌دهنده alias</dt><dd class="text-sm font-medium text-right text-foreground">' + aliasProviderLabel + '</dd></div>' : '') +
+                '<div class="flex justify-between gap-4 py-2 border-b border-border"><dt class="text-sm text-muted">تمدید خودکار</dt><dd class="text-sm font-medium text-right ' + (cert.auto_renew !== false ? 'text-success-fg' : 'text-warning-fg') + '">' + (cert.auto_renew !== false ? 'فعال' : 'غیرفعال') + '</dd></div>' +
+                '<div class="flex justify-between gap-4 py-2 border-b border-border"><dt class="text-sm text-muted">استقرار</dt><dd>' + deploymentBadgesHtml(cert) + '</dd></div>' +
                 '</dl>' +
                 '</div>' +
                 // Actions
@@ -843,20 +843,20 @@
             ttlDisplay = ttlMinutes + 'm';
         }
 
-        addDebugLog('=== CACHE STATISTICS ===', 'info');
-        addDebugLog('Total entries: ' + stats.totalEntries, 'info');
-        addDebugLog('TTL: ' + ttlDisplay + ' (' + stats.ttl + ' seconds)', 'info');
+        addDebugLog('=== آمار کش ===', 'info');
+        addDebugLog('کل رکوردها: ' + stats.totalEntries, 'info');
+        addDebugLog('TTL: ' + ttlDisplay + ' (' + stats.ttl + ' ثانیه)', 'info');
 
         if (stats.entries.length > 0) {
-            addDebugLog('Recent entries:', 'info');
+            addDebugLog('رکوردهای اخیر:', 'info');
             stats.entries.slice(0, 5).forEach(function (entry) {
-                addDebugLog('  ' + entry.domain + ': ' + entry.status + ' (' + entry.remaining + 's remaining)', 'info');
+                addDebugLog('  ' + entry.domain + ': ' + entry.status + ' (' + entry.remaining + 's باقی‌مانده)', 'info');
             });
             if (stats.entries.length > 5) {
-                addDebugLog('  ... and ' + (stats.entries.length - 5) + ' more entries', 'info');
+                addDebugLog('  ... و ' + (stats.entries.length - 5) + ' رکورد دیگر', 'info');
             }
         } else {
-            addDebugLog('No cached entries', 'warn');
+            addDebugLog('بدون رکوردهای کش شده', 'warn');
         }
         addDebugLog('========================', 'info');
     }
@@ -997,7 +997,7 @@
         var certificatesToCheck = allCertificates.filter(function (cert) { return cert.exists; });
 
         if (certificatesToCheck.length === 0) {
-            showMessage('No certificates found to check', 'info');
+            showMessage('هیچ گواهی‌ای برای بررسی یافت نشد', 'info');
             button.innerHTML = originalText;
             button.disabled = false;
             return;
@@ -1006,10 +1006,10 @@
         runDeploymentChecks(certificatesToCheck, {
             onProgress: function (completed, totalCount) {
                 var percentage = Math.round((completed / totalCount) * 100);
-                button.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Checking... ' + completed + '/' + totalCount + ' (' + percentage + '%)';
+                button.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>در حال بررسی... ' + completed + '/' + totalCount + ' (' + percentage + '%)';
             }
         }).then(function () {
-            showMessage('Deployment status updated for ' + certificatesToCheck.length + ' certificates', 'success');
+            showMessage('وضعیت استقرار برای ' + certificatesToCheck.length + ' گواهی بروزرسانی شد', 'success');
             button.innerHTML = originalText;
             button.disabled = false;
         });
@@ -1237,7 +1237,7 @@
             }, 1500);
 
         }).catch(function (error) {
-            addDebugLog('Failed to load certificates: ' + error.message, 'error');
+            addDebugLog('خطا در بارگذاری گواهی‌ها: ' + error.message, 'error');
 
             // Initialize with empty array to prevent further errors
             allCertificates = [];
@@ -1246,11 +1246,11 @@
 
             // Show appropriate error message
             if (error.message.indexOf('401') !== -1 || error.message.indexOf('Unauthorized') !== -1) {
-                showMessage('Authentication failed. Please check your API token.', 'error');
+                showMessage('احراز هویت ناموفق بود. لطفاً توکن API خود را بررسی کنید.', 'error');
             } else if (error.message.indexOf('403') !== -1 || error.message.indexOf('Forbidden') !== -1) {
-                showMessage('Access denied. Please check your permissions.', 'error');
+                showMessage('دسترسی رد شد. لطفاً مجوزهای خود را بررسی کنید.', 'error');
             } else {
-                showMessage('Failed to load certificates. Please try again.', 'error');
+                showMessage('خطا در بارگذاری گواهی‌ها. لطفاً دوباره تلاش کنید.', 'error');
             }
         });
     }
@@ -1549,7 +1549,7 @@
             var rowClass = check.ok ? 'text-success-fg' : 'text-danger-fg';
             var found = check.found_targets && check.found_targets.length
                 ? check.found_targets.join(', ')
-                : 'No CNAME found';
+                : 'CNAME پیدا نشد';
             if (check.error) {
                 found = check.error;
             }
@@ -1557,14 +1557,14 @@
                 '<div><i class="fas ' + (check.ok ? 'fa-check' : 'fa-times') + ' mr-1"></i>' +
                 '<code class="font-mono bg-surface-2 px-1 rounded">' + escapeHtml(check.source) + '</code>' +
                 aliasCopyButtonHtml(check.source) + '</div>' +
-                '<div class="mt-1 ml-5">Expected: <code class="font-mono bg-surface-2 px-1 rounded">' + escapeHtml(check.expected_target) + '</code>' +
+                '<div class="mt-1 ml-5">مورد انتظار: <code class="font-mono bg-surface-2 px-1 rounded">' + escapeHtml(check.expected_target) + '</code>' +
                 aliasCopyButtonHtml(check.expected_target) + '</div>' +
-                '<div class="mt-1 ml-5">Found: <code class="font-mono bg-surface-2 px-1 rounded">' + escapeHtml(found) + '</code></div>' +
+                '<div class="mt-1 ml-5">یافت شده: <code class="font-mono bg-surface-2 px-1 rounded">' + escapeHtml(found) + '</code></div>' +
                 '</div>';
         }).join('');
 
         if (!rows) {
-            rows = '<div class="mt-2 text-xs text-muted">No DNS-01 alias records to check.</div>';
+            rows = '<div class="mt-2 text-xs text-muted">بدون رکوردهای alias DNS-01 برای بررسی.</div>';
         }
 
         target.className = 'mt-2 rounded-md border p-3 ' + headerClass;
@@ -1833,11 +1833,11 @@
             });
             if (removedSans.length > 0) {
                 var dropConfirmed = await CertMate.confirm(
-                    'Reissuing ' + editingDomain + ' will REMOVE these names from the certificate:\n\n' +
+                    'صادر کردن مجدد ' + editingDomain + ' این نام‌ها را از گواهی حذف می‌کند:\n\n' +
                     removedSans.join('\n') +
-                    '\n\nClients using the removed names will fail TLS validation once the new certificate is deployed. Continue?',
-                    'Reissue Certificate',
-                    { confirmText: 'Reissue' }
+                    '\n\nکلاینت‌هایی که از نام‌های حذف شده استفاده می‌کنند پس از استقرار گواهی جدید در اعتبارسنجی TLS ناموفق خواهند شد. ادامه می‌دهید؟',
+                    'صادر کردن مجدد گواهی',
+                    { confirmText: 'صادر کردن مجدد' }
                 );
                 if (!dropConfirmed) return;
             }
@@ -1991,26 +1991,26 @@
                     a.click();
                     document.body.removeChild(a);
                     window.URL.revokeObjectURL(url);
-                    showMessage('Certificate downloaded for ' + domain, 'success');
+                    showMessage('گواهی برای ' + domain + ' دانلود شد', 'success');
                 });
             } else {
                 return response.json().then(function (errorData) {
-                    showMessage(errorData.error || 'Failed to download certificate', 'error');
+                    showMessage(errorData.error || 'خطا در دانلود گواهی', 'error');
                 });
             }
         }).catch(function (error) {
             console.error('Error downloading certificate:', error);
-            showMessage('Failed to download certificate', 'error');
+            showMessage('خطا در دانلود گواهی', 'error');
         });
     }
 
     // Manually trigger deploy hooks for a domain (issue #109).
     async function runDeployHooks(domain) {
-        var confirmed = await CertMate.confirm('Run deploy hooks for ' + domain + ' now?\n\nAll enabled global and domain-specific hooks will execute with CERTMATE_EVENT=manual.', { confirmText: 'Run Hooks', type: 'warning' });
+        var confirmed = await CertMate.confirm('هوک‌های استقرار برای ' + domain + ' اجرا شود؟\n\nهمه هوک‌های فعال سراسری و دامنه خاص با CERTMATE_EVENT=manual اجرا خواهند شد.', { confirmText: 'اجرا کردن هوک‌ها', type: 'warning' });
         if (!confirmed) return;
         var progressInterval = showLoadingModal(
-            'Running Deploy Hooks for ' + domain,
-            'Executing each enabled hook…'
+            'اجرای هوک‌های استقرار برای ' + domain,
+            'اجرای هر هوک فعال…'
         );
         fetch('/api/certificates/' + encodeURIComponent(domain) + '/deploy', {
             method: 'POST',
@@ -2026,20 +2026,20 @@
             // *what* to do next instead of a generic "deploy hook run failed".
             if (data.status === 401 || data.status === 403) {
                 showMessage(
-                    'Insufficient privileges to run deploy hooks. '
-                    + 'Sign in as admin to use this action.',
+                    'مجوزهای ناکافی برای اجرای هوک‌های استقرار. '
+                    + 'برای استفاده از این عملیات به عنوان مدیر وارد شوید.',
                     'error'
                 );
                 return;
             }
             if (data.status === 404) {
-                showMessage('Certificate not found for ' + domain, 'error');
+                showMessage('گواهی برای ' + domain + ' یافت نشد', 'error');
                 return;
             }
             if (!data.ok) {
                 var msg = (data.body && data.body.error)
                     ? data.body.error
-                    : ('Deploy hook run failed (HTTP ' + data.status + ')');
+                    : ('خطا در اجرای هوک استقرار (HTTP ' + data.status + ')');
                 showMessage(msg, 'error', {
                     errorContext: {
                         endpoint: 'POST /api/certificates/' + domain + '/deploy',
@@ -2055,19 +2055,19 @@
             if (s.total === 0) {
                 // Backend returned 200 with ok:false + a helpful error
                 // (deploy disabled, no hooks for this domain, etc.).
-                showMessage(s.error || 'No deploy hooks ran', 'warn');
+                showMessage(s.error || 'هیچ هوک استقراری اجرا نشد', 'warn');
                 return;
             }
             if (s.ok) {
-                showMessage('Deploy hooks ran for ' + domain + ': ' + s.succeeded + '/' + s.total + ' succeeded', 'success');
+                showMessage('هوک‌های استقرار برای ' + domain + ' اجرا شد: ' + s.succeeded + '/' + s.total + ' موفقیت‌آمیز', 'success');
             } else {
-                showMessage('Deploy hooks ran with errors for ' + domain + ': '
-                    + s.succeeded + '/' + s.total + ' succeeded, ' + s.failed + ' failed. '
-                    + 'Check Settings → Deploy → Recent Executions for details.', 'error');
+                showMessage('هوک‌های استقرار برای ' + domain + ' با خطا اجرا شد: '
+                    + s.succeeded + '/' + s.total + ' موفقیت‌آمیز، ' + s.failed + ' ناموفق. '
+                    + 'برای جزئیات تنظیمات ← استقرار ← اجرای اخیر را بررسی کنید.', 'error');
             }
         }).catch(function (error) {
             console.error('Error running deploy hooks:', error);
-            showMessage('Failed to run deploy hooks. Please try again.', 'error');
+            showMessage('خطا در اجرای هوک‌های استقرار. لطفاً دوباره تلاش کنید.', 'error');
         }).then(function () {
             hideLoadingModal(progressInterval);
         });
@@ -2076,8 +2076,8 @@
     // Toggle per-cert auto-renew (issue #111).
     async function toggleAutoRenew(domain, currentlyEnabled) {
         var nextState = !currentlyEnabled;
-        var verb = nextState ? 'Enable' : 'Disable';
-        var confirmed = await CertMate.confirm(verb + ' automatic renewal for ' + domain + '?', { confirmText: verb, type: 'warning' });
+        var verb = nextState ? 'فعال کردن' : 'غیرفعال کردن';
+        var confirmed = await CertMate.confirm(verb + ' تمدید خودکار برای ' + domain + '؟', { confirmText: verb, type: 'warning' });
         if (!confirmed) return;
         fetch('/api/certificates/' + encodeURIComponent(domain) + '/auto-renew', {
             method: 'PUT',
@@ -2089,14 +2089,14 @@
             });
         }).then(function (data) {
             if (data.ok) {
-                showMessage('Auto-renew ' + (nextState ? 'enabled' : 'disabled') + ' for ' + domain, 'success');
+                showMessage('تمدید خودکار ' + (nextState ? 'فعال' : 'غیرفعال') + ' شد برای ' + domain, 'success');
                 loadCertificates();
             } else {
-                showMessage(data.result.error || 'Failed to update auto-renew', 'error');
+                showMessage(data.result.error || 'خطا در بروزرسانی تمدید خودکار', 'error');
             }
         }).catch(function (error) {
             console.error('Error toggling auto-renew:', error);
-            showMessage('Failed to update auto-renew. Please try again.', 'error');
+            showMessage('خطا در بروزرسانی تمدید خودکار. لطفاً دوباره تلاش کنید.', 'error');
         });
     }
 
@@ -2109,9 +2109,9 @@
         // browser "block dialogs" toggles — too weak a guard for an
         // operation that erases the cert files and the settings entry.
         CertMate.confirm(
-            'Delete certificate for ' + domain + '? This removes the certificate files from disk and removes the domain from settings. This action cannot be undone.',
-            'Delete Certificate',
-            { confirmText: 'Delete' }
+            'گواهی برای ' + domain + ' حذف شود؟ این فایل‌های گواهی را از دیسک حذف می‌کند و دامنه را از تنظیمات خارج می‌کند. این عمل قابل بازگشت نیست.',
+            'حذف گواهی',
+            { confirmText: 'حذف' }
         ).then(function (confirmed) {
             if (!confirmed) return;
             fetch('/api/certificates/' + encodeURIComponent(domain), {
@@ -2122,11 +2122,11 @@
                 });
             }).then(function (data) {
                 if (data.ok) {
-                    showMessage('Certificate deleted for ' + domain, 'success');
+                    showMessage('گواهی برای ' + domain + ' حذف شد', 'success');
                     closeCertDetail();
                     loadCertificates();
                 } else {
-                    showMessage(data.result.error || 'Failed to delete certificate', 'error', {
+                    showMessage(data.result.error || 'خطا در حذف گواهی', 'error', {
                         errorContext: {
                             endpoint: 'DELETE /api/certificates/' + domain,
                             status: data.status || 0,
@@ -2237,12 +2237,12 @@
         try {
             var successful = document.execCommand('copy');
             if (successful) {
-                showMessage('Curl command copied to clipboard!', 'success');
+                showMessage('دستور curl در کلیپ‌بورد کپی شد!', 'success');
             } else {
-                showMessage('Failed to copy command', 'error');
+                showMessage('خطا در کپی کردن دستور', 'error');
             }
         } catch (err) {
-            showMessage('Failed to copy command', 'error');
+            showMessage('خطا در کپی کردن دستور', 'error');
         }
 
         document.body.removeChild(textArea);

@@ -4,43 +4,43 @@
              class="bg-surface border-border rounded-lg shadow-sm border p-6 mt-6">
 
             <div class="flex items-center justify-between mb-4">
-                <h3 class="text-lg font-semibold text-foreground flex items-center">
+                 <h3 class="text-lg font-semibold text-foreground flex items-center">
                     <i class="fas fa-key mr-2 text-primary"></i>
-                    API Keys
+                    کلیدهای API
                 </h3>
-                <span class="text-xs bg-warning-surface text-warning-strong px-2 py-1 rounded-full">Scoped Access</span>
+                 <span class="text-xs bg-warning-surface text-warning-strong px-2 py-1 rounded-full">دسترسی محدود شده</span>
             </div>
 
-            <p class="text-muted text-sm mb-6">
-                Create and manage scoped API keys for programmatic access. Each key is assigned a role that controls its permissions.
+             <p class="text-muted text-sm mb-6">
+                ایجاد و مدیریت کلیدهای API محدود شده برای دسترسی برنامه‌ای. هر کلید نقشی اختصاص می‌یابد که مجوزهای آن را کنترل می‌کند.
             </p>
 
             <!-- Create Key Form -->
             <div class="mb-6 p-4 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
-                <h4 class="text-sm font-semibold text-label mb-3"><i class="fas fa-plus-circle mr-1"></i> Create New API Key</h4>
+                 <h4 class="text-sm font-semibold text-label mb-3"><i class="fas fa-plus-circle mr-1"></i> ایجاد کلید API جدید</h4>
                 <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                     <div>
-                        <label class="block text-xs text-muted mb-1">Key Name</label>
+                         <label class="block text-xs text-muted mb-1">نام کلید</label>
                         <input type="text" x-model="newKey.name" placeholder="e.g., CI/CD Pipeline"
                                class="w-full px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white" maxlength="64">
                     </div>
                     <div>
-                        <label class="block text-xs text-muted mb-1">Role</label>
+                         <label class="block text-xs text-muted mb-1">نقش</label>
                         <select x-model="newKey.role" title="API key role" class="w-full px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white">
-                            <option value="viewer">Viewer (read-only)</option>
-                            <option value="operator">Operator (read + write)</option>
-                            <option value="admin">Admin (full access)</option>
+                             <option value="viewer">مشاهده‌گر (فقط خواندن)</option>
+                            <option value="operator">اپراتور (خواندن + نوشتن)</option>
+                            <option value="admin">مدیر (دسترسی کامل)</option>
                         </select>
                     </div>
                     <div>
-                        <label class="block text-xs text-muted mb-1">Expiration (optional)</label>
+                         <label class="block text-xs text-muted mb-1">تاریخ انقضا (اختیاری)</label>
                         <input type="date" x-model="newKey.expires_at" title="Expiration date"
                                class="w-full px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white">
                     </div>
                 </div>
                 <div class="mt-4">
-                    <label class="block text-xs text-muted mb-1">
-                        Allowed Domains (optional)
+                         <label class="block text-xs text-muted mb-1">
+                        دامنه‌های مجاز (اختیاری)
                         <span class="ml-1 text-gray-400" title="Restrict this key to specific certificates. Comma-separated, supports wildcards like *.example.com. Leave empty for unrestricted access.">
                             <i class="fas fa-info-circle"></i>
                         </span>
@@ -50,18 +50,18 @@
                                class="flex-1 px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white">
                         <button type="button" @click="createKey()"
                                 class="px-4 py-2 bg-yellow-600 text-white rounded-md hover:bg-yellow-700 text-sm whitespace-nowrap">
-                            <i class="fas fa-plus mr-1"></i> Create
+                             <i class="fas fa-plus mr-1"></i> ایجاد
                         </button>
                     </div>
-                    <p class="mt-1 text-xs text-muted">
-                        Scoped keys can only operate on certificates whose domain matches one of the patterns. Wildcards (<code class="font-mono">*.example.com</code>) match subdomains only, not the apex.
+                     <p class="mt-1 text-xs text-muted">
+                        کلیدهای محدود شده فقط می‌توانند روی گواهی‌هایی عمل کنند که دامنه‌شان با یکی از الگوها مطابقت دارد. wildcard‌ها (<code class="font-mono">*.example.com</code>) فقط زیردامنه‌ها را مطابقت می‌دهند، نه دامنه اصلی را.
                     </p>
                 </div>
                 <div class="mt-4">
                     <label class="flex items-center space-x-2 text-sm text-label cursor-pointer">
                         <input type="checkbox" x-model="newKey.is_agent"
                                class="rounded border-border text-yellow-600 focus:ring-yellow-500">
-                        <span>AI agent key</span>
+                         <span>کلید عامل AI</span>
                         <span class="text-gray-400" title="Mark this key as belonging to an AI/MCP agent. Actions authenticated with it are attributed in the audit trail as actor.kind='agent', distinguishing automated agent activity from human operators. Point the MCP server at a dedicated agent key.">
                             <i class="fas fa-info-circle"></i>
                         </span>
@@ -74,8 +74,8 @@
                 <div class="flex items-start">
                     <i class="fas fa-exclamation-triangle text-green-600 mt-0.5 mr-3 flex-shrink-0"></i>
                     <div class="flex-1">
-                        <h4 class="text-sm font-medium text-success-strong">API Key Created</h4>
-                        <p class="text-xs text-success-fg mt-1 mb-2">Copy this token now. It will not be shown again.</p>
+                         <h4 class="text-sm font-medium text-success-strong">کلید API ایجاد شد</h4>
+                        <p class="text-xs text-success-fg mt-1 mb-2">این توکن را الان کپی کنید. دیگر نمایش داده نخواهد شد.</p>
                         <div class="flex items-center space-x-2">
                             <code class="flex-1 px-3 py-2 bg-surface text-foreground border border-success-line rounded text-sm font-mono break-all" x-text="createdToken"></code>
                             <button type="button" @click="copyToken()" title="Copy token" class="px-3 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 text-sm"><i class="fas fa-copy"></i></button>
@@ -87,15 +87,15 @@
             <!-- Keys Table -->
             <div>
                 <div class="flex items-center justify-between mb-3">
-                    <h4 class="text-sm font-semibold text-label"><i class="fas fa-list mr-1"></i> Existing Keys</h4>
-                    <button type="button" @click="loadKeys()" class="text-sm text-info-fg hover:underline"><i class="fas fa-sync-alt mr-1"></i> Refresh</button>
+                     <h4 class="text-sm font-semibold text-label"><i class="fas fa-list mr-1"></i> کلیدهای موجود</h4>
+                    <button type="button" @click="loadKeys()" class="text-sm text-info-fg hover:underline"><i class="fas fa-sync-alt mr-1"></i> به‌روزرسانی</button>
                 </div>
                 <div class="space-y-2 max-h-96 overflow-y-auto">
                     <template x-if="loading">
-                        <div class="text-center py-4 text-muted text-sm"><i class="fas fa-spinner fa-spin mr-2"></i> Loading keys...</div>
+                        <div class="text-center py-4 text-muted text-sm"><i class="fas fa-spinner fa-spin mr-2"></i> در حال بارگذاری کلیدها...</div>
                     </template>
                     <template x-if="!loading && Object.keys(keys).length === 0">
-                        <div class="text-center py-4 text-muted text-sm"><i class="fas fa-key mr-2"></i> No API keys created yet.</div>
+                        <div class="text-center py-4 text-muted text-sm"><i class="fas fa-key mr-2"></i> هنوز کلید API ایجاد نشده است.</div>
                     </template>
                     <template x-for="keyId in Object.keys(keys)" :key="keyId">
                         <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg"
@@ -156,8 +156,8 @@
             <div class="mt-6 p-3 bg-info-surface border border-info-line rounded-lg">
                 <div class="flex items-start">
                     <i class="fas fa-info-circle text-blue-500 mt-0.5 mr-2 flex-shrink-0"></i>
-                    <p class="text-xs text-info-fg">
-                        The legacy API token (configured in the General tab) continues to work with full admin access. New integrations should use scoped API keys.
+                     <p class="text-xs text-info-fg">
+                        توکن API قدیمی (پیکربندی شده در تب عمومی) با دسترسی کامل مدیر به کار خود ادامه می‌دهد. ادغام‌های جدید باید از کلیدهای API محدود شده استفاده کنند.
                     </p>
                 </div>
             </div>

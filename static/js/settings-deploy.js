@@ -46,19 +46,19 @@
                                 + Object.keys(self.config.domain_hooks).length + ' domain section(s)',
                                 'info');
                         } else {
-                            addDebugLog('Failed to load deploy config: '
+                            addDebugLog('خطا در بارگذاری پیکربندی استقرار: '
                                 + ((res.body && res.body.error) || 'HTTP ' + (res.ok ? 'OK' : 'error')),
                                 'error');
                         }
                     })
                     .catch(function (err) {
-                        addDebugLog('Deploy config request failed: ' + (err && err.message || err), 'error');
+                        addDebugLog('درخواست پیکربندی استقرار ناموفق بود: ' + (err && err.message || err), 'error');
                     });
             },
 
             saveConfig: function () {
                 var self = this;
-                addDebugLog('Saving deploy config…', 'info');
+                addDebugLog('ذخیره پیکربندی استقرار…', 'info');
                 fetch('/api/deploy/config', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -77,17 +77,17 @@
                     })
                     .then(function (res) {
                         if (res.ok) {
-                            addDebugLog('Deploy settings saved', 'info');
-                            CertMate.toast('Deploy settings saved', 'success');
+                    addDebugLog('تنظیمات استقرار ذخیره شد', 'info');
+                    CertMate.toast('تنظیمات استقرار ذخیره شد', 'success');
                         } else {
                             var msg = (res.body && res.body.error) || 'unknown error';
-                            addDebugLog('Deploy settings save failed: ' + msg, 'error');
-                            CertMate.toast('Save failed: ' + msg, 'error');
+                            addDebugLog('ذخیره تنظیمات استقرار ناموفق بود: ' + msg, 'error');
+                            CertMate.toast('ذخیره ناموفق بود: ' + msg, 'error');
                         }
                     })
                     .catch(function (err) {
-                        addDebugLog('Deploy settings save request failed: ' + (err && err.message || err), 'error');
-                        CertMate.toast('Failed to save', 'error');
+                        addDebugLog('درخواست ذخیره تنظیمات استقرار ناموفق بود: ' + (err && err.message || err), 'error');
+                        CertMate.toast('ذخیره ناموفق بود', 'error');
                     });
             },
 
@@ -137,7 +137,7 @@
 
             removeDomain: function (domain) {
                 var self = this;
-                CertMate.confirm('Remove all hooks for ' + domain + '?', 'Remove Domain').then(function (confirmed) {
+                CertMate.confirm('آیا می‌خواهید تمام هوک‌های ' + domain + ' را حذف کنید؟', 'حذف دامنه').then(function (confirmed) {
                     if (!confirmed) return;
                     delete self.config.domain_hooks[domain];
                     self.config.domain_hooks = Object.assign({}, self.config.domain_hooks);
@@ -158,10 +158,10 @@
                 if (btn) {
                     originalHTML = btn.innerHTML;
                     btn.disabled = true;
-                    btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i> Testing...';
+                    btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i> در حال آزمایش...';
                 }
                 addDebugLog('Testing hook: ' + hookLabel, 'info');
-                CertMate.toast('Testing hook: ' + hookLabel + '...', 'info');
+                CertMate.toast('آزمایش هوک: ' + hookLabel + '...', 'info');
                 fetch('/api/deploy/test/' + hook.id, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -171,17 +171,17 @@
                     .then(function (r) { return r.json(); })
                     .then(function (d) {
                         if (d.success) {
-                            addDebugLog('Hook "' + hookLabel + '" test passed (exit ' + d.exit_code + ')', 'info');
-                            CertMate.toast('Hook test passed (exit ' + d.exit_code + ')', 'success');
+                            addDebugLog('آزمایش هوک "' + hookLabel + '" موفقیت‌آمیز بود (خروجی ' + d.exit_code + ')', 'info');
+                            CertMate.toast('آزمایش هوک موفقیت‌آمیز بود (خروجی ' + d.exit_code + ')', 'success');
                         } else {
                             var detail = d.error || 'exit ' + d.exit_code;
-                            addDebugLog('Hook "' + hookLabel + '" test failed: ' + detail, 'error');
-                            CertMate.toast('Hook test failed: ' + detail, 'error');
+                            addDebugLog('آزمایش هوک "' + hookLabel + '" ناموفق بود: ' + detail, 'error');
+                            CertMate.toast('آزمایش هوک ناموفق بود: ' + detail, 'error');
                         }
                     })
                     .catch(function (err) {
-                        addDebugLog('Test request failed for hook "' + hookLabel + '": ' + (err && err.message || err), 'error');
-                        CertMate.toast('Test request failed', 'error');
+                        addDebugLog('درخواست آزمایش برای هوک "' + hookLabel + '" ناموفق بود: ' + (err && err.message || err), 'error');
+                        CertMate.toast('درخواست آزمایش ناموفق بود', 'error');
                     })
                     .then(function () {
                         if (btn) {
@@ -224,15 +224,15 @@
                         }
                         if (entries) {
                             self.history = entries;
-                            addDebugLog('Loaded deploy history: ' + entries.length + ' entries', 'info');
+                            addDebugLog('تاریخچه استقرار بارگذاری شد: ' + entries.length + ' رکورد', 'info');
                         } else {
-                            addDebugLog('Failed to load deploy history: '
-                                + ((res.body && res.body.error) || 'unexpected response'),
+                            addDebugLog('خطا در بارگذاری تاریخچه استقرار: '
+                                + ((res.body && res.body.error) || 'پاسخ غیرمنتظره'),
                                 'error');
                         }
                     })
                     .catch(function (err) {
-                        addDebugLog('Deploy history request failed: ' + (err && err.message || err), 'error');
+                        addDebugLog('درخواست تاریخچه استقرار ناموفق بود: ' + (err && err.message || err), 'error');
                     });
             }
         };

@@ -5,7 +5,7 @@
     <div class="bg-surface rounded-lg shadow p-6 border-l-4 border-blue-500">
         <div class="flex items-center">
             <div class="flex-1">
-                <p class="text-muted text-sm">Total Certificates</p>
+                <p class="text-muted text-sm">کل گواهی‌ها</p>
                 <p class="text-3xl font-bold text-foreground" id="totalCount">0</p>
             </div>
             <i class="fas fa-certificate text-blue-500 text-3xl opacity-20"></i>
@@ -14,7 +14,7 @@
     <div class="bg-surface rounded-lg shadow p-6 border-l-4 border-green-500">
         <div class="flex items-center">
             <div class="flex-1">
-                <p class="text-muted text-sm">Active</p>
+                <p class="text-muted text-sm">فعال</p>
                 <p class="text-3xl font-bold text-foreground" id="activeCount">0</p>
             </div>
             <i class="fas fa-check-circle text-green-500 text-3xl opacity-20"></i>
@@ -23,7 +23,7 @@
     <div class="bg-surface rounded-lg shadow p-6 border-l-4 border-red-500">
         <div class="flex items-center">
             <div class="flex-1">
-                <p class="text-muted text-sm">Revoked</p>
+                <p class="text-muted text-sm">لغو شده</p>
                 <p class="text-3xl font-bold text-foreground" id="revokedCount">0</p>
             </div>
             <i class="fas fa-ban text-red-500 text-3xl opacity-20"></i>
@@ -32,8 +32,8 @@
     <div class="bg-surface rounded-lg shadow p-6 border-l-4 border-purple-500">
         <div class="flex items-center">
             <div class="flex-1">
-                <p class="text-muted text-sm">By Usage</p>
-                <p class="text-sm text-muted mt-2" id="usageBreakdown">Loading...</p>
+                <p class="text-muted text-sm">بر اساس کاربرد</p>
+                <p class="text-sm text-muted mt-2" id="usageBreakdown">در حال بارگذاری...</p>
             </div>
             <i class="fas fa-chart-pie text-purple-500 text-3xl opacity-20"></i>
         </div>
@@ -47,9 +47,9 @@
             <div>
                 <h3 class="text-xl font-bold text-foreground flex items-center">
                     <i class="fas fa-plus-circle mr-2 text-primary"></i>
-                    Create Client Certificate
+                    ایجاد گواهی کلاینت
                 </h3>
-                <p class="text-sm text-muted mt-1">For mTLS, VPN, or user authentication</p>
+                <p class="text-sm text-muted mt-1">برای mTLS، VPN یا احراز هویت کاربر</p>
             </div>
         </div>
     </div>
@@ -58,11 +58,11 @@
         <div class="flex space-x-4 mb-6 border-b border-border" role="tablist">
             <button id="singleTabBtn" role="tab" aria-selected="true" aria-controls="createClientCertForm"
                     class="px-4 py-2 border-b-2 border-primary text-primary font-medium">
-                <i class="fas fa-user mr-1"></i> Single Certificate
+                <i class="fas fa-user mr-1"></i> گواهی تکی
             </button>
             <button id="batchTabBtn" role="tab" aria-selected="false" aria-controls="batchForm"
                     class="px-4 py-2 border-b-2 border-transparent text-muted hover:text-foreground font-medium">
-                <i class="fas fa-users mr-1"></i> Bulk Upload (CSV)
+                <i class="fas fa-users mr-1"></i> آپلود دسته‌ای (CSV)
             </button>
         </div>
 
@@ -71,16 +71,16 @@
             <div class="grid grid-cols-1 gap-6 lg:grid-cols-2">
                 <div>
                     <label for="commonName" class="block text-sm font-medium text-label mb-2">
-                        <i class="fas fa-user mr-2 text-blue-500"></i>Common Name (Required)
+                        <i class="fas fa-user mr-2 text-blue-500"></i>نام رایج (الزامی)
                     </label>
                     <input type="text" id="commonName" name="commonName" placeholder="e.g., john.doe@example.com"
                            class="w-full px-4 py-2 border text-foreground border-border rounded-lg bg-input focus:ring-2 focus:ring-primary focus:border-primary"
                            required aria-required="true">
-                    <p id="commonNameError" class="hidden text-xs text-red-500 mt-1">Common Name is required</p>
+                    <p id="commonNameError" class="hidden text-xs text-red-500 mt-1">نام رایج الزامی است</p>
                 </div>
                 <div>
                     <label for="email" class="block text-sm font-medium text-label mb-2">
-                        <i class="fas fa-envelope mr-2 text-blue-500"></i>Email
+                        <i class="fas fa-envelope mr-2 text-blue-500"></i>ایمیل
                     </label>
                     <input type="email" id="email" name="email" placeholder="user@example.com"
                            class="w-full px-4 py-2 border text-foreground border-border rounded-lg bg-input focus:ring-2 focus:ring-primary focus:border-primary">
@@ -90,21 +90,21 @@
             <div class="grid grid-cols-1 gap-6 lg:grid-cols-2">
                 <div>
                     <label for="organization" class="block text-sm font-medium text-label mb-2">
-                        <i class="fas fa-building mr-2 text-blue-500"></i>Organization
+                        <i class="fas fa-building mr-2 text-blue-500"></i>سازمان
                     </label>
-                    <input type="text" id="organization" name="organization" value="CertMate" placeholder="Your Organization"
+                    <input type="text" id="organization" name="organization" value="CertMate" placeholder="سازمان شما"
                            class="w-full px-4 py-2 border text-foreground border-border rounded-lg bg-input focus:ring-2 focus:ring-primary focus:border-primary">
                 </div>
                 <div>
                     <label for="certUsage" class="block text-sm font-medium text-label mb-2">
-                        <i class="fas fa-tag mr-2 text-blue-500"></i>Usage Type
+                        <i class="fas fa-tag mr-2 text-blue-500"></i>نوع کاربرد
                     </label>
                     <select id="certUsage" name="certUsage"
                             class="w-full px-4 py-2 border text-foreground border-border rounded-lg bg-input focus:ring-2 focus:ring-primary focus:border-primary">
                         <option value="api-mtls">API mTLS</option>
-                        <option value="vpn">VPN Access</option>
-                        <option value="user-auth">User Authentication</option>
-                        <option value="other">Other</option>
+                        <option value="vpn">دسترسی VPN</option>
+                        <option value="user-auth">احراز هویت کاربر</option>
+                        <option value="other">سایر</option>
                     </select>
                 </div>
             </div>
@@ -112,16 +112,16 @@
             <div class="grid grid-cols-1 gap-6 lg:grid-cols-2">
                 <div>
                     <label for="daysValid" class="block text-sm font-medium text-label mb-2">
-                        <i class="fas fa-calendar mr-2 text-blue-500"></i>Valid For (Days)
+                        <i class="fas fa-calendar mr-2 text-blue-500"></i>معتبر برای (روز)
                     </label>
                     <input type="number" id="daysValid" name="daysValid" value="365" min="1" max="3650"
                            class="w-full px-4 py-2 border text-foreground border-border rounded-lg bg-input focus:ring-2 focus:ring-primary focus:border-primary">
                 </div>
                 <div>
                     <label for="notes" class="block text-sm font-medium text-label mb-2">
-                        <i class="fas fa-sticky-note mr-2 text-blue-500"></i>Notes
+                        <i class="fas fa-sticky-note mr-2 text-blue-500"></i>یادداشت‌ها
                     </label>
-                    <input type="text" id="notes" name="notes" placeholder="Optional notes..."
+                    <input type="text" id="notes" name="notes" placeholder="یادداشت‌های اختیاری..."
                            class="w-full px-4 py-2 border text-foreground border-border rounded-lg bg-input focus:ring-2 focus:ring-primary focus:border-primary">
                 </div>
             </div>
@@ -130,12 +130,12 @@
                 <input type="checkbox" id="generateKey" name="generateKey" checked
                        class="w-4 h-4 text-primary bg-gray-100 border-gray-300 rounded focus:ring-2 focus:ring-primary">
                 <label for="generateKey" class="text-sm text-label">
-                    <i class="fas fa-lock mr-1"></i>Generate private key (recommended)
+                    <i class="fas fa-lock mr-1"></i>تولید کلید خصوصی (توصیه شده)
                 </label>
             </div>
 
             <button type="submit" class="w-full bg-primary hover:bg-secondary text-white font-semibold py-3 rounded-lg transition duration-200 flex items-center justify-center">
-                <i class="fas fa-check-circle mr-2"></i> Create Certificate
+                <i class="fas fa-check-circle mr-2"></i> ایجاد گواهی
             </button>
         </form>
 
@@ -144,20 +144,20 @@
             <div class="bg-info-surface border border-info-line rounded-lg p-4">
                 <p class="text-sm text-info-strong">
                     <i class="fas fa-info-circle mr-2"></i>
-                    Upload a CSV file with columns: common_name, email, organization, cert_usage (optional), notes (optional)
+                    یک فایل CSV با ستون‌های زیر آپلود کنید: common_name, email, organization, cert_usage (اختیاری), notes (اختیاری)
                 </p>
             </div>
 
             <div class="border-2 border-dashed border-border rounded-lg p-8 text-center cursor-pointer hover:border-primary transition"
                  id="dropZone" tabindex="0" role="button" aria-label="Upload CSV file">
                 <i class="fas fa-cloud-upload-alt text-4xl text-gray-400 dark:text-gray-500 mb-3"></i>
-                <p class="text-label font-medium mb-1">Drag and drop CSV file here</p>
-                <p class="text-sm text-muted mb-4">or click to select</p>
+                <p class="text-label font-medium mb-1">فایل CSV را اینجا بکشید و رها کنید</p>
+                <p class="text-sm text-muted mb-4">یا کلیک کنید تا انتخاب کنید</p>
                 <input type="file" id="csvFile" name="csvFile" accept=".csv" class="hidden">
             </div>
 
             <div id="csvPreview" class="hidden bg-gray-50 dark:bg-gray-800 rounded-lg p-4">
-                <p class="text-sm font-semibold text-label mb-3">Preview (<span id="rowCount">0</span> rows)</p>
+                <p class="text-sm font-semibold text-label mb-3">پیش‌نمایش (<span id="rowCount">0</span> ردیف)</p>
                 <div class="overflow-x-auto">
                     <table class="w-full text-sm" id="previewTable">
                         <thead class="bg-gray-200 dark:bg-gray-700">
@@ -169,7 +169,7 @@
             </div>
 
             <button type="button" id="submitBatchBtn" class="w-full bg-primary hover:bg-secondary text-white font-semibold py-3 rounded-lg transition duration-200 flex items-center justify-center hidden">
-                <i class="fas fa-upload mr-2"></i> Upload <span id="certCountText"></span> Certificates
+                <i class="fas fa-upload mr-2"></i> آپلود <span id="certCountText"></span> گواهی
             </button>
         </div>
     </div>
@@ -181,24 +181,24 @@
         <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
             <h3 class="text-xl font-bold text-foreground flex items-center">
                 <i class="fas fa-list mr-2 text-primary"></i>
-                Client Certificates
+                گواهی‌های کلاینت
             </h3>
             <div class="flex flex-wrap items-center gap-2">
-                <input type="text" id="searchInput" placeholder="Search by CN or email..."
-                       aria-label="Search client certificates"
+                <input type="text" id="searchInput" placeholder="جستجو بر اساس CN یا ایمیل..."
+                       aria-label="جستجوی گواهی‌های کلاینت"
                        class="px-4 py-2 text-sm border text-foreground border-border rounded-lg bg-input focus:ring-2 focus:ring-primary focus:border-primary">
-                <select id="filterUsage" aria-label="Filter by usage type"
+                <select id="filterUsage" aria-label="فیلتر بر اساس نوع کاربرد"
                         class="px-4 py-2 text-sm border text-foreground border-border rounded-lg bg-input focus:ring-2 focus:ring-primary focus:border-primary">
-                    <option value="">All Usage Types</option>
+                    <option value="">همه انواع کاربرد</option>
                     <option value="api-mtls">API mTLS</option>
                     <option value="vpn">VPN</option>
-                    <option value="user-auth">User Auth</option>
+                    <option value="user-auth">احراز هویت کاربر</option>
                 </select>
-                <select id="filterStatus" aria-label="Filter by status"
+                <select id="filterStatus" aria-label="فیلتر بر اساس وضعیت"
                         class="px-4 py-2 text-sm border text-foreground border-border rounded-lg bg-input focus:ring-2 focus:ring-primary focus:border-primary">
-                    <option value="">All Status</option>
-                    <option value="active">Active</option>
-                    <option value="revoked">Revoked</option>
+                    <option value="">همه وضعیت‌ها</option>
+                    <option value="active">فعال</option>
+                    <option value="revoked">لغو شده</option>
                 </select>
             </div>
         </div>
@@ -208,17 +208,17 @@
         <table class="w-full">
             <thead class="bg-surface-2 border-border border-b">
                 <tr>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-label uppercase tracking-wider">Common Name</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-label uppercase tracking-wider hidden md:table-cell">Email</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-label uppercase tracking-wider hidden lg:table-cell">Usage</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-label uppercase tracking-wider hidden lg:table-cell">Created</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-label uppercase tracking-wider">Expires</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-label uppercase tracking-wider">Status</th>
-                    <th class="px-6 py-3 text-right text-xs font-medium text-label uppercase tracking-wider">Actions</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-label uppercase tracking-wider">نام رایج</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-label uppercase tracking-wider hidden md:table-cell">ایمیل</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-label uppercase tracking-wider hidden lg:table-cell">کاربرد</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-label uppercase tracking-wider hidden lg:table-cell">تاریخ ایجاد</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-label uppercase tracking-wider">تاریخ انقضا</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-label uppercase tracking-wider">وضعیت</th>
+                    <th class="px-6 py-3 text-right text-xs font-medium text-label uppercase tracking-wider">عملیات</th>
                 </tr>
             </thead>
             <tbody id="certTableBody" class="divide-y divide-gray-200 dark:divide-gray-700">
-                <tr><td colspan="7" class="px-6 py-8 text-center text-muted">Loading certificates...</td></tr>
+                <tr><td colspan="7" class="px-6 py-8 text-center text-muted">در حال بارگذاری گواهی‌ها...</td></tr>
             </tbody>
         </table>
     </div>
@@ -229,20 +229,20 @@
      role="dialog" aria-modal="true" aria-labelledby="certModalTitle">
     <div class="bg-surface rounded-lg shadow-xl max-w-md w-full mx-4 p-6">
         <div class="flex justify-between items-center mb-4">
-            <h3 id="certModalTitle" class="text-lg font-bold text-foreground">Certificate Details</h3>
-            <button type="button" onclick="closeCertModal()" class="text-muted hover:text-gray-700 dark:hover:text-gray-200" aria-label="Close dialog">
+            <h3 id="certModalTitle" class="text-lg font-bold text-foreground">جزئیات گواهی</h3>
+            <button type="button" onclick="closeCertModal()" class="text-muted hover:text-gray-700 dark:hover:text-gray-200" aria-label="بستن مکالمه">
                 <i class="fas fa-times"></i>
             </button>
         </div>
         <div id="modalContent" class="space-y-3 text-sm"></div>
         <div class="mt-6 flex space-x-3">
-            <button type="button" onclick="downloadCertFile('crt')" aria-label="Download certificate file" class="flex-1 bg-blue-500 hover:bg-blue-600 text-white py-2 rounded-lg px-3 text-sm font-semibold flex items-center justify-center">
+            <button type="button" onclick="downloadCertFile('crt')" aria-label="دانلود فایل گواهی" class="flex-1 bg-blue-500 hover:bg-blue-600 text-white py-2 rounded-lg px-3 text-sm font-semibold flex items-center justify-center">
                 <i class="fas fa-download mr-1"></i> .crt
             </button>
-            <button type="button" onclick="downloadCertFile('key')" aria-label="Download private key file" class="flex-1 bg-red-500 hover:bg-red-600 text-white py-2 rounded-lg px-3 text-sm font-semibold flex items-center justify-center">
+            <button type="button" onclick="downloadCertFile('key')" aria-label="دانلود فایل کلید خصوصی" class="flex-1 bg-red-500 hover:bg-red-600 text-white py-2 rounded-lg px-3 text-sm font-semibold flex items-center justify-center">
                 <i class="fas fa-download mr-1"></i> .key
             </button>
-            <button type="button" onclick="downloadCertFile('csr')" aria-label="Download CSR file" class="flex-1 bg-gray-500 hover:bg-gray-600 text-white py-2 rounded-lg px-3 text-sm font-semibold flex items-center justify-center">
+            <button type="button" onclick="downloadCertFile('csr')" aria-label="دانلود فایل CSR" class="flex-1 bg-gray-500 hover:bg-gray-600 text-white py-2 rounded-lg px-3 text-sm font-semibold flex items-center justify-center">
                 <i class="fas fa-download mr-1"></i> .csr
             </button>
         </div>

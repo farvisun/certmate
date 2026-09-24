@@ -42,7 +42,7 @@
     }
 
     function clearSettingsDebugConsole() {
-        document.getElementById('settingsDebugOutput').innerHTML = '<div class="text-gray-500">Debug console cleared. All settings actions will be logged here...</div>';
+        document.getElementById('settingsDebugOutput').innerHTML = '<div class="text-gray-500">کنسول عیب‌یابی پاک شد. تمام عملیات تنظیمات اینجا ثبت می‌شوند...</div>';
     }
 
     // =============================================
@@ -94,7 +94,7 @@
         toggleIcon.classList.remove('fa-eye');
         toggleIcon.classList.add('fa-eye-slash');
         addDebugLog('Generated new API Bearer Token', 'info');
-        showMessage('New API token generated. Remember to save your settings!', 'success');
+        showMessage('توکن API جدید تولید شد. تنظیمات خود را ذخیره کنید!', 'success');
     }
 
     // =============================================
@@ -155,7 +155,7 @@
 
         if (saveBtn) {
             saveBtn.disabled = true;
-            saveBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Saving...';
+            saveBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>در حال ذخیره...';
         }
 
         addDebugLog('Saving main settings...', 'info');
@@ -239,11 +239,11 @@
                     defaultCA === 'sslcom' ? 'SSL.com' :
                     defaultCA === 'digicert' ? 'DigiCert' :
                     defaultCA === 'private_ca' ? 'Private CA' : defaultCA;
-                throw new Error('Email address is required in the ' + caDisplayName + ' configuration section');
+                throw new Error('آدرس ایمیل در بخش پیکربندی ' + caDisplayName + ' الزامی است');
             }
 
             if (settings.challenge_type !== 'http-01' && !settings.dns_provider) {
-                throw new Error('DNS provider must be selected');
+                throw new Error('ارائه‌دهنده DNS باید انتخاب شود');
             }
 
             // API Bearer Token is only required after initial setup when the
@@ -252,7 +252,7 @@
             // absent from GET /api/web/settings), so an empty form field on
             // save means "keep the existing hash", not "no token configured".
             if (!settings.api_bearer_token && currentSettings.setup_completed && !currentSettings.api_bearer_token_hash) {
-                throw new Error('API Bearer Token is required');
+                throw new Error('توکن Bearer API الزامی است');
             }
 
             // Auto-generate token for initial setup if not provided
@@ -262,7 +262,7 @@
                 if (tokenField) {
                     tokenField.value = settings.api_bearer_token;
                 }
-                addDebugLog('Auto-generated API Bearer Token for initial setup', 'info');
+                addDebugLog('توکن Bearer API به طور خودکار برای راه‌اندازی اولیه تولید شد', 'info');
             }
 
             // Add legacy DNS provider configurations from form fields
@@ -321,15 +321,15 @@
                     return response.json();
                 })
                 .then(function (result) {
-                    addDebugLog('Settings saved successfully', 'info');
-                    showMessage('Settings saved successfully', 'success');
+                    addDebugLog('تنظیمات با موفقیت ذخیره شد', 'info');
+                    showMessage('تنظیمات با موفقیت ذخیره شد', 'success');
 
                     // Reload settings to refresh the UI
                     return loadSettings();
                 })
                 .catch(function (error) {
-                    addDebugLog('Error saving settings: ' + error.message, 'error');
-                    showMessage('Error saving settings: ' + error.message, 'error', {
+                    addDebugLog('خطا در ذخیره تنظیمات: ' + error.message, 'error');
+                    showMessage('خطا در ذخیره تنظیمات: ' + error.message, 'error', {
                         errorContext: {
                             endpoint: 'POST /api/web/settings',
                             status: error.responseStatus || 0,
@@ -344,16 +344,16 @@
                     isLoading = false;
                     if (saveBtn) {
                         saveBtn.disabled = false;
-                        saveBtn.innerHTML = '<i class="fas fa-save mr-2"></i>Save Settings';
+                        saveBtn.innerHTML = '<i class="fas fa-save mr-2"></i>ذخیره تنظیمات';
                     }
                 });
         } catch (error) {
-            addDebugLog('Error saving settings: ' + error.message, 'error');
-            showMessage('Error saving settings: ' + error.message, 'error');
+            addDebugLog('خطا در ذخیره تنظیمات: ' + error.message, 'error');
+            showMessage('خطا در ذخیره تنظیمات: ' + error.message, 'error');
             isLoading = false;
             if (saveBtn) {
                 saveBtn.disabled = false;
-                saveBtn.innerHTML = '<i class="fas fa-save mr-2"></i>Save Settings';
+                saveBtn.innerHTML = '<i class="fas fa-save mr-2"></i>ذخیره تنظیمات';
             }
         }
     }
@@ -401,7 +401,7 @@
     // =============================================
 
     function refreshCacheStats() {
-        addDebugLog('Refreshing cache stats...', 'info');
+        addDebugLog('بروزرسانی آمار کش...', 'info');
 
         return fetch('/api/web/cache/stats')
             .then(function (response) {
@@ -413,14 +413,14 @@
                         if (entriesEl) entriesEl.textContent = stats.entries || 0;
                         if (ttlEl) ttlEl.textContent = (stats.current_ttl || 300) + 's';
 
-                        addDebugLog('Cache stats refreshed: ' + stats.entries + ' entries, ' + stats.current_ttl + 's TTL', 'info');
+                        addDebugLog('آمار کش بروزرسانی شد: ' + stats.entries + ' رکورد، ' + stats.current_ttl + 's TTL', 'info');
                     });
                 } else {
-                    addDebugLog('Failed to refresh cache stats', 'warn');
+                    addDebugLog('خطا در بروزرسانی آمار کش', 'warn');
                 }
             })
             .catch(function (error) {
-                addDebugLog('Error refreshing cache stats: ' + error.message, 'error');
+                addDebugLog('خطا در بروزرسانی آمار کش: ' + error.message, 'error');
             });
     }
 
@@ -431,8 +431,8 @@
         // momentarily flickers every cert's deployment badge — annoying enough
         // to warrant the same two-step interaction.
         return CertMate.confirm(
-            'Clear all server-side deployment status cache? The next dashboard render will re-probe every cert.',
-            'Clear Cache',
+            'آیا می‌خواهید کش وضعیت استقرار سمت سرور را پاک کنید؟ رندر داشبورد بعدی هر گواهی را دوباره بررسی می‌کند.',
+            'پاک کردن کش',
             { danger: false }
         ).then(function (confirmed) {
             if (!confirmed) return Promise.resolve();
@@ -447,18 +447,18 @@
                 .then(function (response) {
                     if (response.ok) {
                         return response.json().then(function (result) {
-                            addDebugLog('Cache cleared successfully', 'info');
-                            showMessage('Cache cleared successfully', 'success');
+                        addDebugLog('کش با موفقیت پاک شد', 'info');
+                        showMessage('کش با موفقیت پاک شد', 'success');
                             return refreshCacheStats();
                         });
                     } else {
-                        addDebugLog('Failed to clear cache', 'warn');
-                        showMessage('Failed to clear cache', 'error');
+                        addDebugLog('پاک کردن کش ناموفق بود', 'warn');
+                        showMessage('پاک کردن کش ناموفق بود', 'error');
                     }
                 })
                 .catch(function (error) {
-                    addDebugLog('Error clearing cache: ' + error.message, 'error');
-                    showMessage('Error clearing cache', 'error');
+                    addDebugLog('خطا در پاک کردن کش: ' + error.message, 'error');
+                    showMessage('خطا در پاک کردن کش', 'error');
                 });
         });
     }
@@ -469,7 +469,7 @@
 
     function loadSettings(suppressErrorMessages) {
         suppressErrorMessages = suppressErrorMessages || false;
-        addDebugLog('Loading settings from backend...', 'info');
+        addDebugLog('بارگذاری تنظیمات از بک‌اند...', 'info');
 
         return fetch('/api/web/settings', {
             method: 'GET',
@@ -482,7 +482,7 @@
                 return response.json();
             })
             .then(function (settings) {
-                addDebugLog('Settings loaded: ' + Object.keys(settings).join(', '), 'info');
+                addDebugLog('تنظیمات بارگذاری شد: ' + Object.keys(settings).join(', '), 'info');
 
                 currentSettings = settings;
                 populateForm(settings);
@@ -491,13 +491,13 @@
                 return loadDNSProviders();
             })
             .then(function () {
-                addDebugLog('Settings loaded and form populated successfully', 'info');
+                addDebugLog('تنظیمات با موفقیت بارگذاری و فرم پر شد', 'info');
             })
             .catch(function (error) {
-                addDebugLog('Failed to load settings: ' + error.message, 'error');
+                addDebugLog('بارگذاری تنظیمات ناموفق بود: ' + error.message, 'error');
                 console.error('Error loading settings:', error);
                 if (!suppressErrorMessages) {
-                    showMessage('Failed to load settings: ' + error.message, 'error');
+                    showMessage('بارگذاری تنظیمات ناموفق بود: ' + error.message, 'error');
                 }
             });
     }
@@ -508,7 +508,7 @@
 
     function loadDNSProviders() {
         try {
-            addDebugLog('Loading DNS provider configurations...', 'info');
+            addDebugLog('بارگذاری پیکربندی ارائه‌دهندگان DNS...', 'info');
             dnsProviders = {};
 
             // Load provider configurations from current settings
@@ -564,10 +564,10 @@
                             }
                         }
 
-                        addDebugLog(provider + ': ' + (dnsProviders[provider].configured ? 'configured' : 'not configured') + ' (' + dnsProviders[provider].accounts.length + ' accounts)', 'info');
+                        addDebugLog(provider + ': ' + (dnsProviders[provider].configured ? 'پیکربندی شده' : 'پیکربندی نشده') + ' (' + dnsProviders[provider].accounts.length + ' حساب)', 'info');
 
                     } catch (error) {
-                        addDebugLog('Error processing ' + provider + ': ' + error.message, 'warn');
+                        addDebugLog('خطا در پردازش ' + provider + ': ' + error.message, 'warn');
                     }
                 });
             }
@@ -578,10 +578,10 @@
             // Update account lists in DNS config sections
             updateAccountLists();
 
-            addDebugLog('DNS provider configurations loaded', 'info');
+            addDebugLog('پیکربندی ارائه‌دهندگان DNS بارگذاری شد', 'info');
 
         } catch (error) {
-            addDebugLog('Failed to load DNS providers: ' + error.message, 'error');
+            addDebugLog('بارگذاری ارائه‌دهندگان DNS ناموفق بود: ' + error.message, 'error');
             console.error('Error loading DNS providers:', error);
         }
     }
@@ -609,7 +609,7 @@
             if (statusEl) {
                 var providerData = dnsProviders[provider];
                 if (providerData && providerData.configured) {
-                    statusEl.textContent = 'Configured';
+                    statusEl.textContent = 'پیکربندی شده';
                     statusEl.className = 'text-xs text-success-fg mt-1';
 
                     if (accountsEl && countEl) {
@@ -617,7 +617,7 @@
                         accountsEl.classList.remove('hidden');
                     }
                 } else {
-                    statusEl.textContent = 'Not configured';
+                    statusEl.textContent = 'پیکربندی نشده';
                     statusEl.className = 'text-xs text-muted mt-1';
 
                     if (accountsEl) {
@@ -646,14 +646,14 @@
 
     function populateForm(data) {
         try {
-            addDebugLog('Populating form with settings data...', 'info');
+            addDebugLog('پر کردن فرم با داده‌های تنظیمات...', 'info');
 
             // Basic settings
             if (data.email) {
                 var emailField = document.getElementById('email');
                 if (emailField) {
                     emailField.value = data.email;
-                    addDebugLog('Email field populated', 'info');
+                    addDebugLog('فیلد ایمیل پر شد', 'info');
                 }
             }
 
@@ -665,7 +665,7 @@
                         return typeof d === 'string' ? d : (d.domain || '');
                     }).filter(function (d) { return d; });
                     domainsField.value = domainStrings.join('\n');
-                    addDebugLog('Domains field populated with ' + domainStrings.length + ' domains', 'info');
+                    addDebugLog('فیلد دامنه‌ها با ' + domainStrings.length + ' دامنه پر شد', 'info');
                 }
             }
 
@@ -673,7 +673,7 @@
                 var autoRenewField = document.getElementById('auto_renew');
                 if (autoRenewField) {
                     autoRenewField.checked = data.auto_renew !== false;
-                    addDebugLog('Auto-renewal set to ' + autoRenewField.checked, 'info');
+                    addDebugLog('تمدید خودکار تنظیم شد: ' + autoRenewField.checked, 'info');
                 }
             }
 
@@ -681,7 +681,7 @@
                 var thresholdField = document.getElementById('renewal_threshold_days');
                 if (thresholdField) {
                     thresholdField.value = data.renewal_threshold_days;
-                    addDebugLog('Renewal threshold set to ' + data.renewal_threshold_days + ' days', 'info');
+                    addDebugLog('آستانه تمدید تنظیم شد: ' + data.renewal_threshold_days + ' روز', 'info');
                 }
             }
 
@@ -714,13 +714,13 @@
                 var populateTokenField = document.getElementById('api_bearer_token');
                 if (populateTokenField) {
                     populateTokenField.value = data.api_bearer_token;
-                    addDebugLog('API bearer token field populated', 'info');
+                    addDebugLog('فیلد توکن Bearer API پر شد', 'info');
                 }
             } else if (data.api_bearer_token_hash) {
                 var hashedTokenField = document.getElementById('api_bearer_token');
                 if (hashedTokenField) {
-                    hashedTokenField.placeholder = 'API token configured — leave empty to keep, or enter a new one to rotate';
-                    addDebugLog('API bearer token already configured (hash present)', 'info');
+                    hashedTokenField.placeholder = 'توکن API پیکربندی شده — برای نگه‌داشتن خالی بگذارید، یا توکن جدیدی وارد کنید';
+                    addDebugLog('توکن Bearer API قبلاً پیکربندی شده (هش موجود)', 'info');
                 }
             }
 
@@ -728,7 +728,7 @@
                 var cacheField = document.getElementById('cache_ttl');
                 if (cacheField) {
                     cacheField.value = data.cache_ttl;
-                    addDebugLog('Cache TTL set to ' + data.cache_ttl, 'info');
+                    addDebugLog('TTL کش تنظیم شد: ' + data.cache_ttl, 'info');
                 }
             }
 
@@ -737,7 +737,7 @@
                 var challengeRadio = document.querySelector('input[name="challenge_type"][value="' + data.challenge_type + '"]');
                 if (challengeRadio) {
                     challengeRadio.checked = true;
-                    addDebugLog('Challenge type set to ' + data.challenge_type, 'info');
+                    addDebugLog('نوع چالش تنظیم شد: ' + data.challenge_type, 'info');
                 }
             }
             toggleChallengeType();
@@ -748,7 +748,7 @@
                 if (providerRadio) {
                     providerRadio.checked = true;
                     showDNSConfig(data.dns_provider);
-                    addDebugLog('DNS provider set to ' + data.dns_provider, 'info');
+                    addDebugLog('ارائه‌دهنده DNS تنظیم شد: ' + data.dns_provider, 'info');
                 }
             }
 
@@ -766,15 +766,15 @@
 
             // Load storage backend settings
             loadStorageBackendSettings(data);
-            addDebugLog('Storage backend settings loaded', 'info');
+            addDebugLog('پیکربندی بک‌اند ذخیره‌سازی بارگذاری شد', 'info');
 
             // Load CA provider settings
             loadCAProviderSettings(data);
-            addDebugLog('CA provider settings loaded', 'info');
+            addDebugLog('پیکربندی ارائه‌دهنده CA بارگذاری شد', 'info');
 
-            addDebugLog('Form populated successfully', 'info');
+            addDebugLog('فرم با موفقیت پر شد', 'info');
         } catch (error) {
-            addDebugLog('Error populating form: ' + error.message, 'error');
+            addDebugLog('خطا در پر کردن فرم: ' + error.message, 'error');
             console.error('Error populating form:', error);
         }
     }
@@ -785,7 +785,7 @@
 
     function populateLegacyProviderFields(provider, config) {
         try {
-            addDebugLog('Populating legacy fields for ' + provider, 'info');
+            addDebugLog('پر کردن فیلدهای قدیمی برای ' + provider, 'info');
 
             var fieldMappings = {
                 'cloudflare': [
@@ -834,11 +834,11 @@
                 var field = document.getElementById(mapping.field);
                 if (field && config[mapping.config]) {
                     field.value = config[mapping.config];
-                    addDebugLog('Field ' + mapping.field + ' populated', 'info');
+                    addDebugLog('فیلد ' + mapping.field + ' پر شد', 'info');
                 }
             });
         } catch (error) {
-            addDebugLog('Error populating legacy fields for ' + provider + ': ' + error.message, 'warn');
+            addDebugLog('خطا در پر کردن فیلدهای قدیمی برای ' + provider + ': ' + error.message, 'warn');
         }
     }
 
@@ -851,7 +851,7 @@
     var _addAccountTriggerEl = null;
 
     function showAddAccountModal(provider) {
-        addDebugLog('Opening add account modal for ' + provider, 'info');
+        addDebugLog('باز کردن مودال افزودن حساب برای ' + provider, 'info');
 
         // Remember trigger for focus restore on close
         _addAccountTriggerEl = document.activeElement;
@@ -867,7 +867,7 @@
         var setDefaultCheckbox = document.getElementById('set-as-default');
 
         if (!modal || !modalTitle || !providerFields) {
-            addDebugLog('Modal elements not found', 'error');
+            addDebugLog('فیلدهای مودال یافت نشد', 'error');
             return;
         }
 
@@ -895,7 +895,7 @@
             'duckdns': 'DuckDNS',
             'custom-script': 'Custom Script'
         };
-        modalTitle.textContent = 'Add ' + (providerNames[provider] || provider) + ' Account';
+        modalTitle.textContent = 'افزودن حساب ' + (providerNames[provider] || provider);
 
         // Clear previous fields
         providerFields.innerHTML = '';
@@ -956,7 +956,7 @@
     var _editAccountTriggerEl = null;
 
     function showEditAccountModal(provider, accountId) {
-        addDebugLog('Opening edit account modal for ' + provider + ':' + accountId, 'info');
+        addDebugLog('باز کردن مودال ویرایش حساب برای ' + provider + ':' + accountId, 'info');
 
         // Remember trigger for focus restore on close
         _editAccountTriggerEl = document.activeElement;
@@ -970,7 +970,7 @@
         var editSetDefaultCheckbox = document.getElementById('edit-set-as-default');
 
         if (!modal || !editAccountIdField || !editProviderField) {
-            addDebugLog('Edit modal elements not found', 'error');
+            addDebugLog('فیلدهای مودال ویرایش یافت نشد', 'error');
             return;
         }
 
@@ -983,8 +983,8 @@
         var account = (providerData && providerData.accounts) ? providerData.accounts.find(function (acc) { return acc.id === accountId; }) : null;
 
         if (!account) {
-            addDebugLog('Account ' + accountId + ' not found for provider ' + provider, 'error');
-            showMessage('Account not found', 'error');
+            addDebugLog('حساب ' + accountId + ' برای ارائه‌دهنده ' + provider + ' یافت نشد', 'error');
+            showMessage('حساب یافت نشد', 'error');
             return;
         }
 
@@ -1197,7 +1197,7 @@
     // =============================================
 
     function saveAccount() {
-        addDebugLog('Saving new account...', 'info');
+        addDebugLog('ذخیره حساب جدید...', 'info');
 
         var modal = document.getElementById('addAccountModal');
         var provider = modal.dataset.provider;
@@ -1205,13 +1205,13 @@
         var formData = new FormData(accountForm);
 
         if (!provider) {
-            showMessage('Error saving account: Provider not specified', 'error');
-            addDebugLog('Error saving account: Provider not specified', 'error');
+            showMessage('خطا در ذخیره حساب: ارائه‌دهنده مشخص نشده', 'error');
+            addDebugLog('خطا در ذخیره حساب: ارائه‌دهنده مشخص نشده', 'error');
             return;
         }
 
         // Generate a unique account ID
-        var accountName = formData.get('name') || 'Untitled Account';
+        var accountName = formData.get('name') || 'حساب بدون عنوان';
         var accountId = accountName.toLowerCase().replace(/[^a-z0-9]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '') || 'account_' + Date.now();
 
         // Build account configuration
@@ -1236,14 +1236,14 @@
         for (var i = 0; i < requiredFields.length; i++) {
             var field = requiredFields[i];
             if (!field.value || !field.value.trim()) {
-                validationError = (field.placeholder || field.name) + ' is required';
+                validationError = (field.placeholder || field.name) + ' الزامی است';
                 break;
             }
         }
 
         if (validationError) {
-            addDebugLog('Error saving account: ' + validationError, 'error');
-            showMessage('Error saving account: ' + validationError, 'error');
+            addDebugLog('خطا در ذخیره حساب: ' + validationError, 'error');
+            showMessage('خطا در ذخیره حساب: ' + validationError, 'error');
             return;
         }
 
@@ -1272,8 +1272,8 @@
                 return response.json();
             })
             .then(function (result) {
-                addDebugLog('Account created: ' + result.account_id, 'info');
-                showMessage('Account "' + accountName + '" created successfully', 'success');
+                addDebugLog('حساب ایجاد شد: ' + result.account_id, 'info');
+                showMessage('حساب "' + accountName + '" با موفقیت ایجاد شد', 'success');
 
                 // Refresh settings and close modal
                 return loadSettings().then(function () {
@@ -1281,8 +1281,8 @@
                 });
             })
             .catch(function (error) {
-                addDebugLog('Error saving account: ' + error.message, 'error');
-                showMessage('Error saving account: ' + error.message, 'error');
+                addDebugLog('خطا در ذخیره حساب: ' + error.message, 'error');
+                showMessage('خطا در ذخیره حساب: ' + error.message, 'error');
             });
     }
 
@@ -1291,7 +1291,7 @@
     // =============================================
 
     function saveEditAccount() {
-        addDebugLog('Saving account changes...', 'info');
+        addDebugLog('ذخیره تغییرات حساب...', 'info');
 
         var editForm = document.getElementById('editAccountForm');
         var formData = new FormData(editForm);
@@ -1299,14 +1299,14 @@
         var accountId = formData.get('edit-account-id');
 
         if (!provider || !accountId) {
-            addDebugLog('Error updating account: Provider or account ID not specified', 'error');
-            showMessage('Error updating account: Provider or account ID not specified', 'error');
+            addDebugLog('خطا در به‌روزرسانی حساب: ارائه‌دهنده یا شناسه حساب مشخص نشده', 'error');
+            showMessage('خطا در به‌روزرسانی حساب: ارائه‌دهنده یا شناسه حساب مشخص نشده', 'error');
             return;
         }
 
         // Build account data
         var accountData = {
-            name: formData.get('name') || 'Untitled Account',
+            name: formData.get('name') || 'حساب بدون عنوان',
             description: formData.get('description') || '',
             set_as_default: formData.get('set_as_default') === 'on'
         };
@@ -1321,7 +1321,7 @@
             }
         });
 
-        addDebugLog('Updated account data: ' + JSON.stringify(accountData, null, 2), 'info');
+        addDebugLog('داده‌های به‌روزرسانی شده حساب: ' + JSON.stringify(accountData, null, 2), 'info');
 
         // Send to backend
         fetch('/api/dns/' + provider + '/accounts/' + accountId, {
@@ -1340,8 +1340,8 @@
                 return response.json();
             })
             .then(function (result) {
-                addDebugLog('Account updated: ' + accountId, 'info');
-                showMessage('Account "' + accountData.name + '" updated successfully', 'success');
+                addDebugLog('حساب به‌روزرسانی شد: ' + accountId, 'info');
+                showMessage('حساب "' + accountData.name + '" با موفقیت به‌روزرسانی شد', 'success');
 
                 // Refresh settings and close modal
                 return loadSettings().then(function () {
@@ -1349,8 +1349,8 @@
                 });
             })
             .catch(function (error) {
-                addDebugLog('Error updating account: ' + error.message, 'error');
-                showMessage('Error updating account: ' + error.message, 'error');
+                addDebugLog('خطا در به‌روزرسانی حساب: ' + error.message, 'error');
+                showMessage('خطا در به‌روزرسانی حساب: ' + error.message, 'error');
             });
     }
 
@@ -1359,10 +1359,10 @@
     // =============================================
 
     function deleteAccount(provider, accountId) {
-        CertMate.confirm('Are you sure you want to delete this account? This action cannot be undone.', 'Delete Account').then(function (confirmed) {
+        CertMate.confirm('آیا مطمئن هستید که می‌خواهید این حساب را حذف کنید؟ این عمل غیرقابل بازگشت است.', 'حذف حساب').then(function (confirmed) {
             if (!confirmed) return;
 
-            addDebugLog('Deleting account ' + provider + ':' + accountId, 'info');
+            addDebugLog('حذف حساب ' + provider + ':' + accountId, 'info');
 
             return fetch('/api/dns/' + provider + '/accounts/' + accountId, {
                 method: 'DELETE',
@@ -1374,16 +1374,16 @@
                             throw new Error('HTTP ' + response.status + ': ' + t);
                         });
                     }
-                    addDebugLog('Account deleted: ' + accountId, 'info');
-                    showMessage('Account deleted successfully', 'success');
+                    addDebugLog('حساب حذف شد: ' + accountId, 'info');
+                    showMessage('حساب با موفقیت حذف شد', 'success');
 
                     // Refresh settings
                     return loadSettings();
                 });
         })
             .catch(function (error) {
-                addDebugLog('Error deleting account: ' + error.message, 'error');
-                showMessage('Error deleting account: ' + error.message, 'error');
+                addDebugLog('خطا در حذف حساب: ' + error.message, 'error');
+                showMessage('خطا در حذف حساب: ' + error.message, 'error');
             });
     }
 
@@ -1418,7 +1418,7 @@
                 }
             } else {
                 // Show legacy config for backward compatibility
-                accountsListContainer.innerHTML = '<div class="text-sm text-muted">No accounts configured yet.</div>';
+                accountsListContainer.innerHTML = '<div class="text-sm text-muted">هنوز حسابی پیکربندی نشده است.</div>';
                 if (legacyConfigContainer) {
                     legacyConfigContainer.style.display = 'block';
                 }
@@ -1440,7 +1440,7 @@
         var safeProvider = escapeHtml(provider);
 
         var descHtml = account.description ? '<p class="text-xs text-muted mt-1">' + safeDesc + '</p>' : '';
-        var defaultBadge = isDefault ? '<span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-info-surface text-blue-800 dark:text-blue-400"><i class="fas fa-star mr-1"></i>Default</span>' : '';
+        var defaultBadge = isDefault ? '<span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-info-surface text-blue-800 dark:text-blue-400"><i class="fas fa-star mr-1"></i>پیش‌فرض</span>' : '';
 
         card.innerHTML =
             '<div class="flex items-center justify-between">' +
@@ -1456,12 +1456,12 @@
             '<button type="button" data-action="edit" data-provider="' + safeProvider + '" data-account-id="' + safeId + '"' +
             ' class="inline-flex items-center px-2 py-1 border border-border shadow-sm text-xs font-medium rounded text-label bg-white dark:bg-gray-600 hover:bg-gray-50 dark:hover:bg-gray-500 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary">' +
             '<i class="fas fa-edit mr-1"></i>' +
-            'Edit' +
+            'ویرایش' +
             '</button>' +
             '<button type="button" data-action="delete" data-provider="' + safeProvider + '" data-account-id="' + safeId + '"' +
             ' class="inline-flex items-center px-2 py-1 border border-red-300 shadow-sm text-xs font-medium rounded text-red-700 bg-white hover:bg-red-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500">' +
             '<i class="fas fa-trash mr-1"></i>' +
-            'Delete' +
+            'حذف' +
             '</button>' +
             '</div>' +
             '</div>';
@@ -1480,7 +1480,7 @@
         var button = null;
         var originalText = '';
 
-        addDebugLog('Creating ' + type + ' backup...', 'info');
+        addDebugLog('ایجاد پشتیبان ' + type + '...', 'info');
 
         // Get button element - either passed directly or from event
         button = buttonElement || (window.event && window.event.target);
@@ -1488,7 +1488,7 @@
 
         if (button) {
             button.disabled = true;
-            button.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Creating...';
+            button.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>در حال ایجاد...';
         }
 
         // Map legacy backup types to new unified format
@@ -1522,9 +1522,9 @@
             })
             .then(function (result) {
                 if (result.message) {
-                    addDebugLog('Backup created successfully: ' + result.backups.map(function (b) { return b.filename; }).join(', '), 'info');
+                    addDebugLog('پشتیبان با موفقیت ایجاد شد: ' + result.backups.map(function (b) { return b.filename; }).join(', '), 'info');
 
-                    var message = (type === 'unified' ? 'Unified' : type) + ' backup created successfully!';
+                    var message = 'پشتیبان ' + (type === 'unified' ? 'یکپارچه' : type) + ' با موفقیت ایجاد شد!';
                     if (result.recommendation) {
                         message += ' Note: ' + result.recommendation;
                     }
@@ -1533,14 +1533,14 @@
                     // Refresh backup list
                     return refreshBackupList();
                 } else {
-                    var err = new Error(result.error || 'Failed to create backup');
+                    var err = new Error(result.error || 'ایجاد پشتیبان ناموفق بود');
                     err.responseBody = result;
                     throw err;
                 }
             })
             .catch(function (error) {
-                addDebugLog('Error creating backup: ' + error.message, 'error');
-                showMessage('Error creating backup: ' + error.message, 'error', {
+                addDebugLog('خطا در ایجاد پشتیبان: ' + error.message, 'error');
+                showMessage('خطا در ایجاد پشتیبان: ' + error.message, 'error', {
                     errorContext: {
                         endpoint: 'POST /api/backups/create',
                         status: error.responseStatus || 0,
@@ -1564,7 +1564,7 @@
     // =============================================
 
     function refreshBackupList() {
-        addDebugLog('Refreshing backup list...', 'info');
+        addDebugLog('بروزرسانی لیست پشتیبان‌ها...', 'info');
 
         return fetch('/api/backups', {
             method: 'GET',
@@ -1580,10 +1580,10 @@
             })
             .then(function (backups) {
                 updateBackupList(backups);
-                addDebugLog('Backup list refreshed: ' + backups.unified.length + ' backups', 'info');
+                addDebugLog('لیست پشتیبان‌ها بروزرسانی شد: ' + backups.unified.length + ' پشتیبان', 'info');
             })
             .catch(function (error) {
-                addDebugLog('Error refreshing backup list: ' + error.message, 'error');
+                addDebugLog('خطا در بروزرسانی لیست پشتیبان‌ها: ' + error.message, 'error');
                 console.error('Error refreshing backup list:', error);
 
                 // Show error in backup list container
@@ -1592,7 +1592,7 @@
                     backupList.innerHTML =
                         '<div class="p-4 text-center text-red-500 dark:text-red-400">' +
                         '<i class="fas fa-exclamation-triangle mr-2"></i>' +
-                        'Error loading backups: ' + error.message +
+                        'خطا در بارگذاری پشتیبان‌ها: ' + error.message +
                         '</div>';
                 }
             });
@@ -1612,8 +1612,8 @@
             unifiedBackupList.innerHTML =
                 '<div class="p-4 text-center text-muted">' +
                 '<i class="fas fa-archive mr-2"></i>' +
-                'No backups yet' +
-                '<div class="text-xs mt-1">Create your first backup above!</div>' +
+                'هنوز پشتیبانی وجود ندارد' +
+                '<div class="text-xs mt-1">اولین پشتیبان خود را بالا ایجاد کنید!</div>' +
                 '</div>';
         } else if (backups.unified) {
             var unifiedHtml = '';
@@ -1640,17 +1640,17 @@
                     '<div class="flex space-x-1 ml-2">' +
                     '<button data-action="download-backup" data-backup-type="unified" data-filename="' + safeFilename + '"' +
                     ' class="p-2 text-info-fg hover:text-blue-800 dark:hover:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-900/30 rounded transition-colors"' +
-                    ' title="Download backup">' +
+                    ' title="دانلود پشتیبان">' +
                     '<i class="fas fa-download text-sm"></i>' +
                     '</button>' +
                     '<button data-action="restore-backup" data-backup-type="unified" data-filename="' + safeFilename + '"' +
                     ' class="p-2 text-success-fg hover:text-green-800 dark:hover:text-green-300 hover:bg-green-50 dark:hover:bg-green-900/30 rounded transition-colors"' +
-                    ' title="Restore backup">' +
+                    ' title="بازیابی پشتیبان">' +
                     '<i class="fas fa-undo text-sm"></i>' +
                     '</button>' +
                     '<button data-action="delete-backup" data-backup-type="unified" data-filename="' + safeFilename + '"' +
                     ' class="p-2 text-danger-fg hover:text-red-800 dark:hover:text-red-300 hover:bg-red-50 dark:hover:bg-red-900/30 rounded transition-colors"' +
-                    ' title="Delete backup">' +
+                    ' title="حذف پشتیبان">' +
                     '<i class="fas fa-trash text-sm"></i>' +
                     '</button>' +
                     '</div>' +
@@ -1661,7 +1661,7 @@
                 unifiedHtml +=
                     '<div class="text-xs text-muted text-center p-3 bg-sunken rounded-lg">' +
                     '<i class="fas fa-ellipsis-h mr-1"></i>' +
-                    (backups.unified.length - 10) + ' more backups available' +
+                    (backups.unified.length - 10) + ' پشتیبان دیگر موجود است' +
                     '</div>';
             }
 
@@ -1689,11 +1689,11 @@
     function downloadBackup(type, filename) {
         // Only support unified backups
         if (type !== 'unified') {
-            showMessage('Only unified backup download is supported.', 'error');
+            showMessage('فقط دانلود پشتیبان یکپارچه پشتیبانی می‌شود.', 'error');
             return;
         }
 
-        addDebugLog('Downloading backup: ' + filename, 'info');
+        addDebugLog('دانلود پشتیبان: ' + filename, 'info');
 
         fetch('/api/backups/download/unified/' + filename, {
             method: 'GET',
@@ -1718,12 +1718,12 @@
                 document.body.removeChild(a);
                 window.URL.revokeObjectURL(url);
 
-                addDebugLog('Backup downloaded: ' + filename, 'info');
-                showMessage('Backup downloaded: ' + filename, 'success');
+                addDebugLog('پشتیبان دانلود شد: ' + filename, 'info');
+                showMessage('پشتیبان دانلود شد: ' + filename, 'success');
             })
             .catch(function (error) {
-                addDebugLog('Error downloading backup: ' + error.message, 'error');
-                showMessage('Error downloading backup: ' + error.message, 'error');
+                addDebugLog('خطا در دانلود پشتیبان: ' + error.message, 'error');
+                showMessage('خطا در دانلود پشتیبان: ' + error.message, 'error');
             });
     }
 
@@ -1734,14 +1734,14 @@
     function restoreBackup(type, filename) {
         // Only support unified backups
         if (type !== 'unified') {
-            showMessage('Only unified backup restore is supported.', 'error');
+            showMessage('فقط بازیابی پشتیبان یکپارچه پشتیبانی می‌شود.', 'error');
             return;
         }
 
-        CertMate.confirm('Are you sure you want to restore from "' + escapeHtml(filename) + '"? This will atomically restore both settings and certificates, creating a backup of your current configuration first.', 'Restore Backup').then(function (confirmed) {
+        CertMate.confirm('آیا مطمئن هستید که می‌خواهید از "' + escapeHtml(filename) + '" بازیابی کنید؟ این به طور اتمیک تنظیمات و گواهی‌ها را بازیابی می‌کند و ابتدا از پیکربندی فعلی شما پشتیبان تهیه می‌کند.', 'بازیابی پشتیبان').then(function (confirmed) {
             if (!confirmed) return;
 
-            addDebugLog('Restoring from backup: ' + filename, 'info');
+            addDebugLog('بازیابی از پشتیبان: ' + filename, 'info');
 
             return fetch('/api/backups/restore/unified', {
                 method: 'POST',
@@ -1767,11 +1767,11 @@
                     return response.json();
                 })
                 .then(function (result) {
-                    addDebugLog('Backup restored successfully from: ' + filename, 'info');
+                    addDebugLog('پشتیبان با موفقیت از ' + filename + ' بازیابی شد', 'info');
 
-                    var successMessage = result.message || 'Backup restored successfully!';
+                    var successMessage = result.message || 'پشتیبان با موفقیت بازیابی شد!';
                     if (result.pre_restore_backup) {
-                        successMessage += '\n\nA backup of the previous state was created: ' + result.pre_restore_backup;
+                        successMessage += '\n\nاز حالت قبلی پشتیبان تهیه شد: ' + result.pre_restore_backup;
                     }
 
                     // Show immediate success message
@@ -1783,24 +1783,24 @@
                             return refreshBackupList();
                         })
                         .then(function () {
-                            addDebugLog('Settings reloaded successfully after restore', 'info');
-                            showMessage('Backup restored and configuration reloaded successfully!', 'success');
+                            addDebugLog('تنظیمات با موفقیت پس از بازیابی بارگذاری مجدد شد', 'info');
+                            showMessage('پشتیبان بازیابی و پیکربندی با موفقیت بارگذاری مجدد شد!', 'success');
                         })
                         .catch(function (reloadError) {
-                            addDebugLog('Settings reload failed after successful restore: ' + reloadError.message, 'warn');
-                            showMessage('Backup restored successfully! Please refresh the page to see all changes.', 'success');
+                            addDebugLog('بارگذاری مجدد تنظیمات پس از بازیابی موفق ناموفق بود: ' + reloadError.message, 'warn');
+                            showMessage('پشتیبان با موفقیت بازیابی شد! لطفاً صفحه را برای مشاهده تمام تغییرات بروزرسانی کنید.', 'success');
 
                             // Fallback to page reload after a delay
                             setTimeout(function () {
-                                addDebugLog('Auto-refreshing page after restore...', 'info');
+                                addDebugLog('بروزرسانی خودکار صفحه پس از بازیابی...', 'info');
                                 window.location.reload();
                             }, 3000);
                         });
                 });
         })
             .catch(function (error) {
-                addDebugLog('Error during backup restore: ' + error.message, 'error');
-                showMessage('Error restoring backup: ' + error.message, 'error', {
+                addDebugLog('خطا در بازیابی پشتیبان: ' + error.message, 'error');
+                showMessage('خطا در بازیابی پشتیبان: ' + error.message, 'error', {
                     errorContext: {
                         endpoint: 'POST /api/backups/restore/unified',
                         status: error.responseStatus || 0,
@@ -1819,14 +1819,14 @@
     function deleteBackup(type, filename) {
         // Only support unified backups
         if (type !== 'unified') {
-            showMessage('Only unified backup deletion is supported.', 'error');
+            showMessage('فقط حذف پشتیبان یکپارچه پشتیبانی می‌شود.', 'error');
             return;
         }
 
-        CertMate.confirm('Are you sure you want to delete the backup "' + escapeHtml(filename) + '"? This action cannot be undone.', 'Delete Backup').then(function (confirmed) {
+        CertMate.confirm('آیا مطمئن هستید که می‌خواهید پشتیبان "' + escapeHtml(filename) + '" را حذف کنید؟ این عمل غیرقابل بازگشت است.', 'حذف پشتیبان').then(function (confirmed) {
             if (!confirmed) return;
 
-            addDebugLog('Deleting backup: ' + filename, 'info');
+            addDebugLog('حذف پشتیبان: ' + filename, 'info');
 
             return fetch('/api/backups/delete/unified/' + filename, {
                 method: 'DELETE',
@@ -1840,19 +1840,19 @@
                 })
                 .then(function (result) {
                     if (result.message) {
-                        addDebugLog('Backup deleted successfully: ' + filename, 'info');
-                        showMessage('Backup "' + filename + '" deleted successfully!', 'success');
+                        addDebugLog('پشتیبان با موفقیت حذف شد: ' + filename, 'info');
+                        showMessage('پشتیبان "' + filename + '" با موفقیت حذف شد!', 'success');
 
                         // Refresh backup list
                         return refreshBackupList();
                     } else {
-                        throw new Error(result.error || 'Failed to delete backup');
+                        throw new Error(result.error || 'حذف پشتیبان ناموفق بود');
                     }
                 });
         })
             .catch(function (error) {
-                addDebugLog('Error deleting backup: ' + error.message, 'error');
-                showMessage('Error deleting backup: ' + error.message, 'error');
+                addDebugLog('خطا در حذف پشتیبان: ' + error.message, 'error');
+                showMessage('خطا در حذف پشتیبان: ' + error.message, 'error');
             });
     }
 
@@ -1952,31 +1952,31 @@
         if (hintElement) {
             switch (caProvider) {
                 case 'letsencrypt':
-                    hintElement.textContent = 'Enter your email address and test Let\'s Encrypt connection';
+                    hintElement.textContent = 'آدرس ایمیل خود را وارد کنید و اتصال Let\'s Encrypt را آزمایش کنید';
                     break;
                 case 'letsencrypt_staging':
-                    hintElement.textContent = 'Staging issues untrusted test certificates. Email falls back to the Let\'s Encrypt one when left empty';
+                    hintElement.textContent = 'محیط آزمایشی گواهی‌های آزمایشی غیرقابل اعتماد صادر می‌کند. ایمیل در صورت خالی بودن از ایمیل Let\'s Encrypt استفاده می‌کند';
                     break;
                 case 'zerossl':
-                    hintElement.textContent = 'Enter EAB credentials and email, then test ZeroSSL connection';
+                    hintElement.textContent = ' اعتبارنامه‌های EAB و ایمیل را وارد کنید، سپس اتصال ZeroSSL را آزمایش کنید';
                     break;
                 case 'google':
-                    hintElement.textContent = 'Enter EAB credentials and email, then test Google Trust Services connection';
+                    hintElement.textContent = ' اعتبارنامه‌های EAB و ایمیل را وارد کنید، سپس اتصال Google Trust Services را آزمایش کنید';
                     break;
                 case 'actalis':
-                    hintElement.textContent = 'Enter EAB credentials and email, then test Actalis connection';
+                    hintElement.textContent = ' اعتبارنامه‌های EAB و ایمیل را وارد کنید، سپس اتصال Actalis را آزمایش کنید';
                     break;
                 case 'digicert':
-                    hintElement.textContent = 'Enter ACME URL, EAB credentials, and email, then test DigiCert connection';
+                    hintElement.textContent = 'آدرس ACME، اعتبارنامه‌های EAB و ایمیل را وارد کنید، سپس اتصال DigiCert را آزمایش کنید';
                     break;
                 case 'sslcom':
-                    hintElement.textContent = 'Enter EAB credentials and email, then test SSL.com connection';
+                    hintElement.textContent = ' اعتبارنامه‌های EAB و ایمیل را وارد کنید، سپس اتصال SSL.com را آزمایش کنید';
                     break;
                 case 'private_ca':
-                    hintElement.textContent = 'Enter your ACME directory URL and email, then test Private CA connection';
+                    hintElement.textContent = 'آدرس دایرکتوری ACME و ایمیل خود را وارد کنید، سپس اتصال Private CA را آزمایش کنید';
                     break;
                 default:
-                    hintElement.textContent = 'Select a CA provider and fill in required fields, then test the connection';
+                    hintElement.textContent = 'ارائه‌دهنده CA را انتخاب کنید و فیلدهای الزامی را پر کنید، سپس اتصال را آزمایش کنید';
             }
         }
     }
@@ -2076,7 +2076,7 @@
 
         // Validate required fields
         if (missingFields.length > 0) {
-            showMessage('Please fill in the following required fields: ' + missingFields.join(', '), 'error');
+            showMessage('لطفاً فیلدهای الزامی زیر را پر کنید: ' + missingFields.join(', '), 'error');
             return;
         }
 
@@ -2084,7 +2084,7 @@
         var testButton = document.querySelector('button[onclick="testCAProvider()"]');
         if (!testButton) return;
         var originalText = testButton.innerHTML;
-        testButton.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i> Testing...';
+        testButton.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i> در حال آزمایش...';
         testButton.disabled = true;
 
         fetch('/api/settings/test-ca-provider', {
@@ -2100,16 +2100,16 @@
             .then(function (response) {
                 return response.json().then(function (result) {
                     if (response.ok && result.success) {
-                        showMessage('CA connection test successful! ' + result.message, 'success');
+                        showMessage('آزمایش اتصال CA موفقیت‌آمیز بود! ' + result.message, 'success');
                     } else {
-                        var errorMsg = result.message || result.error || 'Unknown error occurred';
-                        showMessage('CA connection test failed: ' + errorMsg, 'error');
+                        var errorMsg = result.message || result.error || 'خطای ناشناخته رخ داد';
+                        showMessage('آزمایش اتصال CA ناموفق بود: ' + errorMsg, 'error');
                     }
                 });
             })
             .catch(function (error) {
                 console.error('Error testing CA provider:', error);
-                showMessage('Error testing CA provider connection. Please check your network connection.', 'error');
+                showMessage('خطا در آزمایش اتصال ارائه‌دهنده CA. لطفاً اتصال شبکه خود را بررسی کنید.', 'error');
             })
             .then(function () {
                 // finally block equivalent - restore button state
@@ -2173,11 +2173,11 @@
         var config = getStorageBackendConfig(backend);
 
         if (!validateStorageConfig(backend, config)) {
-            showMessage('Please fill in all required fields for the selected storage backend.', 'error');
+            showMessage('لطفاً تمام فیلدهای الزامی بک‌اند ذخیره‌سازی انتخابی را پر کنید.', 'error');
             return;
         }
 
-        showMessage('Testing storage backend connection...', 'info');
+        showMessage('آزمایش اتصال بک‌اند ذخیره‌سازی...', 'info');
 
         var requestData = {
             backend: backend,
@@ -2204,12 +2204,12 @@
                 } else if (data.error) {
                     showMessage(data.error, 'error');
                 } else {
-                    showMessage('Unknown error occurred', 'error');
+                    showMessage('خطای ناشناخته رخ داد', 'error');
                 }
             })
             .catch(function (error) {
                 console.error('Storage backend test error:', error);
-                showMessage('Failed to test storage backend connection: ' + error.message, 'error');
+                showMessage('آزمایش اتصال بک‌اند ذخیره‌سازی ناموفق بود: ' + error.message, 'error');
             });
     }
 
@@ -2237,9 +2237,9 @@
         }
         if (output) {
             output.classList.remove('hidden');
-            output.textContent = 'Running backfill...';
+            output.textContent = 'در حال اجرای بک‌فیل...';
         }
-        showMessage('Backfilling Certificate objects...', 'info');
+        showMessage('در حال بک‌فیل اشیاء Certificate...', 'info');
 
         fetch('/api/storage/azure-keyvault/backfill-certificates', {
             method: 'POST',
@@ -2250,32 +2250,32 @@
                 var data = payload.data || {};
                 if (output) {
                     var lines = [];
-                    lines.push((data.message || (payload.ok ? 'Backfill finished' : 'Backfill failed')));
+                    lines.push((data.message || (payload.ok ? 'بک‌فیل تمام شد' : 'بک‌فیل ناموفق بود')));
                     if (data.results) {
                         Object.keys(data.results).sort().forEach(function (domain) {
                             lines.push(domain + ': ' + data.results[domain]);
                         });
                     } else if (data.error) {
-                        lines.push('Error: ' + data.error);
+                        lines.push('خطا: ' + data.error);
                     }
                     output.textContent = lines.join('\n');
                 }
                 if (data.success) {
-                    showMessage(data.message || 'Backfill complete', 'success');
+                    showMessage(data.message || 'بک‌فیل کامل شد', 'success');
                 } else if (data.message) {
                     showMessage(data.message, payload.ok ? 'warning' : 'error');
                 } else if (data.error) {
                     showMessage(data.error, 'error');
                 } else {
-                    showMessage('Backfill failed', 'error');
+                    showMessage('بک‌فیل ناموفق بود', 'error');
                 }
             })
             .catch(function (error) {
                 console.error('Azure Key Vault backfill error:', error);
                 if (output) {
-                    output.textContent = 'Backfill failed: ' + error.message;
+                    output.textContent = 'بک‌فیل ناموفق بود: ' + error.message;
                 }
-                showMessage('Backfill request failed: ' + error.message, 'error');
+                showMessage('درخواست بک‌فیل ناموفق بود: ' + error.message, 'error');
             })
             .finally(function () {
                 if (btn) {
@@ -2645,7 +2645,7 @@
             '<div class="mt-3">' +
             '<div class="flex items-center justify-between mb-4">' +
             '<h3 id="storageMigrationModal-title" class="text-lg font-medium text-foreground">' +
-            '<i class="fas fa-exchange-alt mr-2"></i>Certificate Storage Migration' +
+            '<i class="fas fa-exchange-alt mr-2"></i>مهاجرت ذخیره‌سازی گواهی' +
             '</h3>' +
             '<button type="button" id="storageMigCloseBtn" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">' +
             '<i class="fas fa-times"></i>' +
@@ -2653,14 +2653,14 @@
             '</div>' +
             '<div class="mb-4">' +
             '<p class="text-sm text-muted">' +
-            'This will migrate all existing certificates from the current storage backend to the newly configured backend.' +
+            'این عمل تمام گواهی‌های موجود را از بک‌اند ذخیره‌سازی فعلی به بک‌اند جدید پیکربندی شده منتقل می‌کند.' +
             '</p>' +
             '<div class="mt-3 p-3 bg-warning-surface border border-warning-line rounded-md">' +
             '<div class="flex">' +
             '<i class="fas fa-exclamation-triangle text-yellow-400 mt-0.5 mr-2"></i>' +
             '<div class="text-sm text-warning-strong">' +
-            '<strong>Important:</strong> This operation will copy certificates to the new backend. ' +
-            'Original certificates will remain in the current location until manually removed.' +
+            '<strong>مهم:</strong> این عملیات گواهی‌ها را به بک‌اند جدید کپی می‌کند. ' +
+            'گواهی‌های اصلی تا زمان حذف دستی در مکان فعلی باقی می‌مانند.' +
             '</div>' +
             '</div>' +
             '</div>' +
@@ -2668,11 +2668,11 @@
             '<div class="flex justify-end space-x-3">' +
             '<button type="button" id="storageMigCancelBtn" ' +
             'class="px-4 py-2 text-sm font-medium text-label bg-gray-100 dark:bg-gray-600 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-md">' +
-            'Cancel' +
+            'لغو' +
             '</button>' +
             '<button type="button" id="storageMigStartBtn" ' +
             'class="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-md">' +
-            '<i class="fas fa-play mr-1"></i>Start Migration' +
+            '<i class="fas fa-play mr-1"></i>شروع مهاجرت' +
             '</button>' +
             '</div>' +
             '</div>' +
@@ -2718,11 +2718,11 @@
             : (newConfig[newConfig.backend] || {});
 
         if (!validateStorageConfig(newConfig.backend, targetSubConfig)) {
-            showMessage('Please configure and test the new storage backend before migrating.', 'error');
+            showMessage('لطفاً قبل از مهاجرت بک‌اند ذخیره‌سازی جدید را پیکربندی و آزمایش کنید.', 'error');
             return;
         }
 
-        showMessage('Starting certificate migration...', 'info');
+        showMessage('شروع مهاجرت گواهی‌ها...', 'info');
         closeStorageMigrationModal();
 
         // Send target_backend explicitly + the envelope as target_config. The
@@ -2747,19 +2747,19 @@
                 if (result.ok && data.success) {
                     var migrated = (data.migrated_count != null) ? data.migrated_count : 0;
                     var failed = (data.failed_count != null) ? data.failed_count : 0;
-                    var msg = 'Migration completed. ' + migrated + ' certificates migrated';
+                    var msg = 'مهاجرت تمام شد. ' + migrated + ' گواهی منتقل شد';
                     if (failed > 0) {
-                        msg += ', ' + failed + ' failed (see server logs)';
+                        msg += ', ' + failed + ' ناموفق (لاگ‌های سرور را ببینید)';
                     }
                     msg += '.';
                     showMessage(msg, failed > 0 ? 'warning' : 'success');
                 } else {
-                    showMessage('Migration failed: ' + (data.message || data.error || 'Unknown error'), 'error');
+                    showMessage('مهاجرت ناموفق بود: ' + (data.message || data.error || 'خطای ناشناخته'), 'error');
                 }
             })
             .catch(function (error) {
                 console.error('Migration error:', error);
-                showMessage('Failed to perform storage migration.', 'error');
+                showMessage('انجام مهاجرت ذخیره‌سازی ناموفق بود.', 'error');
             });
     }
 
@@ -2806,14 +2806,14 @@
                         var banner = document.getElementById('authSecurityBanner');
                         if (banner) banner.style.display = enabled ? 'none' : 'block';
                     } else {
-                        showMessage(data.error || 'Failed to update auth config', 'error');
+                        showMessage(data.error || 'به‌روزرسانی پیکربندی احراز هویت ناموفق بود', 'error');
                         toggle.checked = !enabled; // Revert toggle
                     }
                 });
             })
             .catch(function (error) {
                 console.error('Error toggling local auth:', error);
-                showMessage('Failed to update authentication settings', 'error');
+                showMessage('به‌روزرسانی تنظیمات احراز هویت ناموفق بود', 'error');
                 toggle.checked = !enabled; // Revert toggle
             });
     }
@@ -2825,13 +2825,13 @@
         var role = document.getElementById('newUserRole').value;
 
         if (!username || !password) {
-            showMessage('Username and password are required', 'error');
+            showMessage('نام کاربری و رمز عبور الزامی هستند', 'error');
             return;
         }
 
         // Client-side password policy check (mirrors backend)
         if (password.length < 12 || !/\d/.test(password) || !/[^A-Za-z0-9]/.test(password)) {
-            showMessage('Password must be at least 12 characters and include a digit and a symbol', 'error');
+            showMessage('رمز عبور باید حداقل ۱۲ کاراکتر باشد و شامل عدد و نماد باشد', 'error');
             var pwField = document.getElementById('newUserPassword');
             if (pwField) {
                 pwField.classList.add('border-red-500', 'input-shake');
@@ -2851,7 +2851,7 @@
             .then(function (response) {
                 return response.json().then(function (data) {
                     if (response.ok) {
-                        showMessage('User \'' + username + '\' created successfully', 'success');
+                        showMessage('کاربر \'' + username + '\' با موفقیت ایجاد شد', 'success');
                         // Clear form
                         document.getElementById('newUserUsername').value = '';
                         document.getElementById('newUserPassword').value = '';
@@ -2860,19 +2860,19 @@
                         // Refresh user list
                         refreshUserList();
                     } else {
-                        showMessage(data.error || 'Failed to create user', 'error');
+                        showMessage(data.error || 'ایجاد کاربر ناموفق بود', 'error');
                     }
                 });
             })
             .catch(function (error) {
                 console.error('Error creating user:', error);
-                showMessage('Failed to create user: ' + error.message, 'error');
+                showMessage('ایجاد کاربر ناموفق بود: ' + error.message, 'error');
             });
     }
 
     function refreshUserList() {
         var userListDiv = document.getElementById('userList');
-        userListDiv.innerHTML = '<div class="text-center py-4 text-muted text-sm"><i class="fas fa-spinner fa-spin mr-2"></i> Loading users...</div>';
+        userListDiv.innerHTML = '<div class="text-center py-4 text-muted text-sm"><i class="fas fa-spinner fa-spin mr-2"></i> در حال بارگذاری کاربران...</div>';
 
         // Timeout after 15 seconds to prevent infinite loading
         var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
@@ -2893,7 +2893,7 @@
                 var users = data.users || {};
 
                 if (Object.keys(users).length === 0) {
-                    userListDiv.innerHTML = '<div class="text-center py-4 text-muted text-sm"><i class="fas fa-users mr-2"></i> No users configured. Add a user above to enable local authentication.</div>';
+                    userListDiv.innerHTML = '<div class="text-center py-4 text-muted text-sm"><i class="fas fa-users mr-2"></i> هنوز کاربری پیکربندی نشده است. یک کاربر در بالا اضافه کنید تا احراز هویت محلی فعال شود.</div>';
                     return;
                 }
 
@@ -2947,7 +2947,7 @@
                     var toggleBtn = isSoleAdmin ? '' :
                         '<button data-action="toggle-user" data-username="' + escapeHtml(username) + '" data-enable="' + (userInfo.enabled === false) + '"' +
                         ' class="p-2 text-muted hover:text-gray-700 dark:hover:text-gray-200"' +
-                        ' title="' + (userInfo.enabled !== false ? 'Disable user' : 'Enable user') + '">' +
+                        ' title="' + (userInfo.enabled !== false ? 'غیرفعال کردن کاربر' : 'فعال کردن کاربر') + '">' +
                         '<i class="fas fa-' + (userInfo.enabled !== false ? 'ban' : 'check') + '"></i>' +
                         '</button>';
 
@@ -2956,7 +2956,7 @@
                     var resetBtn = isSso ? '' :
                         '<button data-action="reset-password" data-username="' + escapeHtml(username) + '"' +
                         ' class="p-2 text-muted hover:text-gray-700 dark:hover:text-gray-200"' +
-                        ' title="Reset password">' +
+                        ' title="بازنشانی رمز عبور">' +
                         '<i class="fas fa-key"></i>' +
                         '</button>';
 
@@ -2964,7 +2964,7 @@
                     var deleteBtn = isSoleAdmin ? '' :
                         '<button data-action="delete-user" data-username="' + escapeHtml(username) + '"' +
                         ' class="p-2 text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300"' +
-                        ' title="Delete user">' +
+                        ' title="حذف کاربر">' +
                         '<i class="fas fa-trash"></i>' +
                         '</button>';
 
@@ -2977,11 +2977,11 @@
                         '<span class="font-medium text-foreground">' + escapeHtml(username) + '</span>' +
                         roleControl +
                         ssoBadge +
-                        '<i class="fas fa-circle text-xs ' + statusColor + '" title="' + (userInfo.enabled !== false ? 'Active' : 'Disabled') + '"></i>' +
+                        '<i class="fas fa-circle text-xs ' + statusColor + '" title="' + (userInfo.enabled !== false ? 'فعال' : 'غیرفعال') + '"></i>' +
                         '</div>' +
                         '<div class="text-xs text-muted">' +
                         emailHtml +
-                        '<span><i class="fas fa-clock mr-1"></i>Last login: ' + escapeHtml(lastLogin) + '</span>' +
+                        '<span><i class="fas fa-clock mr-1"></i>آخرین ورود: ' + escapeHtml(lastLogin) + '</span>' +
                         '</div>' +
                         '</div>' +
                         '</div>' +
@@ -3019,8 +3019,8 @@
                 if (timeoutId) clearTimeout(timeoutId);
                 console.error('Error loading users:', error);
                 var msg = error.name === 'AbortError'
-                    ? 'User list request timed out. Click Refresh to retry.'
-                    : 'Failed to load users. Click Refresh to retry.';
+                    ? 'درخواست لیست کاربران منقضی شد. برای تلاش مجدد روی بروزرسانی کلیک کنید.'
+                    : 'بارگذاری کاربران ناموفق بود. برای تلاش مجدد روی بروزرسانی کلیک کنید.';
                 userListDiv.innerHTML = '<div class="text-center py-4 text-red-500 text-sm"><i class="fas fa-exclamation-triangle mr-2"></i> ' + msg + '</div>';
             });
     }
@@ -3029,9 +3029,9 @@
         if (newRole === currentRole) return;
 
         CertMate.confirm(
-            'Change role of \'' + escapeHtml(username) + '\' from ' + escapeHtml(currentRole) + ' to ' + escapeHtml(newRole) + '?',
-            'Change Role',
-            { danger: false, confirmText: 'Change Role' }
+            'آیا می‌خواهید نقش \'' + escapeHtml(username) + '\' را از ' + escapeHtml(currentRole) + ' به ' + escapeHtml(newRole) + ' تغییر دهید؟',
+            'تغییر نقش',
+            { danger: false, confirmText: 'تغییر نقش' }
         ).then(function (confirmed) {
             if (!confirmed) {
                 if (selectEl) selectEl.value = currentRole; // revert the dropdown
@@ -3046,17 +3046,17 @@
                 .then(function (response) {
                     return response.json().then(function (data) {
                         if (response.ok) {
-                            showMessage('Role for \'' + username + '\' changed to ' + newRole, 'success');
+                            showMessage('نقش کاربر \'' + username + '\' به ' + newRole + ' تغییر کرد', 'success');
                             refreshUserList();
                         } else {
-                            showMessage(data.error || 'Failed to change role', 'error');
+                            showMessage(data.error || 'تغییر نقش ناموفق بود', 'error');
                             if (selectEl) selectEl.value = currentRole;
                         }
                     });
                 })
                 .catch(function (error) {
                     console.error('Error changing user role:', error);
-                    showMessage('Failed to change role', 'error');
+                    showMessage('تغییر نقش ناموفق بود', 'error');
                     if (selectEl) selectEl.value = currentRole;
                 });
         });
@@ -3073,21 +3073,21 @@
             .then(function (response) {
                 return response.json().then(function (data) {
                     if (response.ok) {
-                        showMessage('User \'' + username + '\' ' + (enable ? 'enabled' : 'disabled'), 'success');
+                        showMessage('کاربر \'' + username + '\' ' + (enable ? 'فعال' : 'غیرفعال') + ' شد', 'success');
                         refreshUserList();
                     } else {
-                        showMessage(data.error || 'Failed to update user', 'error');
+                        showMessage(data.error || 'به‌روزرسانی کاربر ناموفق بود', 'error');
                     }
                 });
             })
             .catch(function (error) {
                 console.error('Error toggling user status:', error);
-                showMessage('Failed to update user status', 'error');
+                showMessage('به‌روزرسانی وضعیت کاربر ناموفق بود', 'error');
             });
     }
 
     function resetUserPassword(username) {
-        CertMate.prompt('Enter new password for \'' + escapeHtml(username) + '\':', 'Reset Password').then(function (newPassword) {
+        CertMate.prompt('رمز عبور جدید برای \'' + escapeHtml(username) + '\' را وارد کنید:', 'بازنشانی رمز عبور').then(function (newPassword) {
             if (!newPassword) return;
 
             fetch('/api/users/' + username, {
@@ -3100,21 +3100,21 @@
                 .then(function (response) {
                     return response.json().then(function (data) {
                         if (response.ok) {
-                            showMessage('Password reset for \'' + username + '\'', 'success');
+                            showMessage('رمز عبور کاربر \'' + username + '\' بازنشانی شد', 'success');
                         } else {
-                            showMessage(data.error || 'Failed to reset password', 'error');
+                            showMessage(data.error || 'بازنشانی رمز عبور ناموفق بود', 'error');
                         }
                     });
                 })
                 .catch(function (error) {
                     console.error('Error resetting password:', error);
-                    showMessage('Failed to reset password', 'error');
+                    showMessage('بازنشانی رمز عبور ناموفق بود', 'error');
                 });
         });
     }
 
     function deleteUser(username) {
-        CertMate.confirm('Are you sure you want to delete user \'' + escapeHtml(username) + '\'? This action cannot be undone.', 'Delete User').then(function (confirmed) {
+        CertMate.confirm('آیا مطمئن هستید که می‌خواهید کاربر \'' + escapeHtml(username) + '\' را حذف کنید؟ این عمل غیرقابل بازگشت است.', 'حذف کاربر').then(function (confirmed) {
             if (!confirmed) return;
 
             fetch('/api/users/' + username, {
@@ -3124,16 +3124,16 @@
                 .then(function (response) {
                     return response.json().then(function (data) {
                         if (response.ok) {
-                            showMessage('User \'' + username + '\' deleted', 'success');
+                            showMessage('کاربر \'' + username + '\' حذف شد', 'success');
                             refreshUserList();
                         } else {
-                            showMessage(data.error || 'Failed to delete user', 'error');
+                            showMessage(data.error || 'حذف کاربر ناموفق بود', 'error');
                         }
                     });
                 })
                 .catch(function (error) {
                     console.error('Error deleting user:', error);
-                    showMessage('Failed to delete user', 'error');
+                    showMessage('حذف کاربر ناموفق بود', 'error');
                 });
         });
     }
@@ -3157,13 +3157,13 @@
         var editModalEl = document.getElementById('editAccountModal');
         if (editModalEl) editModalEl.addEventListener('modal:close', closeEditAccountModal);
 
-        addDebugLog('DOM loaded, initializing settings page', 'info');
+        addDebugLog('DOM بارگذاری شد، مقداردهی اولیه صفحه تنظیمات', 'info');
 
         // Add challenge type radio listeners
         document.querySelectorAll('input[name="challenge_type"]').forEach(function (radio) {
             radio.addEventListener('change', function () {
                 toggleChallengeType();
-                addDebugLog('Challenge type changed to: ' + this.value, 'info');
+                addDebugLog('نوع چالش تغییر کرد به: ' + this.value, 'info');
             });
         });
 
@@ -3172,7 +3172,7 @@
             radio.addEventListener('change', function () {
                 if (this.checked) {
                     showDNSConfig(this.value);
-                    addDebugLog('DNS provider changed to: ' + this.value, 'info');
+                    addDebugLog('ارائه‌دهنده DNS تغییر کرد به: ' + this.value, 'info');
                 }
             });
         });
@@ -3190,7 +3190,7 @@
         if (form) {
             form.addEventListener('submit', function (e) {
                 e.preventDefault();
-                addDebugLog('Settings form submitted', 'info');
+                addDebugLog('فرم تنظیمات ارسال شد', 'info');
                 saveSettings();
             });
         }
