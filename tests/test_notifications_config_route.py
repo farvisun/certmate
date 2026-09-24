@@ -82,6 +82,8 @@ def route_client(tmp_path):
 
     auth_manager = MagicMock()
     auth_manager.require_role = MagicMock(side_effect=_passthrough_role)
+    auth_manager.require_session_role = MagicMock(
+        side_effect=_passthrough_role)
 
     managers = {
         "auth": auth_manager,
@@ -144,7 +146,8 @@ def test_get_masks_real_webhook_token(route_client):
     assert wh["token"] == MASK
     assert b"REAL-TOKEN" not in r.data
     # Non-secret fields survive the GET so the UI can re-render them.
-    assert wh["url"] == "https://hooks.example.com/ops"
+    # The webhook url is a credential (incoming-webhook URL) and is masked (#16).
+    assert wh["url"] == MASK
     assert wh["priority"] == "low"
 
 

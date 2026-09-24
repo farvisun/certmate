@@ -1,0 +1,559 @@
+"""Issuing, renewing and reissuing a certificate, and the jobs that carry it.
+
+Extracted from the `create_api_resources` closure (#667). The classes are
+unchanged; what used to be captured from the enclosing scope now arrives as
+an explicit `ApiContext`, which is what makes them importable — and
+therefore testable — without constructing the whole manager graph.
+"""
+import logging
+
+from flask import current_app, request
+from flask_restx import Resource
+
+from ..core.audit_context import audit_context_from_request
+from ..core.request_fields import json_booleans
+from ..core.cert_jobs import IssuanceQueueFull
+from ..core.cert_service import DomainOutOfScope
+from ..core.certificates import DomainOperationInProgress
+from ..core.utils import classify_renewal_error
+from .path_validation import validate_domain_path as _validate_domain_path
+from .resource_context import (
+    ApiContext, check_domain_scope, job_accepted, wants_async,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _submit(ctx, operation, domain, fn):
+    """Hand the blocking half to the executor, or say no.
+
+    The queue is bounded: two workers with an unbounded queue turned a retry
+    loop into hundreds of 202s for certificates that would not be attempted
+    for hours. A 429 is the honest answer to work this process will not get to.
+
+    At module level rather than inside `create_lifecycle_resources` because
+    mccabe counts a nested function's branches against the function that
+    encloses it, and that closure is one of the thirteen already carrying a
+    complexity budget.
+    """
+    try:
+        job_id = ctx.cert_executor.submit(operation, domain, fn)
+    except IssuanceQueueFull as e:
+        return {
+            'code': 'ISSUANCE_QUEUE_FULL',
+            'error': 'Too much issuance is already in progress',
+            'hint': (f'{e.depth} job(s) queued or running against a limit of '
+                     f'{e.limit}. Retry once some finish, or raise '
+                     f'CERTMATE_ISSUANCE_QUEUE_LIMIT / '
+                     f'CERTMATE_ISSUANCE_WORKERS.'),
+        }, 429
+    return job_accepted(job_id, operation, domain,
+                        f'/api/certificates/jobs/{job_id}'), 202
+
+
+
+def _configuration_hint(error_msg: str):
+    """What an operator should go and fix, for a refused-before-certbot error.
+
+    Module level, not inside the closure: `create_lifecycle_resources` is one
+    of the budgeted functions and its ceiling only comes down, so a branch
+    added here would have to be paid for somewhere. Lifting both hint ladders
+    out pays for the one this file needed and leaves the ceiling lower than it
+    found it.
+    """
+    lowered = (error_msg or '').lower()
+    # The CA branch goes first: its refusal also says "not configured", and it
+    # used to collect the DNS hint — sending an operator whose CA is
+    # unconfigured to check their DNS credentials, which are fine. Reachable on
+    # every request for a CA this instance has no configuration for, now that
+    # issuance refuses instead of quietly using Let's Encrypt.
+    if 'ca provider' in lowered and 'not configured' in lowered:
+        return ('Configure that CA under Settings > Certificate Authority '
+                'providers, or request a CA that is already configured.')
+    if 'not configured' in lowered:
+        return ('Check your DNS provider settings and ensure credentials are '
+                'properly configured.')
+    if 'domain' in lowered and 'email' in lowered:
+        return 'Both domain and email are required. Configure email in settings.'
+    return None
+
+
+#: Prepended by the create path already (`certificates.py`), so the API must
+#: not prepend it again — the error read "Certificate creation failed:
+#: Certificate creation failed: ..." for every certbot failure.
+_CREATION_PREFIX = 'Certificate creation failed: '
+
+
+def _certbot_hint(error_msg: str) -> str:
+    """The same, for a failure certbot reported.
+
+    Rate limits are tested first, and with `is_acme_rate_limit` rather than
+    the substring `rate limit`. The substring matched none of the markers the
+    CA actually sends: `urn:ietf:params:acme:error:rateLimited` has no space
+    in it, and `too many certificates already issued` does not contain the
+    words at all. Measured before this, on real refusals:
+
+        rateLimited: too many certificates -> "Check DNS provider credentials"
+        too many certificates (5) issued   -> "Check DNS provider credentials"
+        too many failed authorizations     -> "DNS provider authentication
+                                               failed. Verify your API
+                                               credentials in settings."
+
+    The third is the one that decided the order. It contains "auth", so it
+    reached the authentication branch and told an operator to go and rotate
+    credentials that were working, about a refusal that retrying makes worse.
+    """
+    from ..core.utils import is_acme_rate_limit
+
+    if is_acme_rate_limit(error_msg):
+        return "You've hit the certificate authority's rate limit. Wait before trying again."
+    lowered = (error_msg or '').lower()
+    if 'unauthorized' in lowered or 'auth' in lowered:
+        return 'DNS provider authentication failed. Verify your API credentials in settings.'
+    if 'timeout' in lowered:
+        return 'DNS propagation timed out. Try increasing DNS propagation time in settings.'
+    return 'Check DNS provider credentials and ensure DNS records can be created.'
+
+
+#: The reissue path's own prefix. A reissue runs the create machinery, so the
+#: message it catches has often been prefixed already.
+_REISSUE_PREFIX = 'Certificate reissue failed: '
+
+
+def _prefixed(prefix: str, error_msg: str) -> str:
+    """*error_msg* under *prefix*, said once.
+
+    A reissue failing inside issuance produced "Certificate reissue failed:
+    Certificate creation failed: ...". Either prefix already present is
+    enough: the second one adds a stutter, not information.
+    """
+    if error_msg.startswith(prefix):
+        return error_msg
+    if prefix == _REISSUE_PREFIX and error_msg.startswith(_CREATION_PREFIX):
+        return prefix + error_msg[len(_CREATION_PREFIX):]
+    return prefix + error_msg
+
+
+def _creation_failure(error_msg: str):
+    """The error body for a certbot failure, prefixed exactly once."""
+    return {'code': 'CERTIFICATE_CREATION_FAILED',
+            'error': _prefixed(_CREATION_PREFIX, error_msg),
+            'hint': _certbot_hint(error_msg)}
+
+
+def create_lifecycle_resources(api, models, ctx: ApiContext) -> dict:
+    """Build the lifecycle resources against *ctx*."""
+
+    def _check_domain_scope(domain, operation):
+        return check_domain_scope(ctx, domain, operation)
+
+    def _wants_async(payload):
+        return wants_async(payload)
+
+    class CreateCertificate(Resource):
+        @api.doc(security='Bearer')
+        @api.expect(models['create_cert_model'])
+        @ctx.auth.require_role('operator')
+        def post(self):
+            """Create a new certificate"""
+            try:
+                data = api.payload or {}
+                domain = (data.get('domain') or '').strip()
+                san_domains = data.get('san_domains', [])
+                if not domain:
+                    return {
+                        'code': 'DOMAIN_REQUIRED',
+                        'error': 'Domain is required',
+                        'hint': 'Please provide a valid domain name (e.g., example.com or *.example.com for wildcard)'
+                    }, 400
+
+                user = getattr(request, 'current_user', None) or {}
+                audit_ctx = audit_context_from_request()
+
+                # Async opt-in: validate + authorize synchronously (immediate
+                # 4xx on bad input/scope/config), then defer the blocking
+                # certbot issuance to the executor and return 202 + job id.
+                if _wants_async(data) and ctx.cert_executor is not None:
+                    prepared = ctx.cert_service.prepare_create(
+                        domain=domain,
+                        san_domains=san_domains,
+                        dns_provider=data.get('dns_provider'),
+                        account_id=data.get('account_id'),
+                        ca_provider=data.get('ca_provider'),
+                        ca_account_id=data.get('ca_account_id'),
+                        challenge_type=data.get('challenge_type'),
+                        domain_alias=data.get('domain_alias'),
+                        alias_dns_provider=data.get('alias_dns_provider'),
+                        key_type=data.get('key_type'),
+                        key_size=data.get('key_size'),
+                        elliptic_curve=data.get('elliptic_curve'),
+                        csr_pem=data.get('csr'),
+                        user=user,
+                        ip_address=request.remote_addr,
+                        audit_ctx=audit_ctx,
+                    )
+                    return _submit(ctx, 'create', domain,
+                                   lambda: ctx.cert_service.issue_create(prepared))
+
+                result = ctx.cert_service.create(
+                    domain=domain,
+                    san_domains=san_domains,
+                    dns_provider=data.get('dns_provider'),
+                    account_id=data.get('account_id'),
+                    ca_provider=data.get('ca_provider'),
+                    ca_account_id=data.get('ca_account_id'),
+                    challenge_type=data.get('challenge_type'),
+                    domain_alias=data.get('domain_alias'),
+                    alias_dns_provider=data.get('alias_dns_provider'),
+                    key_type=data.get('key_type'),
+                    key_size=data.get('key_size'),
+                    elliptic_curve=data.get('elliptic_curve'),
+                    # A CSR the caller generated elsewhere (#599). When given,
+                    # CertMate never holds the private key: the names come from
+                    # the CSR and the certificate is filed with
+                    # key_management=external so nothing later reads the absent
+                    # key as a lost one.
+                    csr_pem=data.get('csr'),
+                    user=user,
+                    ip_address=request.remote_addr,
+                    audit_ctx=audit_ctx,
+                )
+
+                event_bus = current_app.config.get('EVENT_BUS')
+                if event_bus:
+                    event_bus.publish('certificate_created', {
+                        'domain': domain,
+                        'san_domains': san_domains,
+                        'dns_provider': result.get('dns_provider'),
+                        'ca_provider': result.get('ca_provider')
+                    })
+
+                return {
+                    'message': f'Certificate created successfully for {domain}',
+                    'domain': domain,
+                    'dns_provider': result.get('dns_provider'),
+                    'ca_provider': result.get('ca_provider'),
+                    'duration': result.get('duration')
+                }, 201
+
+            except DomainOutOfScope as e:
+                return {'error': str(e), 'code': 'DOMAIN_OUT_OF_SCOPE'}, 403
+            except FileExistsError as e:
+                # Previously fell through to the generic 500. The certificate
+                # already exists: 409 with a pointer to the reissue endpoint.
+                return {
+                    'error': str(e),
+                    'code': 'CERTIFICATE_ALREADY_EXISTS',
+                    'hint': 'Use renew to refresh it, or POST /api/certificates/<domain>/reissue to change its configuration.'
+                }, 409
+            except ValueError as e:
+                # Validation / configuration errors raised by the service.
+                error_msg = str(e)
+                hint = _configuration_hint(error_msg)
+                return {
+                    'code': 'CERTIFICATE_CREATION_FAILED',
+                    'error': error_msg,
+                    'hint': hint
+                }, 400
+            except DomainOperationInProgress as e:
+                return {'error': str(e), 'code': 'DOMAIN_OPERATION_IN_PROGRESS'}, 409
+            except RuntimeError as e:
+                # Certbot execution errors
+                return _creation_failure(str(e)), 422
+            except Exception as e:
+                logger.error(f"Certificate creation failed: {str(e)}")
+                return {
+                    'code': 'CERTIFICATE_CREATION_ERROR',
+                    'error': 'Certificate creation failed unexpectedly',
+                    'hint': 'Check application logs for detailed error information.'
+                }, 500
+
+    class RenewCertificate(Resource):
+        @api.doc(security='Bearer')
+        @ctx.auth.require_role('operator')
+        @json_booleans(force=False)
+        def post(self, domain):
+            """Renew an existing certificate"""
+            try:
+                payload = request.get_json(silent=True) or {}
+                force = request.json_booleans['force']
+                _, err = _validate_domain_path(domain, ctx.file_ops.cert_dir)
+                if err:
+                    return {'error': err, 'code': 'INVALID_REQUEST'}, 400
+                user = getattr(request, 'current_user', None) or {}
+                audit_ctx = audit_context_from_request()
+
+                if _wants_async(payload) and ctx.cert_executor is not None:
+                    prepared = ctx.cert_service.prepare_renew(
+                        domain=domain, user=user, ip_address=request.remote_addr,
+                        audit_ctx=audit_ctx,
+                    )
+                    return _submit(ctx, 'renew', domain,
+                                   lambda: ctx.cert_service.issue_renew(prepared, force=force))
+
+                result = ctx.cert_service.renew(
+                    domain=domain, force=force,
+                    user=user, ip_address=request.remote_addr,
+                    audit_ctx=audit_ctx,
+                )
+
+                # renewed=False is certbot's "not yet due" no-op: nothing was
+                # replaced, so deploy hooks must not fire and the response must
+                # not claim a renewal happened. Default True keeps the frozen
+                # REST contract for older manager results without the flag.
+                renewed = bool(result.get('renewed', True))
+
+                event_bus = current_app.config.get('EVENT_BUS')
+                if event_bus and renewed:
+                    event_bus.publish('certificate_renewed', {'domain': domain})
+
+                return {
+                    'message': (f'Certificate renewed successfully for {domain}'
+                                if renewed
+                                else f'Certificate not yet due for renewal: {domain}'),
+                    'domain': domain,
+                    'renewed': renewed,
+                    'dns_provider': result.get('dns_provider'),
+                    'duration': result.get('duration')
+                }, 200
+
+            except DomainOutOfScope as e:
+                return {'error': str(e), 'code': 'DOMAIN_OUT_OF_SCOPE'}, 403
+            except DomainOperationInProgress as e:
+                # Domain busy is not a failure; do not publish a failure event.
+                return {'error': str(e), 'code': 'DOMAIN_OPERATION_IN_PROGRESS'}, 409
+            except FileNotFoundError:
+                # Missing cert on disk is a 404, not a 500 (matches the web route).
+                return {'error': 'Certificate not found', 'code': 'NOT_FOUND'}, 404
+            except RuntimeError as e:
+                # A renewal failure is a certificate-level outcome, not a server
+                # fault: return 422 and say WHY (classify_renewal_error flags the
+                # broken-renewal-config case with an actionable reissue hint)
+                # instead of the old opaque 500 "Certificate renewal failed".
+                logger.error("Certificate renewal failed for %s: %s",
+                             domain.replace('\n', ' ').replace('\r', ' '),
+                             str(e).replace('\n', ' ').replace('\r', ' '))
+                event_bus = current_app.config.get('EVENT_BUS')
+                if event_bus:
+                    event_bus.publish('certificate_failed', {'domain': domain, 'error': str(e)})
+                message, code = classify_renewal_error(str(e))
+                return {'error': message, 'code': code}, 422
+            except Exception as e:
+                logger.error("Certificate renewal failed for %s: %s",
+                             domain.replace('\n', ' ').replace('\r', ' '),
+                             str(e).replace('\n', ' ').replace('\r', ' '))
+                event_bus = current_app.config.get('EVENT_BUS')
+                if event_bus:
+                    event_bus.publish('certificate_failed', {'domain': domain, 'error': str(e)})
+                return {'error': 'Certificate renewal failed', 'code': 'CERTIFICATE_RENEWAL_ERROR'}, 500
+
+    class CertificateReissue(Resource):
+        @api.doc(security='Bearer')
+        @api.expect(models['reissue_cert_model'])
+        @ctx.auth.require_role('operator')
+        def post(self, domain):
+            """Edit a certificate's configuration and reissue it in place (#267).
+
+            Omitted fields keep the values the certificate was issued with
+            (read from its metadata), so extending or dropping SANs never
+            requires re-entering DNS/alias/CA configuration. The old
+            certificate keeps being served until certbot succeeds.
+            """
+            try:
+                data = api.payload or {}
+                _, err = _validate_domain_path(domain, ctx.file_ops.cert_dir)
+                if err:
+                    return {'error': err, 'code': 'INVALID_REQUEST'}, 400
+                user = getattr(request, 'current_user', None) or {}
+
+                kwargs = dict(
+                    domain=domain,
+                    san_domains=data.get('san_domains'),
+                    dns_provider=data.get('dns_provider'),
+                    account_id=data.get('account_id'),
+                    ca_provider=data.get('ca_provider'),
+                    challenge_type=data.get('challenge_type'),
+                    domain_alias=data.get('domain_alias'),
+                    alias_dns_provider=data.get('alias_dns_provider'),
+                    key_type=data.get('key_type'),
+                    key_size=data.get('key_size'),
+                    elliptic_curve=data.get('elliptic_curve'),
+                    csr_pem=data.get('csr'),
+                    user=user,
+                    ip_address=request.remote_addr,
+                    audit_ctx=audit_context_from_request(),
+                )
+
+                if _wants_async(data) and ctx.cert_executor is not None:
+                    prepared = ctx.cert_service.prepare_reissue(**kwargs)
+                    return _submit(ctx, 'reissue', domain,
+                                   lambda: ctx.cert_service.issue_reissue(prepared))
+
+                result = ctx.cert_service.issue_reissue(
+                    ctx.cert_service.prepare_reissue(**kwargs)
+                )
+
+                event_bus = current_app.config.get('EVENT_BUS')
+                if event_bus:
+                    # A reissue refreshes the domain's certificate: consumers
+                    # (deploy hooks, notifications) react as for a renewal.
+                    event_bus.publish('certificate_renewed', {'domain': domain})
+
+                return {
+                    'message': f'Certificate reissued successfully for {domain}',
+                    'domain': domain,
+                    'dns_provider': result.get('dns_provider'),
+                    'ca_provider': result.get('ca_provider'),
+                    'duration': result.get('duration')
+                }, 200
+
+            except FileNotFoundError as e:
+                return {'error': str(e), 'code': 'CERTIFICATE_NOT_FOUND'}, 404
+            except DomainOutOfScope as e:
+                return {'error': str(e), 'code': 'DOMAIN_OUT_OF_SCOPE'}, 403
+            except ValueError as e:
+                return {'error': str(e), 'code': 'CERTIFICATE_REISSUE_REJECTED'}, 400
+            except DomainOperationInProgress as e:
+                # Domain busy is not a failure; no failure event.
+                return {'error': str(e), 'code': 'DOMAIN_OPERATION_IN_PROGRESS'}, 409
+            except RuntimeError as e:
+                error_msg = str(e)
+                # Both were fixed on create and left here (#900 again): the
+                # substring `rate limit` matches none of the markers a CA
+                # sends, so a real rate limit arrived as a DNS credentials
+                # problem; and the create path already prefixes its message,
+                # so a reissue that failed during issuance read "Certificate
+                # reissue failed: Certificate creation failed: ...".
+                hint = _certbot_hint(error_msg)
+                event_bus = current_app.config.get('EVENT_BUS')
+                if event_bus:
+                    event_bus.publish('certificate_failed', {'domain': domain, 'error': error_msg})
+                return {
+                    'code': 'CERTIFICATE_REISSUE_FAILED',
+                    'error': _prefixed(_REISSUE_PREFIX, error_msg),
+                    'hint': hint + ' The previous certificate is still in place.'
+                }, 422
+            except Exception as e:
+                # Scrub CR/LF before logging: domain comes from the URL path
+                # and a crafted value could forge log entries (CodeQL
+                # py/log-injection; same treatment as cert_service._scrub_log).
+                safe_domain = str(domain).replace('\r', '').replace('\n', '')
+                logger.error(f"Certificate reissue failed for {safe_domain}: {str(e)}")
+                event_bus = current_app.config.get('EVENT_BUS')
+                if event_bus:
+                    event_bus.publish('certificate_failed', {'domain': domain, 'error': str(e)})
+                return {
+                    'code': 'CERTIFICATE_REISSUE_ERROR',
+                    'error': 'Certificate reissue failed unexpectedly',
+                    'hint': 'Check application logs. The previous certificate is still in place.'
+                }, 500
+
+    class CertificateJob(Resource):
+        @api.doc(security='Bearer')
+        @ctx.auth.require_role('operator')
+        def get(self, job_id):
+            """Poll the status of an async create/renew job."""
+            if ctx.cert_executor is None:
+                return {'error': 'Async issuance is not enabled', 'code': 'ASYNC_ISSUANCE_DISABLED'}, 404
+            job = ctx.cert_executor.get(job_id)
+            if job is None:
+                return {'error': 'Job not found', 'code': 'JOB_NOT_FOUND'}, 404
+            # The caller must be in scope for the job's domain — a scoped key
+            # cannot poll a job for a domain it could not have created.
+            scope_err = _check_domain_scope(job.get('domain'), 'job_status')
+            if scope_err:
+                return scope_err
+            return job, 200
+
+    class CertificateJobs(Resource):
+        @api.doc(security='Bearer')
+        @ctx.auth.require_role('operator')
+        def get(self):
+            """List the issuance/renewal jobs still in flight.
+
+            The dashboard builds its "issuing" row from client-side state, so
+            a refresh made an in-flight issuance disappear from the list and
+            look like it had failed (issue #399). Listing the jobs the server
+            already tracks lets any session rediscover them — including one
+            opened in a different browser.
+
+            Only queued/running jobs are returned; a finished one is already
+            represented by the certificate itself.
+            """
+            if ctx.cert_executor is None:
+                return {'error': 'Async issuance is not enabled', 'code': 'ASYNC_ISSUANCE_DISABLED'}, 404
+            # Same boundary as polling a single job: a scoped key sees only
+            # jobs for domains it could have created itself. Filtered rather
+            # than refused, so a scoped key still gets its own in-flight work.
+            user = getattr(request, 'current_user', None) or {}
+            jobs = [
+                job for job in ctx.cert_executor.list_active()
+                if ctx.auth.user_can_access_domain(user, job.get('domain'))
+            ]
+            return {'jobs': jobs, 'count': len(jobs)}, 200
+
+    class CertificateAutoRenew(Resource):
+        @api.doc(security='Bearer')
+        @ctx.auth.require_role('operator')
+        # default False so an ABSENT flag still reaches the view's own
+        # AUTO_RENEW_FLAG_REQUIRED answer; a present non-boolean is refused here.
+        @json_booleans(enabled=False)
+        def put(self, domain):
+            """Enable or disable automatic renewal for a single certificate (issue #111).
+
+            Body: {"enabled": true|false}
+            """
+            scope_err = _check_domain_scope(domain, 'set_auto_renew')
+            if scope_err:
+                return scope_err
+            _, err = _validate_domain_path(domain, ctx.file_ops.cert_dir)
+            if err:
+                return {'error': err, 'code': 'INVALID_REQUEST'}, 400
+            try:
+                data = api.payload or {}
+                if 'enabled' not in data:
+                    return {'error': 'Missing "enabled" boolean in request body', 'code': 'AUTO_RENEW_FLAG_REQUIRED'}, 400
+                enabled = request.json_booleans['enabled']
+
+                updated = ctx.certificates.set_auto_renew(domain, enabled)
+                if not updated:
+                    return {
+                        'code': 'DOMAIN_NOT_IN_SETTINGS',
+                        'error': f'Domain {domain} not found in settings',
+                        'hint': 'Only domains tracked in settings can have auto-renew toggled.'
+                    }, 404
+
+                if ctx.audit:
+                    actx = audit_context_from_request()
+                    ctx.audit.log_operation(
+                        operation='set_auto_renew', resource_type='certificate',
+                        resource_id=domain, status='success',
+                        details={'auto_renew': enabled},
+                        user=actx.get('user'), ip_address=actx.get('ip'),
+                        actor=actx.get('actor'), trigger=actx.get('trigger'),
+                    )
+
+                event_bus = current_app.config.get('EVENT_BUS')
+                if event_bus:
+                    event_bus.publish('certificate_auto_renew_changed', {
+                        'domain': domain,
+                        'enabled': enabled,
+                    })
+
+                return {
+                    'message': f'Auto-renew {"enabled" if enabled else "disabled"} for {domain}',
+                    'domain': domain,
+                    'auto_renew': enabled,
+                }, 200
+            except Exception as e:
+                logger.error(f"Failed to toggle auto-renew for {domain}: {e}")
+                return {'error': 'Failed to update auto-renew setting', 'code': 'AUTO_RENEW_UPDATE_FAILED'}, 500
+
+    return {
+        'CreateCertificate': CreateCertificate,
+        'RenewCertificate': RenewCertificate,
+        'CertificateReissue': CertificateReissue,
+        'CertificateJob': CertificateJob,
+        'CertificateJobs': CertificateJobs,
+        'CertificateAutoRenew': CertificateAutoRenew,
+    }

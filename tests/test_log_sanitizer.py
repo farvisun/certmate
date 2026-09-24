@@ -1,6 +1,5 @@
 import json
 import logging
-import pytest
 from modules.core.structured_logging import JSONFormatter, StructuredLogger
 
 def test_json_formatter_sanitizes_dict():
@@ -65,6 +64,10 @@ def test_json_formatter_sanitizes_inline_assignments():
 
 import io
 
+import pytest
+
+pytestmark = [pytest.mark.unit]
+
 def test_logger_integration():
     # Setup test logger
     logger = logging.getLogger("test_sanitizer")
@@ -99,7 +102,7 @@ def test_logger_integration():
     # Test logging an exception with a secret in message
     try:
         raise ValueError("Failed login with password = 'admin123'")
-    except Exception as e:
+    except Exception:
         s_logger.exception("Error during authentication")
         
     log_stream.seek(0)
@@ -110,3 +113,81 @@ def test_logger_integration():
     assert "exception" in log_json
     assert "admin123" not in log_json["exception"]
     assert "password = \"[REDACTED]\"" in log_json["exception"]
+
+
+def test_pem_redaction_is_linear_on_unclosed_blocks():
+    """A blob that opens PEM blocks and never closes them must not stall.
+
+    The old single-regex form restarted its `.*?` forward scan at every
+    `-----BEGIN`, so cost grew with anchors x length: 0.4 s at 2000 anchors,
+    6.6 s at 8000. `sanitize_text` runs on UNBOUNDED deploy-hook output
+    (deployer.py) on one of the process's eight gunicorn threads, so that is
+    a thread-exhaustion lever, not just a slow function.
+
+    The bound below is loose on purpose — this asserts "not quadratic", not a
+    benchmark, so it does not go red on a loaded CI runner. The old code
+    needed minutes here.
+    """
+    import time
+    from modules.core.structured_logging import sanitize_text
+
+    payload = ("-----BEGIN" + "A" * 20) * 40_000  # ~1.2 MB, zero closers
+    started = time.perf_counter()
+    sanitize_text(payload)
+    elapsed = time.perf_counter() - started
+    assert elapsed < 5.0, f"PEM redaction took {elapsed:.1f}s — quadratic again?"
+
+
+def test_pem_redaction_matches_the_regex_it_replaced():
+    """The linear scanner must redact exactly what PEM_RE would have.
+
+    PEM_RE is kept on the class as the reference; this pins the scanner to it
+    over the shapes that actually distinguish them — unclosed blocks, nested
+    openers, malformed headers, several blocks in one string.
+    """
+    from modules.core.structured_logging import JSONFormatter, _redact_pem_blocks
+
+    cases = [
+        "",
+        "nothing to see here",
+        "-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----",
+        "head -----BEGIN X-----body-----END X----- tail",
+        "-----BEGIN A-----1-----END A----------BEGIN B-----2-----END B-----",
+        "-----BEGIN never closed",
+        "-----BEGIN-----",                      # empty header, no match
+        "-----BEGIN A-----no closer at all",
+        "-----BEGIN -----BEGIN A-----x-----END A-----",
+        "junk-----END A-----junk",
+    ]
+    for case in cases:
+        assert _redact_pem_blocks(case) == \
+            JSONFormatter.PEM_RE.sub('[PEM REDACTED]', case), repr(case)
+
+
+class TestHttpCredentialSchemes:
+    """``Authorization: Bearer <token>`` used to come out as
+    ``Authorization: "[REDACTED]" <token>`` — the scheme word was the value
+    the regex saw, and the token survived. Same for Basic, and for hyphenated
+    header names such as ``X-Api-Key`` that the name class could not match."""
+
+    def test_bearer_token_is_redacted_not_just_the_scheme(self):
+        from modules.core.structured_logging import sanitize_text
+        out = sanitize_text('request failed: Authorization: Bearer eyJhbGciOi.abc.def status=401')
+        assert 'eyJhbGciOi' not in out
+        assert 'status=401' in out
+
+    def test_basic_and_custom_api_key_headers(self):
+        from modules.core.structured_logging import sanitize_text
+        out = sanitize_text("headers={'Authorization': 'Basic dXNlcjpwdw==', 'X-Api-Key': 'k-12345', 'X-Env': 'prod'}")
+        assert 'dXNlcjpwdw==' not in out and 'k-12345' not in out
+        assert "'X-Env': 'prod'" in out
+
+    def test_cookie_header(self):
+        from modules.core.structured_logging import sanitize_text
+        out = sanitize_text('Cookie: session=abc123; other=1')
+        assert 'abc123' not in out
+
+    def test_plain_words_are_left_alone(self):
+        from modules.core.structured_logging import sanitize_text
+        text = 'renewed example.com, issuer=letsencrypt, keyword=foo'
+        assert sanitize_text(text) == text

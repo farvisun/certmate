@@ -3,14 +3,15 @@
 {% block title %}Settings - CertMate{% endblock %}
 {% block content %}
     <!-- Settings page: single Alpine root that tab-switches every section below it. -->
-    <div class="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8"
-         x-data="{ tab: (location.hash.slice(1) || 'dns') }"
-         x-init="$watch('tab', t => history.replaceState(null, '', '#' + t))">
+    <div class="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8"
+         x-data="{ tab: (location.hash.slice(1) || 'general') }"
+         x-init="$watch('tab', t => history.replaceState(null, '', '#' + t));
+                 window.addEventListener('hashchange', () => { tab = (location.hash.slice(1) || 'general') })">
         <div class="bg-surface shadow-card rounded-xl">
-            <div class="px-6 py-3 border-b border-gray-100 dark:border-white/5 overflow-x-auto">
+            <div class="px-6 py-3 border-b border-gray-100 dark:border-white/5 overflow-x-auto scroll-x-affordance">
                 <div class="flex items-center justify-between mb-2">
                     <nav class="flex items-center text-sm" aria-label="Breadcrumb">
-                        <a href="/" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"><i class="fas fa-home"></i></a>
+                        <a href="/" aria-label="Home" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"><i class="fas fa-home"></i></a>
                         <i class="fas fa-chevron-right text-[10px] text-gray-300 dark:text-gray-600 mx-2"></i>
                          <span class="text-gray-700 dark:text-gray-200 font-medium">تنظیمات</span>
                     </nav>
@@ -37,9 +38,12 @@
                         </div>
                     </div>
                 </div>
-                <nav class="flex space-x-1 min-w-max" role="tablist">
-                     <template x-for="t in [{id:'dns',icon:'fa-server',label:'DNS'},{id:'ca',icon:'fa-shield-alt',label:'CA'},{id:'general',icon:'fa-cogs',label:'عمومی'},{id:'storage',icon:'fa-database',label:'ذخیره‌سازی'},{id:'notifications',icon:'fa-bell',label:'اعلان‌ها'},{id:'deploy',icon:'fa-rocket',label:'استقرار'},{id:'users',icon:'fa-users',label:'کاربران'},{id:'apikeys',icon:'fa-key',label:'کلیدهای API'},{id:'oidc',icon:'fa-id-badge',label:'SSO'},{id:'backup',icon:'fa-archive',label:'پشتیبان‌گیری'}]">
+                <nav class="flex space-x-1 min-w-max" role="tablist" @keydown="onSettingsTabKeydown($event)">
+                    <template x-for="t in [{id:'general',icon:'fa-cogs',label:'عمومی'},{id:'dns',icon:'fa-server',label:'DNS'},{id:'ca',icon:'fa-shield-alt',label:'CA'},{id:'storage',icon:'fa-database',label:'ذخیره‌سازی'},{id:'notifications',icon:'fa-bell',label:'اعلان‌ها'},{id:'deploy',icon:'fa-rocket',label:'استقرار'},{id:'probe',icon:'fa-network-wired',label:'پروب'},{id:'users',icon:'fa-users',label:'کاربران'},{id:'apikeys',icon:'fa-key',label:'کلیدهای API'},{id:'oidc',icon:'fa-id-badge',label:'SSO'},{id:'backup',icon:'fa-archive',label:'پشتیبان‌گیری'}]">
                         <button type="button" @click="tab = t.id" role="tab"
+                                :id="'settings-tab-' + t.id"
+                                :aria-controls="'settings-panel-' + t.id"
+                                :tabindex="tab === t.id ? '0' : '-1'"
                                 :title="t.label"
                                 :aria-label="t.label"
                                 :aria-selected="tab === t.id ? 'true' : 'false'"
@@ -65,12 +69,13 @@
                          Alpine state in the parent div above. -->
                     {% include 'partials/settings_notifications.html' %}
                     {% include 'partials/settings_deploy.html' %}
+                    {% include 'partials/settings_probe.html' %}
                     {% include 'partials/settings_users.html' %}
                     {% include 'partials/settings_apikeys.html' %}
                     {% include 'partials/settings_oidc.html' %}
 
                     <!-- TAB: Backup & Restore Section -->
-                    <div x-show="tab === 'backup'" x-cloak class="bg-surface rounded-xl shadow-card p-6 mt-6">
+                    <div x-show="tab === 'backup'" x-cloak id="settings-panel-backup" role="tabpanel" aria-labelledby="settings-tab-backup" tabindex="0" class="bg-surface rounded-xl shadow-card p-6 mt-6">
             <div class="flex items-center justify-between mb-4">
                      <h3 class="text-lg font-semibold text-foreground flex items-center">
                     <i class="fas fa-database mr-2 text-blue-500"></i>
@@ -86,44 +91,51 @@
             </p>
 
             <!-- Create Backup Section -->
-            <div class="grid md:grid-cols-2 gap-6 mb-6">
-                <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-4">
-                     <h4 class="font-medium text-foreground mb-3 flex items-center">
-                        <i class="fas fa-plus-circle mr-2 text-green-500"></i>
-                        ایجاد پشتیبان
-                    </h4>
-                    <p class="text-sm text-muted mb-4">
-                        پشتیبان‌های اتمی ایجاد کنید که هم تنظیمات و هم گواهی‌ها را شامل می‌شود تا از سازگاری داده‌ها اطمینان حاصل شود.
-                    </p>
-                    <div class="space-y-3">
-                        <button type="button" onclick="createBackup('unified', this)" 
-                                class="w-full bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 transition-colors text-sm">
-                             <i class="fas fa-archive mr-2"></i>
-                            ایجاد پشتیبان یکپارچه (توصیه شده)
-                        </button>
-                        <button type="button" onclick="CertMate.copyDiagnosticsSnapshot(this)"
-                                class="w-full bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-colors text-sm">
-                             <i class="fas fa-clipboard mr-2"></i>
-                            کپی اسنپ‌شات عیب‌یابی
-                        </button>
-                    </div>
+            <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-4 mb-6">
+                <h4 class="font-medium text-foreground mb-1 flex items-center">
+                    <i class="fas fa-plus-circle mr-2 text-green-500"></i>
+                    ایجاد پشتیبان
+                </h4>
+                <p class="text-sm text-muted mb-4">
+                    پشتیبان اتمی از تنظیمات و گواهی‌ها که با هم گرفته می‌شوند تا هرگز از هم ناهماهنگ نشوند.
+                </p>
+                <div class="flex flex-col sm:flex-row gap-3">
+                    <button type="button" onclick="createBackup('unified', this)" class="btn-cta w-full sm:w-auto">
+                        <i class="fas fa-archive mr-2"></i>
+                        ایجاد پشتیبان یکپارچه
+                    </button>
+                    <button type="button" onclick="CertMate.copyDiagnosticsSnapshot(this)" class="btn btn-secondary w-full sm:w-auto">
+                        <i class="fas fa-clipboard mr-2"></i>
+                        کپی اسنپ‌شات عیب‌یابی
+                    </button>
                 </div>
+                <p class="text-xs text-muted mt-3 flex items-start">
+                    <i class="fas fa-shield-alt text-yellow-500 mr-1.5 mt-0.5"></i>
+                    نسخه‌های پشتیبان حاوی داده‌های حساس (کلیدهای خصوصی، توکن‌ها) هستند. آن‌ها را به صورت امن ذخیره کنید.
+                </p>
+            </div>
 
-                <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-4">
-                     <h4 class="font-medium text-foreground mb-3 flex items-center">
-                        <i class="fas fa-info-circle mr-2 text-blue-500"></i>
-                        اطلاعات پشتیبان
-                    </h4>
-                    <div class="space-y-2 text-sm text-muted">
-                        <div class="flex items-start">
-                            <i class="fas fa-check text-green-500 mr-2 mt-0.5 text-xs"></i>
-                             <span><strong>پشتیبان یکپارچه:</strong> پشتیبان اتمی از تنظیمات و گواهی‌ها که از سازگاری داده‌ها و جلوگیری از عدم تطابق پیکربندی اطمینان حاصل می‌کند</span>
-                        </div>
-                        <div class="flex items-start mt-3 pt-2 border-t border-border">
-                            <i class="fas fa-shield-alt text-yellow-500 mr-2 mt-0.5 text-xs"></i>
-                             <span class="text-xs">نسخه‌های پشتیبان حاوی داده‌های حساس هستند. آن‌ها را ایمن نگه دارید و به صورت امن ذخیره کنید.</span>
-                        </div>
-                    </div>
+            <!-- Upload a backup kept off this node. Without this, recovering a
+                 lost volume needed filesystem access to a filesystem that was
+                 gone: restore only ever read files already on disk. -->
+            <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-4 mb-6">
+                <h4 class="font-medium text-foreground mb-1 flex items-center">
+                    <i class="fas fa-upload mr-2 text-info-fg"></i>
+                    بازیابی از منبع دیگر
+                </h4>
+                <p class="text-sm text-muted mb-4">
+                    آرشیوی را که خارج از این ماشین نگه می‌دارید وارد کنید — پس از از دست رفتن volume، این
+                    تنها راه بازگشت است. بارگذاری فقط آن را ذخیره می‌کند؛ بازیابی را پس از آن به‌طور صریح انجام می‌دهید.
+                </p>
+                <div class="flex flex-col sm:flex-row gap-3 items-start sm:items-center">
+                    <label for="backup-upload-input" class="sr-only">آرشیو پشتیبان برای بارگذاری</label>
+                    <input type="file" id="backup-upload-input" accept=".zip,.enc"
+                           aria-label="آرشیو پشتیبان برای بارگذاری"
+                           class="text-sm text-muted file:mr-3 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:bg-surface-2 file:text-foreground hover:file:bg-hover">
+                    <button type="button" onclick="uploadBackup(this)" class="btn btn-secondary w-full sm:w-auto">
+                        <i class="fas fa-upload mr-2"></i>
+                        بارگذاری پشتیبان
+                    </button>
                 </div>
             </div>
 
@@ -150,8 +162,8 @@
                             پشتیبان‌های یکپارچه (توصیه شده)
                             <span class="text-xs bg-success-surface text-success-strong px-2 py-1 rounded-full ml-2">اتمی</span>
                         </h5>
-                        <div id="unified-backup-list" class="space-y-2 max-h-64 overflow-y-auto">
-                             <div class="text-sm text-muted text-center py-4">
+                        <div id="unified-backup-list" class="space-y-2">
+                            <div class="text-sm text-muted text-center py-4">
                                 در حال بارگذاری پشتیبان‌های یکپارچه...
                             </div>
                         </div>
@@ -173,7 +185,7 @@
                     نام حساب *
                 </label>
                 <input type="text" id="account-name" name="name" required
-                       class="mt-1 block w-full border border-border dark:bg-gray-700 dark:text-white rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
+                       class="mt-1 block w-full border border-border bg-input text-foreground rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
                        placeholder="مثال: Production, Development, Client-A">
             </div>
 
@@ -182,7 +194,7 @@
                     توضیحات (اختیاری)
                 </label>
                 <input type="text" id="account-description" name="description"
-                       class="mt-1 block w-full border border-border dark:bg-gray-700 dark:text-white rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
+                       class="mt-1 block w-full border border-border bg-input text-foreground rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
                        placeholder="توضیحات مختصر این حساب">
             </div>
 
@@ -220,7 +232,7 @@
                     نام حساب *
                 </label>
                 <input type="text" id="edit-account-name" name="name" required
-                       class="mt-1 block w-full border border-border dark:bg-gray-700 dark:text-white rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary">
+                       class="mt-1 block w-full border border-border bg-input text-foreground rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary">
             </div>
 
             <div>
@@ -228,7 +240,7 @@
                     توضیحات (اختیاری)
                 </label>
                 <input type="text" id="edit-account-description" name="description"
-                       class="mt-1 block w-full border border-border dark:bg-gray-700 dark:text-white rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary">
+                       class="mt-1 block w-full border border-border bg-input text-foreground rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary">
             </div>
 
             <!-- Dynamic fields will be populated here based on provider -->
@@ -278,6 +290,7 @@
     <script src="/static/js/settings.js"></script>
     <script src="/static/js/settings-notifications.js"></script>
     <script src="/static/js/settings-deploy.js"></script>
+    <script src="/static/js/settings-probe.js"></script>
     <script src="/static/js/settings-apikeys.js"></script>
     <script src="/static/js/settings-oidc.js"></script>
 {% endblock %}

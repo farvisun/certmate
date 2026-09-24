@@ -1,5 +1,6 @@
 import logging
 from flask import render_template, request, jsonify, redirect, url_for
+from modules.core.request_fields import json_booleans
 
 
 logger = logging.getLogger(__name__)
@@ -14,7 +15,12 @@ def register_auth_routes(app, managers, require_web_auth, auth_manager,
     @app.route('/login', methods=['GET'])
     def login_page():
         """Login page"""
-        if not auth_manager.is_local_auth_enabled() or not auth_manager.has_any_users():
+        # Bounce to index in two cases: genuine setup mode (index is open), and
+        # the bearer-only bootstrap state (index re-surfaces the create-admin
+        # form). In both, /login has nothing to show — local auth is off — and
+        # index owns the onboarding UI, so redirecting avoids a loop. A fully
+        # configured deployment falls through and renders the login form below.
+        if auth_manager.is_setup_mode() or auth_manager.needs_credentialed_bootstrap():
             return redirect(url_for('index'))
         # If the visitor already has a valid session cookie, skip rendering
         # the login form entirely and bounce to the dashboard. Doing this
@@ -65,7 +71,11 @@ def register_auth_routes(app, managers, require_web_auth, auth_manager,
             response.set_cookie(
                 'certmate_session', session_id, httponly=True,
                 secure=request.is_secure, samesite='Strict', path='/',
-                max_age=8 * 60 * 60
+                # Follows SESSION_TIMEOUT_HOURS (#590). Hardcoded at eight
+                # hours, this ignored the setting entirely: the server kept
+                # the session for as long as configured and the browser threw
+                # the cookie away at eight.
+                max_age=auth_manager.session_timeout_seconds
             )
             return response
         except Exception as e:
@@ -76,10 +86,12 @@ def register_auth_routes(app, managers, require_web_auth, auth_manager,
     def api_logout():
         """Logout endpoint.
 
-        For OIDC-minted sessions where a post_logout_redirect_uri is
-        configured, returns ``oidc_logout_url`` so the frontend can
-        follow the IdP's end-session flow (single-logout). Local
-        sessions get the original no-frills response — unchanged.
+        For OIDC-minted sessions, returns ``oidc_logout_url`` whenever the
+        IdP publishes an ``end_session_endpoint``, so the frontend can follow
+        the IdP's end-session flow (single-logout). A configured
+        ``post_logout_redirect_uri`` is added to that URL when present and
+        simply omitted when not — it is not what decides whether the URL is
+        returned. Local sessions get the original no-frills response.
         """
         session_id = request.cookies.get('certmate_session')
         oidc_logout_url = None
@@ -122,7 +134,7 @@ def register_auth_routes(app, managers, require_web_auth, auth_manager,
         clients don't need to special-case 401 during onboarding.
         """
         try:
-            if not auth_manager.is_local_auth_enabled() or not auth_manager.has_any_users():
+            if auth_manager.is_setup_mode():
                 return jsonify({
                     'user': {'username': 'setup_user', 'role': 'admin'},
                     'auth_mode': 'bypass',
@@ -150,15 +162,40 @@ def register_auth_routes(app, managers, require_web_auth, auth_manager,
 
     @app.route('/api/auth/config', methods=['POST'])
     @auth_manager.require_role('admin')
+    @json_booleans(local_auth_enabled=False)
     def api_auth_config_post():
         """Mutate auth configuration. Admin-only — defense-in-depth at the
         decorator level so the role check fires before any handler logic
         runs.
         """
         data = request.json or {}
-        enable = bool(data.get('local_auth_enabled', False))
+        enable = request.json_booleans['local_auth_enabled']
         if enable and not auth_manager.has_any_users():
             return jsonify({'error': 'Create admin first'}), 400
+
+        candidate = dict(auth_manager.settings_manager.load_settings())
+        candidate['local_auth_enabled'] = enable
+        # The accidental case is refused; the deliberate one is represented
+        # (#587). An operator who fronts CertMate with a proxy that
+        # authenticates for them may run without local auth — on purpose,
+        # saying so, and it goes in the audit trail with their name on it.
+        # Strictly the JSON boolean true: a string 'false', a 1 or an object
+        # must not read as 'yes, open the instance' (Copilot, #589).
+        confirm_unauthenticated = data.get('confirm_unauthenticated') is True
+        would_open = auth_manager.would_open_setup_mode(candidate)
+        if would_open and not confirm_unauthenticated:
+            return jsonify({
+                'error': 'Refusing to disable the last way in',
+                'hint': 'Turning local authentication off here would put this '
+                        'instance back into setup mode, where every endpoint '
+                        'answers an anonymous caller as admin — including the '
+                        'private-key download. Configure SSO or set '
+                        'API_BEARER_TOKEN first, then disable local auth. To '
+                        'run without authentication on purpose (a proxy in '
+                        'front authenticates for you), repeat the request with '
+                        '"confirm_unauthenticated": true; the choice is audited.',
+                'confirm_unauthenticated_required': True,
+            }), 409
 
         before = auth_manager.is_local_auth_enabled()
         if auth_manager.enable_local_auth(enable):
@@ -169,6 +206,14 @@ def register_auth_routes(app, managers, require_web_auth, auth_manager,
                     local_auth_enabled_after=enable,
                     user=user.get('username'),
                     ip_address=request.remote_addr,
+                    confirm_unauthenticated=bool(would_open and confirm_unauthenticated),
                 )
+            if would_open and confirm_unauthenticated:
+                logger.warning(
+                    "Local authentication disabled on purpose by %s from %s: this "
+                    "instance now answers every caller as admin. Make sure "
+                    "something in front of it authenticates.",
+                    (getattr(request, 'current_user', {}) or {}).get('username'),
+                    request.remote_addr)
             return jsonify({'message': 'Auth config updated'})
         return jsonify({'error': 'Update failed'}), 500

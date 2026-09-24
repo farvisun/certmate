@@ -1,4 +1,3 @@
-import json
 import socket
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -11,6 +10,9 @@ from flask_restx import Api, Namespace
 from modules.core.zombie import ZombieScanner
 from modules.api.models import create_api_models
 from modules.api.resources import create_api_resources
+
+
+pytestmark = [pytest.mark.unit]
 
 
 def _passthrough_decorator(_min_role):
@@ -98,7 +100,7 @@ def test_scan_certificates_aggregation():
     scanner = ZombieScanner()
 
     with patch.object(ZombieScanner, 'check_domain') as mock_check:
-        def check_side_effect(d):
+        def check_side_effect(d, port=None):
             if 'alive' in d:
                 return 'alive'
             if 'suspect' in d:

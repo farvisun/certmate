@@ -10,7 +10,7 @@
 
     var shortcuts = [
         { key: '?', desc: 'نمایش میانبرهای صفحه‌کلید' },
-        { key: '/', desc: 'تمرکز روی جستجو / فیلتر' },
+        { key: '/', desc: 'باز کردن پالت فرمان' },
         { key: 'n', desc: 'گواهی جدید (تمرکز روی ورودی دامنه)' },
         { key: 'r', desc: 'بروزرسانی لیست گواهی‌ها' },
         { key: 't', desc: 'تغییر حالت تاریک' },
@@ -124,7 +124,15 @@
             e.preventDefault();
             switch (e.key) {
                 case 'h': window.location.href = '/'; break;
-                case 'c': window.location.href = '/#client'; break;
+                // Fragment-only navigation does not reload; the dashboard
+                // listens for hashchange (#425).
+                case 'c':
+                    if (window.location.pathname === '/') {
+                        window.location.hash = '#client';
+                    } else {
+                        window.location.href = '/#client';
+                    }
+                    break;
                 case 's': window.location.href = '/settings'; break;
                 case 'a': window.location.href = '/activity'; break;
                 case 'd': window.location.href = '/redoc'; break;
@@ -145,15 +153,9 @@
 
             case '/':
                 e.preventDefault();
-                // Focus certificate search if on dashboard, otherwise open Cmd+K
-                var searchEl = document.getElementById('certificateSearch');
-                if (searchEl) {
-                    searchEl.focus();
-                    searchEl.select();
-                } else {
-                    // Trigger Cmd+K palette on non-dashboard pages
-                    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', metaKey: true }));
-                }
+                // The ⌘K command palette is now the single search surface across
+                // every page (the per-page search boxes were retired).
+                document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', metaKey: true }));
                 break;
 
             case 'n':

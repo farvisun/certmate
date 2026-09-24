@@ -1,12 +1,214 @@
 import logging
+import re
+import time
+
+from ..core.audit_chain import CheckpointReadError
 from ..core.metrics import generate_metrics_response
 from flask import request, jsonify, Response, stream_with_context
+from modules.core.request_fields import json_booleans
+
+# Log-stream pacing (#418). The poll interval bounds how long a new line
+# waits; the idle ceiling bounds how long an abandoned tab can hold a worker
+# thread. 30 minutes is long enough that a human watching a deployment is
+# never cut off mid-session, short enough that a forgotten tab frees the
+# thread the same day.
+_LOG_STREAM_POLL_SECONDS = 0.5
+_LOG_STREAM_MAX_IDLE_SECONDS = 30 * 60
+
+
+def _stream_log_file(log_file, poll_seconds=None, max_idle_seconds=None):
+    """Tail ``log_file`` as SSE events, bounded in CPU and in lifetime (#418).
+
+    Extracted from the route so the pacing is testable without a Flask app.
+
+    The original was ``while True: f.readline()`` with no sleep and no exit
+    condition. At EOF readline() returns '' immediately, so the loop never
+    yielded and never blocked: one gunicorn thread pinned at 100% CPU
+    forever, and — since nothing was ever written to the socket — a client
+    disconnect was never noticed. Opening the Logs page eight times wedged
+    the single-worker container (8 threads).
+
+    Yields SSE frames. Emits a ``: keepalive`` comment on every idle poll,
+    which is both a client-liveness probe (writing to a dead socket raises
+    here and ends the generator) and what keeps proxies from timing out.
+    Stops after ``max_idle_seconds`` without a new line so an abandoned tab
+    cannot hold a worker thread indefinitely.
+    """
+    poll = _LOG_STREAM_POLL_SECONDS if poll_seconds is None else poll_seconds
+    max_idle = (_LOG_STREAM_MAX_IDLE_SECONDS if max_idle_seconds is None
+                else max_idle_seconds)
+
+    if not log_file.exists():
+        yield "data: Log file not found\n\n"
+        return
+
+    # errors='replace': a single non-UTF8 byte in the log (a mangled
+    # subprocess message, a truncated write) must not raise UnicodeDecodeError
+    # and kill the stream mid-session.
+    with open(log_file, 'r', encoding='utf-8', errors='replace') as f:
+        f.seek(0, 2)
+        idle = 0.0
+        while idle < max_idle:
+            line = f.readline()
+            if line:
+                idle = 0.0
+                # rstrip the line terminator the file already carries (CRLF
+                # included): 'data: x\n' + '\n\n' produced a trailing blank
+                # line, i.e. an extra empty SSE dispatch per log line, and a
+                # stray '\r' would ride along inside the frame.
+                yield f"data: {line.rstrip(chr(13) + chr(10))}\n\n"
+                # Never sleep while there is backlog: a burst of log lines
+                # must drain at full speed, not one line per poll interval.
+                continue
+            time.sleep(poll)
+            idle += poll
+            yield ": keepalive\n\n"
+    yield "data: [stream idle, reconnect to continue]\n\n"
 
 
 logger = logging.getLogger(__name__)
 
 
+def _register_update_check(app, managers, auth_manager):
+    """Mount GET and POST /api/web/update-check.
+
+    Outside register_misc_routes so the closure's complexity budget — a
+    ceiling that only ever comes down — pays nothing for it.
+
+    require_session_role, like every other route in that function: this is
+    called from the page with a session cookie, and it is what the test
+    harnesses here stub. `require_web_auth` is applied at registration time
+    and those harnesses pass None for it, so using it turns every /health test
+    in test_scheduler_status_health.py into a TypeError at import.
+    """
+    # `require_role`, not `require_session_role`: its neighbour
+    # `/api/web/settings` takes a bearer token, and an instance provisioned
+    # over the API could otherwise read and write every other setting and not
+    # this one — the same "no way to turn it on" one layer down. Sessions are
+    # accepted too, which is what the footer uses.
+    @app.route('/api/web/update-check', methods=['GET'])
+    @auth_manager.require_role('viewer')
+    def api_web_update_check():
+        """What the footer asks. Answers `disabled` unless switched on, and
+        never blocks the page: the footer renders without it."""
+        checker = managers.get('update_check')
+        if checker is None:
+            return jsonify({'status': 'disabled', 'running': None, 'latest': None})
+        return jsonify(dict(checker.status(), enabled=checker.get_config().get('enabled', False)))
+
+    @app.route('/api/web/update-check', methods=['POST'])
+    @auth_manager.require_role('admin')
+    def api_web_update_check_set():
+        """Turn the update check on or off.
+
+        It shipped without this. `UpdateCheck.save_config` existed, nothing
+        called it, and the only route was the GET above — so the feature was
+        off by default, which is the contract, and there was no supported way
+        to turn it on short of editing settings.json by hand. An opt-in with
+        no way to opt in is not an opt-in.
+
+        Admin, not viewer: this decides whether the instance reaches the
+        internet, which is the promise `docs/ca-providers.md` makes to
+        air-gapped deployments and not something a read-only account should be
+        able to change.
+        """
+        checker = managers.get('update_check')
+        if checker is None:
+            return jsonify({'error': 'Update check is not available',
+                            'code': 'UPDATE_CHECK_UNAVAILABLE'}), 503
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data.get('enabled'), bool):
+            return jsonify({'error': 'Body must be {"enabled": true|false}',
+                            'code': 'INVALID_REQUEST'}), 400
+        saved = checker.save_config(data)
+        audit_logger = managers.get('audit')
+        if audit_logger:
+            user = getattr(request, 'current_user', {}) or {}
+            audit_logger.log_operation(
+                operation='update', resource_type='setting',
+                resource_id='update_check', status='success',
+                details={'enabled': saved['enabled']},
+                user=user.get('username'), ip_address=request.remote_addr,
+            )
+        return jsonify(saved)
+
+
+def _unmasked_test_config(settings_manager, channel_type, config):
+    """Fill a test payload's masked fields from what is stored.
+
+    The save path strips the `'********'` sentinel and merges against the
+    on-disk block, so a GET→edit→POST round-trip keeps the real secret. The
+    test path did neither: it handed `data['config']` straight to
+    `test_channel`, and the UI feeds it exactly what the masked GET returned.
+    So pressing Test on a channel that was saved and never re-typed sent
+    `password='********'` to the SMTP server, or `url='********'` to the
+    webhook sender — which answers "Webhook URL must use http or https
+    scheme". The toast reported a correctly configured channel as broken, and
+    the only way to make Test pass was to re-type the secret, which is the
+    one thing masking exists to avoid.
+
+    Same helpers as the save path, so the two cannot drift.
+    """
+    from modules.core.settings import (
+        _deep_merge_dict, _restore_masked_list_secrets, _strip_masked_values,
+    )
+
+    if settings_manager is None or not isinstance(config, dict):
+        return config
+
+    stored = settings_manager.load_settings().get('notifications') or {}
+    channels = stored.get('channels')
+    channels = channels if isinstance(channels, dict) else {}
+
+    if channel_type == 'webhook':
+        # Webhooks live in a list and are matched by identity, never by
+        # position — the same rule, and the same helper, the save path uses.
+        candidate = dict(config)
+        _restore_masked_list_secrets(channels.get('webhooks'), [candidate])
+        return candidate
+
+    existing = channels.get(channel_type)
+    stripped = _strip_masked_values(config)
+    if not isinstance(existing, dict) or not isinstance(stripped, dict):
+        return stripped
+    return _deep_merge_dict(existing, stripped)
+
+
+def _activity_page(audit_logger, limit, query):
+    """The activity response, filtered or not.
+
+    Module level because `register_misc_routes` is one of the budgeted
+    functions and its ceiling only comes down — a branch added inside the
+    closure has to be paid for somewhere, and this reads better out here
+    anyway.
+    """
+    filters = {field: query.get(field)
+               for field in audit_logger.SEARCHABLE_FIELDS
+               if query.get(field)}
+    if not filters:
+        logs = audit_logger.get_recent_entries(limit=limit)
+        # Unfiltered, `limit` entries from the end IS the whole answer to
+        # "what happened recently", so there is nothing for `complete` to
+        # warn about.
+        return {'entries': logs, 'count': len(logs), 'limit': limit,
+                'complete': True}
+    found = audit_logger.search_entries(limit=limit, **filters)
+    return {
+        'entries': found['entries'],
+        'count': len(found['entries']),
+        'limit': limit,
+        'filters': filters,
+        # False means the search stopped at `limit` matches and older ones
+        # exist, or it could not read the log. The distinction matters most
+        # when the answer is empty: complete + empty means there are none,
+        # and that is the only one of the two it is safe to act on.
+        'complete': found['complete'],
+    }
+
 def register_misc_routes(app, managers, require_web_auth, auth_manager):
+
+    _register_update_check(app, managers, auth_manager)
+
     """Register miscellaneous routes"""
 
     @app.route('/api/activity')
@@ -16,10 +218,21 @@ def register_misc_routes(app, managers, require_web_auth, auth_manager):
 
         Honors ``?limit=N`` from the query string, bounded to [1, 500]
         so the client can implement Load-more pagination without hitting
-        an unbounded read on a large audit log. Response is shaped as
-        ``{entries, count, limit}`` so the client can decide whether to
-        offer a "Load more" affordance (entries.length >= limit
-        ⇒ there may be more).
+        an unbounded read on a large audit log.
+
+        Also honors a filter on any of ``operation``, ``resource_type``,
+        ``resource_id``, ``user`` and ``status``. A filter is NOT applied to
+        the tail this would otherwise return: it searches backwards until it
+        has `limit` matches or reaches the start of the log, because "matches
+        among the last hundred" would answer "there are none" for anything
+        older — including the bootstrap entries `docs/compliance.md` sends
+        operators to look for.
+
+        Response: ``{entries, count, limit, complete}``, plus ``filters`` when
+        one was given. ``complete`` is False only when the search stopped at
+        `limit` matches, so an empty result with ``complete: true`` means
+        there are none, and an empty result with ``complete: false`` means
+        the search gave up first.
         """
         try:
             raw_limit = request.args.get('limit', 100)
@@ -29,13 +242,8 @@ def register_misc_routes(app, managers, require_web_auth, auth_manager):
                 limit = 100
             limit = max(1, min(limit, 500))
 
-            audit_logger = managers['audit']
-            logs = audit_logger.get_recent_entries(limit=limit)
-            return jsonify({
-                'entries': logs,
-                'count': len(logs),
-                'limit': limit,
-            })
+            return jsonify(_activity_page(managers['audit'], limit,
+                                          request.args))
         except Exception as e:
             logger.error(f"Activity API error: {e}")
             return jsonify({'error': 'Failed to fetch activity'}), 500
@@ -52,15 +260,36 @@ def register_misc_routes(app, managers, require_web_auth, auth_manager):
 
         Returns the verifier result plus HTTP 200 when intact and 409 when the
         chain is broken, so an operator (or a monitoring probe) can alert on a
-        non-2xx without parsing the body. The honest threat-model caveat (a
-        local chain does not bind the operator) is documented in
-        ``modules/core/audit_chain.py`` and ``docs/compliance.md``.
+        non-2xx without parsing the body. A brand-new instance that has not
+        audited anything yet has no chain file — that is NOT a tamper, so it
+        returns 200 with ``state='absent'`` (unless a signed checkpoint attests
+        the chain once existed, in which case a missing file IS a deletion and
+        stays 409). The honest threat-model caveat (a local chain does not bind
+        the operator) is documented in ``modules/core/audit_chain.py`` and
+        ``docs/compliance.md``.
         """
         try:
             audit_logger = managers.get('audit')
             if audit_logger is None or not hasattr(audit_logger, 'verify_chain'):
                 return jsonify({'error': 'Audit chain not available'}), 503
             result = audit_logger.verify_chain()
+            # Structured flag from the verifier, not a reason-substring match:
+            # the absent-vs-tampered call must not hinge on message wording.
+            if not result.get('ok') and result.get('chain_file_missing'):
+                # No chain file. Benign only if nothing ever attested one —
+                # and only decidable when the checkpoint file is readable.
+                try:
+                    has_cp = getattr(audit_logger, 'has_checkpoints', lambda: False)()
+                except CheckpointReadError:
+                    # Fail closed: cannot rule out that checkpoints attest a
+                    # deleted chain. 409 (integrity not verifiable), not 200
+                    # 'absent' and not a 500 traceback.
+                    result['checkpoint_unreadable'] = True
+                    result['reason'] = 'checkpoint file unreadable — cannot verify integrity'
+                    return jsonify(result), 409
+                if not has_cp:
+                    result['state'] = 'absent'
+                    return jsonify(result), 200
             status = 200 if result.get('ok') else 409
             return jsonify(result), status
         except Exception as e:
@@ -112,8 +341,15 @@ def register_misc_routes(app, managers, require_web_auth, auth_manager):
             logger.error(f"Audit export API error: {e}")
             return jsonify({'error': 'Failed to export audit bundle'}), 500
 
+    # Viewer, not admin. This is a read-only scrape target whose sibling
+    # '/api/metrics' already serves the same class of information (domain
+    # names, counts, expiry) at viewer level, so requiring admin here bought
+    # no confidentiality — it only forced an operator to put ADMIN credentials
+    # into a Prometheus scrape config to collect anything at all, or to
+    # collect nothing. It is not public either: the series enumerate every
+    # managed domain, which is infrastructure disclosure.
     @app.route('/metrics')
-    @auth_manager.require_role('admin')
+    @auth_manager.require_role('viewer')
     def metrics():
         """Prometheus metrics endpoint.
 
@@ -134,6 +370,11 @@ def register_misc_routes(app, managers, require_web_auth, auth_manager):
                         'cert_dir': file_ops.cert_dir,
                         'get_certificate_info': cert_manager.get_certificate_info,
                         'cache': managers.get('cache'),
+                        # The two in-process queues. Without these the gauges
+                        # exist and read zero forever, which is worse than not
+                        # having them.
+                        'cert_executor': managers.get('cert_executor'),
+                        'events': managers.get('events'),
                     }
                 except Exception as ctx_err:
                     logger.warning(
@@ -143,6 +384,31 @@ def register_misc_routes(app, managers, require_web_auth, auth_manager):
         except Exception as e:
             logger.error(f"Metrics error: {e}")
             return jsonify({'error': 'Internal Server Error'}), 500
+
+    def _current_issuance_status(managers):
+        """Whether certbot can run, re-checked when the last answer has aged.
+
+        The probe ran once per process and its answer was then frozen for the
+        life of that process, and both routes read that frozen dict. It was
+        wrong in both directions. A transient failure at boot — a filesystem
+        still settling, a fork refused under memory pressure — made the
+        instance permanently unready, and under an orchestrator that is a
+        restart loop rolling the same dice. And a certbot that broke AFTER boot
+        never turned readiness red, so the endpoint used to decide rotation
+        went on saying yes while nothing could be issued.
+
+        `probe` is TTL-throttled, so a readiness scrape every few seconds runs
+        certbot at most once per TTL. The refreshed answer is written back to
+        `managers['issuance_status']` so anything else reading that key sees
+        the same thing these two do.
+        """
+        from modules.core import issuance_readiness
+        shell_executor = managers.get('shell_executor')
+        if shell_executor is None:
+            return managers.get('issuance_status') or {}
+        status = issuance_readiness.probe(shell_executor)
+        managers['issuance_status'] = status
+        return status
 
     @app.route('/health')
     def health_check():
@@ -168,6 +434,20 @@ def register_misc_routes(app, managers, require_web_auth, auth_manager):
             checks['scheduler'] = 'not_running'
             overall = 'degraded'
 
+        # certbot. The one dependency without which nothing works, and a
+        # broken one is invisible until the first renewal — hours later, on a
+        # certificate closer to expiry. Re-checked rather than read from the
+        # startup snapshot: see _current_issuance_status.
+        issuance = _current_issuance_status(managers)
+        issuance_state = issuance.get('state')
+        if issuance_state:
+            checks['certbot'] = issuance_state
+            if issuance.get('version'):
+                checks['certbot_version'] = issuance['version']
+            if issuance_state == 'failed':
+                checks['certbot_error'] = issuance.get('error')
+                overall = 'degraded'
+
         # Cert directory
         file_ops = managers.get('file_ops')
         if file_ops:
@@ -192,9 +472,18 @@ def register_misc_routes(app, managers, require_web_auth, auth_manager):
         # Always return 200 — Flask is serving requests.
         # Load balancers and the conftest health-wait both check for 200.
         # The 'status' field ('healthy'/'degraded') is for monitoring systems.
+        # VERSION was never set in app.config, so /health always reported
+        # "unknown"; fall back to the canonical package version (same source
+        # Swagger and the Prometheus build_info use).
+        from modules import __version__
+        from modules.core.constants import API_CONTRACT_VERSION
         return jsonify({
             'status': overall,
-            'version': app.config.get('VERSION', 'unknown'),
+            'version': app.config.get('VERSION') or __version__,
+            # The release number above moves on every patch. This one moves
+            # only when the interface does, so it is the field a client can
+            # actually decide compatibility on.
+            'api_contract_version': API_CONTRACT_VERSION,
             'checks': checks
         })
 
@@ -213,31 +502,51 @@ def register_misc_routes(app, managers, require_web_auth, auth_manager):
         so the failure becomes loud: a deploy gate fails, a readiness probe
         flips the pod out of rotation, an alert fires.
         """
+        from modules.core import issuance_readiness
+
         scheduler = managers.get('scheduler')
         scheduler_status = managers.get('scheduler_status') or {}
         running = bool(scheduler and getattr(scheduler, 'running', False))
-        ready = running and scheduler_status.get('state') != 'failed'
+        scheduler_ok = running and scheduler_status.get('state') != 'failed'
+
+        # A scheduler that never runs means nothing renews. A certbot that
+        # cannot run means nothing renews either, and it was invisible to
+        # every probe: the instance started, said ready, and failed at the
+        # first renewal. Only a probe that RAN AND FAILED withholds readiness
+        # — `skipped` and `unknown` are absence of evidence, not evidence.
+        issuance = _current_issuance_status(managers)
+        issuance_ok = issuance_readiness.is_ready(issuance)
+
+        ready = scheduler_ok and issuance_ok
         body = {
             'ready': ready,
             'scheduler': 'running' if running else (scheduler_status.get('state') or 'not_running'),
+            'certbot': issuance.get('state') or 'unknown',
         }
-        if not ready and scheduler_status.get('error'):
+        if not scheduler_ok and scheduler_status.get('error'):
             body['scheduler_error'] = scheduler_status.get('error')
+        if not issuance_ok and issuance.get('error'):
+            body['certbot_error'] = issuance.get('error')
         return jsonify(body), (200 if ready else 503)
 
     @app.route('/api/events/stream')
+    @auth_manager.require_session_role('viewer')
     def events_stream():
         """SSE: stream certificate lifecycle events to authenticated browsers.
 
-        SSE cannot send custom headers, so this only accepts the cookie session.
-        When local auth is enabled and the request has no valid session, this
-        returns a 401 JSON error and does not expose the event stream.
+        `require_session_role` rather than `require_role`: `EventSource` offers
+        no way to add an Authorization header, so a bearer token cannot reach
+        this route however the caller is configured. A bearer-only deployment
+        therefore has no live stream — and no web UI to feed it to either.
+
+        That was already the behaviour, written inline here. Expressing it as a
+        decorator gives it three things it did not have: the route becomes
+        visible to a scan of what is protected (it had to sit in the public
+        allowlist with "checked inline" as its reason), the check now consults
+        a role like every other one, and a second such surface will not copy
+        the logic.
         """
-        from flask import Response, stream_with_context, request as _req
-        if auth_manager.is_local_auth_enabled() and auth_manager.has_any_users():
-            session_id = _req.cookies.get('certmate_session')
-            if not session_id or not auth_manager.validate_session(session_id):
-                return jsonify({'error': 'Unauthenticated'}), 401
+        from flask import Response, stream_with_context
         event_bus = managers.get('events')
         if event_bus is None:
             return jsonify({'error': 'Event bus not available'}), 503
@@ -252,20 +561,12 @@ def register_misc_routes(app, managers, require_web_auth, auth_manager):
     @auth_manager.require_role('admin')
     def stream_logs():
         """Stream application logs — admin only (logs may contain credentials)"""
-        def generate():
-            log_file = managers['file_ops'].logs_dir / 'certmate.log'
-            if log_file.exists():
-                with open(log_file, 'r') as f:
-                    f.seek(0, 2)
-                    while True:
-                        line = f.readline()
-                        if line:
-                            yield f"data: {line}\n\n"
-            else:
-                yield "data: Log file not found\n\n"
+        log_file = managers['file_ops'].logs_dir / 'certmate.log'
 
-        return Response(stream_with_context(generate()),
-                        mimetype='text/event-stream')
+        return Response(stream_with_context(_stream_log_file(log_file)),
+                        mimetype='text/event-stream',
+                        headers={'Cache-Control': 'no-cache',
+                                 'X-Accel-Buffering': 'no'})
 
     # ------------------------------------------------------------------ #
     # Notifications + digest + webhook deliveries (#114)                  #
@@ -318,6 +619,16 @@ def register_misc_routes(app, managers, require_web_auth, auth_manager):
             from modules.core.settings import (
                 _strip_masked_values, _deep_merge_dict, _restore_masked_list_secrets,
             )
+            from modules.core.notifier import validate_webhook_config
+            # A generic webhook's method / auth / payload template is judged
+            # here, at save time, so a template that cannot render is a 400
+            # now and not a silent delivery failure later (#218).
+            channels = data.get('channels') if isinstance(data.get('channels'), dict) else {}
+            for index, webhook in enumerate(channels.get('webhooks') or []):
+                problem = validate_webhook_config(webhook)
+                if problem:
+                    label = (webhook.get('name') if isinstance(webhook, dict) else None) or f'#{index + 1}'
+                    return jsonify({'error': f'webhook {label}: {problem}'}), 400
             clean_data = _strip_masked_values(data)
 
             def _mutator(s):
@@ -362,6 +673,83 @@ def register_misc_routes(app, managers, require_web_auth, auth_manager):
             logger.error(f"Failed to save notifications config: {e}")
             return jsonify({'error': 'Failed to save notifications config'}), 500
 
+    @app.route('/api/settings/rate-limits', methods=['GET', 'PUT'])
+    @auth_manager.require_role('admin')
+    # GET carries no body, so the default simply applies there.
+    @json_booleans(enabled=True)
+    def api_rate_limits_config():
+        """Get or replace the configurable API rate limits (#319).
+
+        GET  -> {enabled, limits (effective = defaults + overrides), defaults}
+        PUT  -> {enabled?: bool, limits?: {endpoint: requests_per_minute}}
+        Only the known endpoint keys are accepted, each a positive integer.
+        """
+        from modules.core.rate_limit import RateLimitConfig
+        settings_manager = managers.get('settings')
+        if settings_manager is None:
+            return jsonify({'error': 'Settings not available'}), 503
+        defaults = dict(RateLimitConfig.DEFAULT_LIMITS)
+
+        if request.method == 'GET':
+            try:
+                block = (settings_manager.load_settings() or {}).get('rate_limits') or {}
+                overrides = block.get('limits') if isinstance(block.get('limits'), dict) else {}
+                return jsonify({
+                    'enabled': bool(block.get('enabled', True)),
+                    'limits': {**defaults, **{k: v for k, v in overrides.items() if k in defaults}},
+                    'defaults': defaults,
+                })
+            except Exception as e:
+                logger.error(f"Failed to read rate limits: {e}")
+                return jsonify({'error': 'Failed to read rate limits'}), 500
+
+        try:
+            data = request.json or {}
+            if not isinstance(data, dict):
+                return jsonify({'error': 'Body must be a JSON object'}), 400
+
+            enabled = request.json_booleans['enabled']
+            raw_limits = data.get('limits', {})
+            if not isinstance(raw_limits, dict):
+                return jsonify({'error': 'limits must be an object'}), 400
+
+            clean_limits = {}
+            for key, value in raw_limits.items():
+                if key not in defaults:
+                    return jsonify({'error': f'Unknown rate-limit key: {key}'}), 400
+                # bool is an int subclass; reject it and any non-int (float/str).
+                if isinstance(value, bool) or not isinstance(value, int):
+                    return jsonify({'error': f'{key} must be an integer'}), 400
+                if value < 1 or value > 100000:
+                    return jsonify({'error': f'{key} must be between 1 and 100000'}), 400
+                clean_limits[key] = value
+
+            def _mutator(s):
+                s['rate_limits'] = {'enabled': enabled, 'limits': clean_limits}
+                return s
+
+            settings_manager.update(_mutator)
+            audit_logger = managers.get('audit')
+            if audit_logger:
+                actor = getattr(request, 'current_user', {}) or {}
+                audit_logger.log_operation(
+                    operation='update',
+                    resource_type='rate_limits_config',
+                    resource_id='rate_limits',
+                    status='success',
+                    details={'enabled': enabled, 'overrides': sorted(clean_limits.keys())},
+                    user=actor.get('username'),
+                    ip_address=request.remote_addr,
+                )
+            return jsonify({
+                'message': 'Rate limits updated',
+                'enabled': enabled,
+                'limits': {**defaults, **clean_limits},
+            })
+        except Exception as e:
+            logger.error(f"Failed to save rate limits: {e}")
+            return jsonify({'error': 'Failed to save rate limits'}), 500
+
     @app.route('/api/notifications/test', methods=['POST'])
     @auth_manager.require_role('admin')
     def api_notifications_test():
@@ -378,6 +766,8 @@ def register_misc_routes(app, managers, require_web_auth, auth_manager):
             if not isinstance(config, dict):
                 return jsonify({'error': 'config must be a JSON object'}), 400
 
+            config = _unmasked_test_config(
+                managers.get('settings'), channel_type, config)
             result = notifier.test_channel(channel_type, config)
             # test_channel returns {error: ...} or {success: True, status: ...}
             success = 'error' not in result
@@ -385,6 +775,30 @@ def register_misc_routes(app, managers, require_web_auth, auth_manager):
         except Exception as e:
             logger.error(f"Notification test failed: {e}")
             return jsonify({'success': False, 'error': str(e)}), 500
+
+    @app.route('/api/notifications/webhook/preview', methods=['POST'])
+    @auth_manager.require_role('admin')
+    def api_notifications_webhook_preview():
+        """Render what a generic webhook would send for a sample event —
+        method, URL, header names (credentials masked), body — without
+        sending anything. Backs the payload-template editor (#218)."""
+        notifier = managers.get('notifier')
+        if notifier is None:
+            return jsonify({'error': 'Notifier not available'}), 503
+        try:
+            data = request.json or {}
+            config = data.get('config') or {}
+            if not isinstance(config, dict):
+                return jsonify({'error': 'config must be a JSON object'}), 400
+            event = data.get('event') or 'certificate_renewed'
+            if not isinstance(event, str) or not re.match(r'^[a-z_]{1,64}$', event):
+                return jsonify({'error': 'event must be a lowercase event name'}), 400
+            result = notifier.preview_webhook(config, event=event)
+            status = 400 if 'error' in result else 200
+            return jsonify(result), status
+        except Exception as e:
+            logger.error(f"Webhook preview failed: {e}")
+            return jsonify({'error': 'Failed to render webhook preview'}), 500
 
     @app.route('/api/digest/send', methods=['POST'])
     @auth_manager.require_role('admin')

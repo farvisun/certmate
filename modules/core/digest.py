@@ -5,16 +5,15 @@ email via the existing Notifier SMTP channel.
 """
 
 import logging
+from .domain_entries import entry_domain
 import smtplib
-import time
-from datetime import datetime, timedelta
+from datetime import timedelta
 from .utils import utc_now
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 
-from .constants import iter_cert_domain_dirs
+from .constants import DEFAULT_RENEWAL_THRESHOLD_DAYS, iter_cert_domain_dirs
 
 logger = logging.getLogger(__name__)
 
@@ -40,12 +39,9 @@ class WeeklyDigest:
         all_domains = set()
 
         for entry in domains_from_settings:
-            if isinstance(entry, str):
-                all_domains.add(entry)
-            elif isinstance(entry, dict):
-                d = entry.get('domain')
-                if d:
-                    all_domains.add(d)
+            name = entry_domain(entry)
+            if name:
+                all_domains.add(name)
 
         for p in iter_cert_domain_dirs(cert_dir):
             all_domains.add(p.name)
@@ -56,7 +52,8 @@ class WeeklyDigest:
         expired = 0
         expiring_domains: List[str] = []
 
-        renewal_threshold = settings.get('renewal_threshold_days', 30)
+        renewal_threshold = settings.get(
+            'renewal_threshold_days', DEFAULT_RENEWAL_THRESHOLD_DAYS)
 
         for domain in sorted(all_domains):
             info = self.certificate_manager.get_certificate_info(domain)
@@ -205,6 +202,48 @@ Generated {digest['generated_at']} by CertMate
 </p>
 </div>'''
 
+    def _record(self, status, digest, recipients, error=None):
+        """Put the send in the audit chain — and therefore in the SIEM.
+
+        The digest READ the audit log and never wrote to it, so "was the
+        weekly report produced and sent" had no answer in the record. The
+        SIEM sink streams each audit entry (#474), so one absence caused
+        both: fixing the entry fixes the stream.
+
+        What it records is deliberately narrow. **Not the recipients.** They
+        are personal data, and this chain is append-only and tamper-evident
+        by construction — there is no supported way to take them back out.
+        The count answers "did it go to the people it should" well enough to
+        notice a list that emptied itself.
+
+        No try/except around the call, deliberately. `log_operation` catches
+        everything itself and logs — audit writes are best-effort by design and
+        never block the operation they describe — so wrapping it again would
+        add a broad handler that cannot fire, and a budget entry defending
+        against nothing.
+        """
+        if self.audit_logger is None:
+            return
+        self.audit_logger.log_operation(
+            operation='send', resource_type='digest', resource_id='weekly',
+            status=status,
+            details={'recipients': recipients,
+                     # The keys `build_digest` actually returns. This read
+                     # `certificates`, which it has never returned — the
+                     # server figures are under `server_certs` — so every
+                     # entry recorded null, in a chain that cannot be
+                     # rewritten. The test did not catch it because its fake
+                     # build_digest returned the shape the code expected
+                     # rather than the shape the real one produces.
+                     'server_certs': (digest or {}).get('server_certs'),
+                     'client_certs': (digest or {}).get('client_certs'),
+                     'activity': (digest or {}).get('activity')},
+            user='system', ip_address='local',
+            error=error,
+            actor={'kind': 'system', 'label': 'scheduler'},
+            trigger={'cause': 'schedule'},
+        )
+
     def send(self) -> Dict[str, Any]:
         """Build and send the weekly digest email.
 
@@ -257,13 +296,21 @@ Generated {digest['generated_at']} by CertMate
                     server.login(username, password)
                 server.sendmail(from_addr, to_addrs, msg.as_string())
                 logger.info("Weekly digest email sent successfully")
+                self._record('success', digest, len(to_addrs))
                 return {'success': True}
             finally:
                 try:
                     server.quit()
-                except Exception:
-                    pass
+                except (smtplib.SMTPException, OSError) as e:
+                    # The mail is already sent; a failure closing the session
+                    # changes nothing for the caller. Narrow, and logged, so
+                    # it is not indistinguishable from a send that failed.
+                    logger.debug("SMTP quit failed after sending digest: %s", e)
 
         except Exception as e:
             logger.error(f"Weekly digest email failed: {e}")
+            # A digest that did not go out is the case an auditor cares about
+            # most, so the failure is recorded as deliberately as the success.
+            self._record('failed', digest, len(smtp_cfg.get('to_addresses') or []),
+                         error=str(e))
             return {'error': str(e)}

@@ -8,8 +8,16 @@ def register_ui_routes(app, managers, require_web_auth, auth_manager):
     @app.route('/')
     def index():
         """Main dashboard UI"""
-        if not auth_manager.is_local_auth_enabled() or not auth_manager.has_any_users():
-            return render_template('setup.html')
+        if auth_manager.is_setup_mode():
+            return render_template('setup.html', bootstrap_requires_token=False)
+        # Bearer-only box: is_setup_mode() is False (the bearer token is
+        # enforced on every gated surface), but local auth is not yet
+        # provisioned, so a login redirect would dead-end at a 403 "Local auth
+        # disabled". Surface the create-admin form instead; its two writes are
+        # still bearer-gated (@require_role('admin')), so this grants nothing
+        # to an anonymous caller. #397
+        if auth_manager.needs_credentialed_bootstrap():
+            return render_template('setup.html', bootstrap_requires_token=True)
 
         session_id = request.cookies.get('certmate_session')
         user_info = auth_manager.validate_session(session_id)
@@ -50,14 +58,43 @@ def register_ui_routes(app, managers, require_web_auth, auth_manager):
     @app.route('/help')
     @auth_manager.require_role('viewer')
     def help_page():
-        """Help page"""
-        return render_template('help.html')
+        """Help page.
+
+        The provider count is passed in rather than written into the template.
+        Hardcoded, it said 22 while the app supported 29 — a number nobody
+        remembers to bump is a number that is wrong.
+        """
+        from ..core.dns_providers import DNSManager
+        return render_template(
+            'help.html',
+            provider_count=len(DNSManager.SUPPORTED_PROVIDERS),
+        )
 
     @app.route('/activity')
     @auth_manager.require_role('viewer')
     def activity_page():
         """Activity page"""
         return render_template('activity.html')
+
+    @app.route('/inventory')
+    @auth_manager.require_role('viewer')
+    def inventory_page():
+        """Certificate inventory page — issued + discovered certificates."""
+        return render_template('inventory.html')
+
+    @app.route('/inventory/crypto-report')
+    @auth_manager.require_role('viewer')
+    def crypto_report_page():
+        """Print-friendly cryptographic algorithm readiness report."""
+        return render_template('crypto_report.html')
+
+    @app.route('/notifications')
+    @auth_manager.require_role('viewer')
+    def notifications_page():
+        """Notifications page — certificate expiry warnings, with client-side
+        snooze. Warnings are derived in the browser from /api/certificates
+        (same source as the top-bar bell badge), so no server-side state."""
+        return render_template('notifications.html')
 
     @app.route('/redoc')
     @auth_manager.require_role('viewer')

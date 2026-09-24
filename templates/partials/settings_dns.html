@@ -1,5 +1,5 @@
 <!-- TAB: DNS Providers -->
-                    <div x-show="tab === 'dns'" x-cloak>
+                    <div x-show="tab === 'dns'" x-cloak id="settings-panel-dns" role="tabpanel" aria-labelledby="settings-tab-dns" tabindex="0">
                     <!-- Challenge Type Selection -->
                     <div class="bg-gray-50 dark:bg-gray-700/50 p-4 rounded-lg mb-4">
                          <label class="block text-sm font-medium text-label mb-3">
@@ -12,7 +12,7 @@
                                 <div class="px-4 py-2 border-2 border-border rounded-lg transition-all peer-checked:border-primary peer-checked:bg-blue-50 dark:peer-checked:bg-blue-900/30 hover:border-border-strong">
                                     <div class="flex items-center gap-2">
                                         <i class="fas fa-globe-americas text-blue-500"></i>
-                                        <span class="text-sm font-medium dark:text-white">DNS-01</span>
+                                        <span class="text-sm font-medium text-foreground">DNS-01</span>
                                     </div>
                                      <p class="text-xs text-muted mt-1">نیاز به اعتبارنامه‌های ارائه‌دهنده DNS دارد. از wildcard پشتیبانی می‌کند.</p>
                                 </div>
@@ -22,7 +22,7 @@
                                 <div class="px-4 py-2 border-2 border-border rounded-lg transition-all peer-checked:border-primary peer-checked:bg-blue-50 dark:peer-checked:bg-blue-900/30 hover:border-border-strong">
                                     <div class="flex items-center gap-2">
                                         <i class="fas fa-globe text-green-500"></i>
-                                        <span class="text-sm font-medium dark:text-white">HTTP-01</span>
+                                        <span class="text-sm font-medium text-foreground">HTTP-01</span>
                                     </div>
                                      <p class="text-xs text-muted mt-1">دامنه باید به این سرور اشاره کند. بدون wildcard.</p>
                                 </div>
@@ -50,8 +50,8 @@
                                     <div class="p-2 border-2 border-border rounded-lg cursor-pointer transition-all peer-checked:border-primary peer-checked:bg-blue-50 dark:bg-blue-900/20 dark:peer-checked:bg-blue-900/30 hover:border-border-strong">
                                         <div class="text-center">
                                             <i class="fab fa-cloudflare text-lg text-orange-500 mb-1"></i>
-                                            <div class="text-xs font-medium dark:text-white">Cloudflare</div>
-                                             <div class="text-xs text-muted mt-1" id="cloudflare-status">پیکربندی نشده</div>
+                                            <div class="text-xs font-medium text-foreground">Cloudflare</div>
+                                            <div class="text-xs text-muted mt-1" id="cloudflare-status">پیکربندی نشده</div>
                                             <!-- Multi-account indicator -->
                                             <div class="text-xs text-info-fg mt-1 hidden" id="cloudflare-accounts">
                                                 <i class="fas fa-users text-xs mr-1"></i>
@@ -65,8 +65,8 @@
                                     <div class="p-2 border-2 border-border rounded-lg cursor-pointer transition-all peer-checked:border-primary peer-checked:bg-blue-50 dark:bg-blue-900/20 dark:peer-checked:bg-blue-900/30 hover:border-border-strong">
                                         <div class="text-center">
                                             <i class="fab fa-aws text-lg text-orange-400 mb-1"></i>
-                                            <div class="text-xs font-medium dark:text-white">Route53</div>
-                                             <div class="text-xs text-muted mt-1" id="route53-status">پیکربندی نشده</div>
+                                            <div class="text-xs font-medium text-foreground">Route53</div>
+                                            <div class="text-xs text-muted mt-1" id="route53-status">پیکربندی نشده</div>
                                             <!-- Multi-account indicator -->
                                             <div class="text-xs text-info-fg mt-1 hidden" id="route53-accounts">
                                                 <i class="fas fa-users text-xs mr-1"></i>
@@ -80,8 +80,8 @@
                                     <div class="p-2 border-2 border-border rounded-lg cursor-pointer transition-all peer-checked:border-primary peer-checked:bg-blue-50 dark:bg-blue-900/20 dark:peer-checked:bg-blue-900/30 hover:border-border-strong">
                                         <div class="text-center">
                                             <i class="fab fa-digital-ocean text-lg text-blue-600 mb-1"></i>
-                                            <div class="text-xs font-medium dark:text-white">DigitalOcean</div>
-                                             <div class="text-xs text-muted mt-1" id="digitalocean-status">پیکربندی نشده</div>
+                                            <div class="text-xs font-medium text-foreground">DigitalOcean</div>
+                                            <div class="text-xs text-muted mt-1" id="digitalocean-status">پیکربندی نشده</div>
                                             <!-- Multi-account indicator -->
                                             <div class="text-xs text-info-fg mt-1 hidden" id="digitalocean-accounts">
                                                 <i class="fas fa-users text-xs mr-1"></i>
@@ -95,8 +95,8 @@
                                     <div class="p-2 border-2 border-border rounded-lg cursor-pointer transition-all peer-checked:border-primary peer-checked:bg-blue-50 dark:bg-blue-900/20 dark:peer-checked:bg-blue-900/30 hover:border-border-strong">
                                         <div class="text-center">
                                             <i class="fab fa-microsoft text-lg text-blue-600 mb-1"></i>
-                                            <div class="text-xs font-medium dark:text-white">Azure DNS</div>
-                                             <div class="text-xs text-muted mt-1" id="azure-status">پیکربندی نشده</div>
+                                            <div class="text-xs font-medium text-foreground">Azure DNS</div>
+                                            <div class="text-xs text-muted mt-1" id="azure-status">پیکربندی نشده</div>
                                             <!-- Multi-account indicator -->
                                             <div class="text-xs text-info-fg mt-1 hidden" id="azure-accounts">
                                                 <i class="fas fa-users text-xs mr-1"></i>
@@ -110,8 +110,8 @@
                                     <div class="p-2 border-2 border-border rounded-lg cursor-pointer transition-all peer-checked:border-primary peer-checked:bg-blue-50 dark:bg-blue-900/20 dark:peer-checked:bg-blue-900/30 hover:border-border-strong">
                                         <div class="text-center">
                                             <i class="fab fa-google text-lg text-blue-500 mb-1"></i>
-                                            <div class="text-xs font-medium dark:text-white">Google DNS</div>
-                                             <div class="text-xs text-muted mt-1" id="google-status">پیکربندی نشده</div>
+                                            <div class="text-xs font-medium text-foreground">Google DNS</div>
+                                            <div class="text-xs text-muted mt-1" id="google-status">پیکربندی نشده</div>
                                             <!-- Multi-account indicator -->
                                             <div class="text-xs text-info-fg mt-1 hidden" id="google-accounts">
                                                 <i class="fas fa-users text-xs mr-1"></i>
@@ -125,8 +125,8 @@
                                     <div class="p-2 border-2 border-border rounded-lg cursor-pointer transition-all peer-checked:border-primary peer-checked:bg-blue-50 dark:bg-blue-900/20 dark:peer-checked:bg-blue-900/30 hover:border-border-strong">
                                         <div class="text-center">
                                             <i class="fas fa-server text-lg text-muted mb-1"></i>
-                                            <div class="text-xs font-medium dark:text-white">PowerDNS</div>
-                                             <div class="text-xs text-muted mt-1" id="powerdns-status">پیکربندی نشده</div>
+                                            <div class="text-xs font-medium text-foreground">PowerDNS</div>
+                                            <div class="text-xs text-muted mt-1" id="powerdns-status">پیکربندی نشده</div>
                                             <!-- Multi-account indicator -->
                                             <div class="text-xs text-info-fg mt-1 hidden" id="powerdns-accounts">
                                                 <i class="fas fa-users text-xs mr-1"></i>
@@ -140,8 +140,8 @@
                                     <div class="p-2 border-2 border-border rounded-lg cursor-pointer transition-all peer-checked:border-primary peer-checked:bg-blue-50 dark:bg-blue-900/20 dark:peer-checked:bg-blue-900/30 hover:border-border-strong">
                                         <div class="text-center">
                                             <i class="fas fa-exchange-alt text-lg text-muted mb-1"></i>
-                                            <div class="text-xs font-medium dark:text-white">RFC2136</div>
-                                             <div class="text-xs text-muted mt-1" id="rfc2136-status">پیکربندی نشده</div>
+                                            <div class="text-xs font-medium text-foreground">RFC2136</div>
+                                            <div class="text-xs text-muted mt-1" id="rfc2136-status">پیکربندی نشده</div>
                                             <!-- Multi-account indicator -->
                                             <div class="text-xs text-info-fg mt-1 hidden" id="rfc2136-accounts">
                                                 <i class="fas fa-users text-xs mr-1"></i>
@@ -166,7 +166,7 @@
                                     <div class="p-2 border-2 border-border rounded-lg cursor-pointer transition-all peer-checked:border-primary peer-checked:bg-blue-50 dark:bg-blue-900/20 dark:peer-checked:bg-blue-900/30 hover:border-border-strong">
                                         <div class="text-center">
                                             <i class="fas fa-cloud text-lg text-green-600 mb-1"></i>
-                                            <div class="text-xs font-medium dark:text-white">Akamai Connected Cloud (Linode)</div>
+                                            <div class="text-xs font-medium text-foreground">Akamai Connected Cloud (Linode)</div>
                                             <div class="text-xs text-muted mt-1" id="linode-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
@@ -176,7 +176,7 @@
                                     <div class="p-2 border-2 border-border rounded-lg cursor-pointer transition-all peer-checked:border-primary peer-checked:bg-blue-50 dark:bg-blue-900/20 dark:peer-checked:bg-blue-900/30 hover:border-border-strong">
                                         <div class="text-center">
                                             <i class="fas fa-cloud text-lg text-orange-600 mb-1"></i>
-                                            <div class="text-xs font-medium dark:text-white">Akamai Edge DNS</div>
+                                            <div class="text-xs font-medium text-foreground">Akamai Edge DNS</div>
                                             <div class="text-xs text-muted mt-1" id="edgedns-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
@@ -186,8 +186,18 @@
                                     <div class="p-2 border-2 border-border rounded-lg cursor-pointer transition-all peer-checked:border-primary peer-checked:bg-blue-50 dark:bg-blue-900/20 dark:peer-checked:bg-blue-900/30 hover:border-border-strong">
                                         <div class="text-center">
                                             <i class="fas fa-cloud text-lg text-blue-600 mb-1"></i>
-                                            <div class="text-xs font-medium dark:text-white">Vultr</div>
+                                            <div class="text-xs font-medium text-foreground">Vultr</div>
                                             <div class="text-xs text-muted mt-1" id="vultr-status">پیکربندی نشده</div>
+                                        </div>
+                                    </div>
+                                </label>
+                                <label class="relative">
+                                    <input type="radio" name="dns_provider" value="solidserver" class="sr-only peer">
+                                    <div class="p-2 border-2 border-border rounded-lg cursor-pointer transition-all peer-checked:border-primary peer-checked:bg-blue-50 dark:bg-blue-900/20 dark:peer-checked:bg-blue-900/30 hover:border-border-strong">
+                                        <div class="text-center">
+                                            <i class="fas fa-server text-lg text-blue-600 mb-1"></i>
+                                            <div class="text-xs font-medium text-foreground">SOLIDserver</div>
+                                            <div class="text-xs text-muted mt-1" id="solidserver-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
                                 </label>
@@ -196,7 +206,7 @@
                                     <div class="p-2 border-2 border-border rounded-lg cursor-pointer transition-all peer-checked:border-primary peer-checked:bg-blue-50 dark:bg-blue-900/20 dark:peer-checked:bg-blue-900/30 hover:border-border-strong">
                                         <div class="text-center">
                                             <i class="fas fa-server text-lg text-red-600 mb-1"></i>
-                                            <div class="text-xs font-medium dark:text-white">Hetzner</div>
+                                            <div class="text-xs font-medium text-foreground">Hetzner</div>
                                             <div class="text-xs text-muted mt-1" id="hetzner-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
@@ -206,7 +216,7 @@
                                     <div class="p-2 border-2 border-border rounded-lg cursor-pointer transition-all peer-checked:border-primary peer-checked:bg-blue-50 dark:bg-blue-900/20 dark:peer-checked:bg-blue-900/30 hover:border-border-strong">
                                         <div class="text-center">
                                             <i class="fas fa-server text-lg text-red-600 mb-1"></i>
-                                            <div class="text-xs font-medium dark:text-white">Hetzner Cloud</div>
+                                            <div class="text-xs font-medium text-foreground">Hetzner Cloud</div>
                                             <div class="text-xs text-muted mt-1" id="hetzner-cloud-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
@@ -216,7 +226,7 @@
                                     <div class="p-2 border-2 border-border rounded-lg cursor-pointer transition-all peer-checked:border-primary peer-checked:bg-blue-50 dark:bg-blue-900/20 dark:peer-checked:bg-blue-900/30 hover:border-border-strong">
                                         <div class="text-center">
                                             <i class="fas fa-cloud text-lg text-blue-600 mb-1"></i>
-                                            <div class="text-xs font-medium dark:text-white">ArvanCloud</div>
+                                            <div class="text-xs font-medium text-foreground">ArvanCloud</div>
                                             <div class="text-xs text-muted mt-1" id="arvancloud-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
@@ -226,7 +236,7 @@
                                     <div class="p-2 border-2 border-border rounded-lg cursor-pointer transition-all peer-checked:border-primary peer-checked:bg-blue-50 dark:bg-blue-900/20 dark:peer-checked:bg-blue-900/30 hover:border-border-strong">
                                         <div class="text-center">
                                             <i class="fas fa-cloud text-lg text-purple-600 mb-1"></i>
-                                            <div class="text-xs font-medium dark:text-white">Infomaniak</div>
+                                            <div class="text-xs font-medium text-foreground">Infomaniak</div>
                                             <div class="text-xs text-muted mt-1" id="infomaniak-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
@@ -236,7 +246,7 @@
                                     <div class="p-2 border-2 border-border rounded-lg cursor-pointer transition-all peer-checked:border-primary peer-checked:bg-blue-50 dark:bg-blue-900/20 dark:peer-checked:bg-blue-900/30 hover:border-border-strong">
                                         <div class="text-center">
                                             <i class="fas fa-network-wired text-lg text-green-600 mb-1"></i>
-                                            <div class="text-xs font-medium dark:text-white">ACME-DNS</div>
+                                            <div class="text-xs font-medium text-foreground">ACME-DNS</div>
                                             <div class="text-xs text-muted mt-1" id="acme-dns-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
@@ -246,7 +256,7 @@
                                     <div class="p-2 border-2 border-border rounded-lg cursor-pointer transition-all peer-checked:border-primary peer-checked:bg-blue-50 dark:bg-blue-900/20 dark:peer-checked:bg-blue-900/30 hover:border-border-strong">
                                         <div class="text-center">
                                             <i class="fas fa-shield-alt text-lg text-green-600 mb-1"></i>
-                                            <div class="text-xs font-medium dark:text-white">deSEC</div>
+                                            <div class="text-xs font-medium text-foreground">deSEC</div>
                                             <div class="text-xs text-muted mt-1" id="desec-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
@@ -256,7 +266,7 @@
                                     <div class="p-2 border-2 border-border rounded-lg cursor-pointer transition-all peer-checked:border-primary peer-checked:bg-blue-50 dark:bg-blue-900/20 dark:peer-checked:bg-blue-900/30 hover:border-border-strong">
                                         <div class="text-center">
                                             <i class="fas fa-cloud text-lg text-purple-600 mb-1"></i>
-                                            <div class="text-xs font-medium dark:text-white">Scaleway</div>
+                                            <div class="text-xs font-medium text-foreground">Scaleway</div>
                                             <div class="text-xs text-muted mt-1" id="scaleway-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
@@ -266,7 +276,7 @@
                                     <div class="p-2 border-2 border-border rounded-lg cursor-pointer transition-all peer-checked:border-primary peer-checked:bg-blue-50 dark:bg-blue-900/20 dark:peer-checked:bg-blue-900/30 hover:border-border-strong">
                                         <div class="text-center">
                                             <i class="fas fa-globe text-lg text-orange-600 mb-1"></i>
-                                            <div class="text-xs font-medium dark:text-white">Gandi</div>
+                                            <div class="text-xs font-medium text-foreground">Gandi</div>
                                             <div class="text-xs text-muted mt-1" id="gandi-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
@@ -276,7 +286,7 @@
                                     <div class="p-2 border-2 border-border rounded-lg cursor-pointer transition-all peer-checked:border-primary peer-checked:bg-blue-50 dark:bg-blue-900/20 dark:peer-checked:bg-blue-900/30 hover:border-border-strong">
                                         <div class="text-center">
                                             <i class="fas fa-server text-lg text-purple-600 mb-1"></i>
-                                            <div class="text-xs font-medium dark:text-white">OVH</div>
+                                            <div class="text-xs font-medium text-foreground">OVH</div>
                                             <div class="text-xs text-muted mt-1" id="ovh-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
@@ -286,7 +296,7 @@
                                     <div class="p-2 border-2 border-border rounded-lg cursor-pointer transition-all peer-checked:border-primary peer-checked:bg-blue-50 dark:bg-blue-900/20 dark:peer-checked:bg-blue-900/30 hover:border-border-strong">
                                         <div class="text-center">
                                             <i class="fas fa-shopping-cart text-lg text-red-600 mb-1"></i>
-                                            <div class="text-xs font-medium dark:text-white">Namecheap</div>
+                                            <div class="text-xs font-medium text-foreground">Namecheap</div>
                                             <div class="text-xs text-muted mt-1" id="namecheap-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
@@ -296,7 +306,7 @@
                                     <div class="p-2 border-2 border-border rounded-lg cursor-pointer transition-all peer-checked:border-primary peer-checked:bg-blue-50 dark:bg-blue-900/20 dark:peer-checked:bg-blue-900/30 hover:border-border-strong">
                                         <div class="text-center">
                                             <i class="fas fa-paw text-lg text-pink-600 mb-1"></i>
-                                            <div class="text-xs font-medium dark:text-white">Porkbun</div>
+                                            <div class="text-xs font-medium text-foreground">Porkbun</div>
                                             <div class="text-xs text-muted mt-1" id="porkbun-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
@@ -306,7 +316,7 @@
                                     <div class="p-2 border-2 border-border rounded-lg cursor-pointer transition-all peer-checked:border-primary peer-checked:bg-blue-50 dark:bg-blue-900/20 dark:peer-checked:bg-blue-900/30 hover:border-border-strong">
                                         <div class="text-center">
                                             <i class="fas fa-globe text-lg text-green-600 mb-1"></i>
-                                            <div class="text-xs font-medium dark:text-white">GoDaddy</div>
+                                            <div class="text-xs font-medium text-foreground">GoDaddy</div>
                                             <div class="text-xs text-muted mt-1" id="godaddy-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
@@ -316,7 +326,7 @@
                                     <div class="p-2 border-2 border-border rounded-lg cursor-pointer transition-all peer-checked:border-primary peer-checked:bg-blue-50 dark:bg-blue-900/20 dark:peer-checked:bg-blue-900/30 hover:border-border-strong">
                                         <div class="text-center">
                                             <i class="fas fa-cogs text-lg text-green-600 mb-1"></i>
-                                            <div class="text-xs font-medium dark:text-white">DNS Made Easy</div>
+                                            <div class="text-xs font-medium text-foreground">DNS Made Easy</div>
                                             <div class="text-xs text-muted mt-1" id="dnsmadeeasy-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
@@ -326,7 +336,7 @@
                                     <div class="p-2 border-2 border-border rounded-lg cursor-pointer transition-all peer-checked:border-primary peer-checked:bg-blue-50 dark:bg-blue-900/20 dark:peer-checked:bg-blue-900/30 hover:border-border-strong">
                                         <div class="text-center">
                                             <i class="fas fa-network-wired text-lg text-indigo-600 mb-1"></i>
-                                            <div class="text-xs font-medium dark:text-white">NS1</div>
+                                            <div class="text-xs font-medium text-foreground">NS1</div>
                                             <div class="text-xs text-muted mt-1" id="nsone-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
@@ -336,7 +346,7 @@
                                     <div class="p-2 border-2 border-border rounded-lg cursor-pointer transition-all peer-checked:border-primary peer-checked:bg-blue-50 dark:bg-blue-900/20 dark:peer-checked:bg-blue-900/30 hover:border-border-strong">
                                         <div class="text-center">
                                             <i class="fas fa-bolt text-lg text-yellow-600 mb-1"></i>
-                                            <div class="text-xs font-medium dark:text-white">Hurricane Electric</div>
+                                            <div class="text-xs font-medium text-foreground">Hurricane Electric</div>
                                             <div class="text-xs text-muted mt-1" id="he-ddns-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
@@ -346,7 +356,7 @@
                                     <div class="p-2 border-2 border-border rounded-lg cursor-pointer transition-all peer-checked:border-primary peer-checked:bg-blue-50 dark:bg-blue-900/20 dark:peer-checked:bg-blue-900/30 hover:border-border-strong">
                                         <div class="text-center">
                                             <i class="fas fa-sync-alt text-lg text-purple-600 mb-1"></i>
-                                            <div class="text-xs font-medium dark:text-white">Dynu</div>
+                                            <div class="text-xs font-medium text-foreground">Dynu</div>
                                             <div class="text-xs text-muted mt-1" id="dynudns-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
@@ -356,7 +366,7 @@
                                     <div class="p-2 border-2 border-border rounded-lg cursor-pointer transition-all peer-checked:border-primary peer-checked:bg-blue-50 dark:bg-blue-900/20 dark:peer-checked:bg-blue-900/30 hover:border-border-strong">
                                         <div class="text-center">
                                             <i class="fas fa-feather text-lg text-yellow-500 mb-1"></i>
-                                            <div class="text-xs font-medium dark:text-white">DuckDNS</div>
+                                            <div class="text-xs font-medium text-foreground">DuckDNS</div>
                                             <div class="text-xs text-muted mt-1" id="duckdns-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
@@ -366,7 +376,7 @@
                                     <div class="p-2 border-2 border-border rounded-lg cursor-pointer transition-all peer-checked:border-primary peer-checked:bg-blue-50 dark:bg-blue-900/20 dark:peer-checked:bg-blue-900/30 hover:border-border-strong">
                                         <div class="text-center">
                                             <i class="fas fa-terminal text-lg text-gray-600 mb-1"></i>
-                                            <div class="text-xs font-medium dark:text-white">Custom Script</div>
+                                            <div class="text-xs font-medium text-foreground">Custom Script</div>
                                             <div class="text-xs text-muted mt-1" id="custom-script-status">پیکربندی نشده</div>
                                         </div>
                                     </div>
@@ -408,14 +418,14 @@
                                 </label>
                                 <div class="mt-1">
                                     <input type="password" id="cloudflare_api_token" name="cloudflare_api_token" 
-                                           class="block w-full border border-border dark:bg-gray-700 dark:text-white rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
-                                            placeholder="کلید API Cloudflare خود را وارد کنید"
+                                           class="block w-full border border-border bg-input text-foreground rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
+                                           placeholder="کلید API Cloudflare خود را وارد کنید"
                                            autocomplete="new-password" 
                                            spellcheck="false"
                                            data-lpignore="true">
                                 </div>
-                                 <p class="mt-2 text-sm text-muted">
-                                    یک کلید API در <a href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" class="text-primary hover:underline">داشبورد Cloudflare</a> با مجوزهای <strong>Zone:DNS:Edit</strong> ایجاد کنید.
+                                <p class="mt-2 text-sm text-muted">
+                                    یک کلید API در <a href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" rel="noopener" class="text-primary hover:underline">داشبورد Cloudflare</a> با مجوزهای <strong>Zone:DNS:Edit</strong> ایجاد کنید.
                                 </p>
                             </div>
                         </div>
@@ -449,7 +459,7 @@
                                             شناسه کلید دسترسی
                                         </label>
                                         <input type="password" id="route53_access_key_id" name="route53_access_key_id" 
-                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                                placeholder="AKIAIOSFODNN7EXAMPLE"
                                                autocomplete="new-password" 
                                                spellcheck="false"
@@ -460,7 +470,7 @@
                                             کلید دسترسی مخفی
                                         </label>
                                         <input type="password" id="route53_secret_access_key" name="route53_secret_access_key" 
-                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                                placeholder="کلید دسترسی مخفی AWS شما"
                                                autocomplete="new-password" 
                                                spellcheck="false"
@@ -471,7 +481,7 @@
                                             منطقه (اختیاری)
                                         </label>
                                         <input type="text" id="route53_region" name="route53_region" 
-                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                                placeholder="us-east-1" value="us-east-1">
                                     </div>
                                 </div>
@@ -510,7 +520,7 @@
                                             شناسه اشتراک
                                         </label>
                                         <input type="text" id="azure_subscription_id" name="azure_subscription_id" 
-                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                                placeholder="12345678-1234-1234-1234-123456789012">
                                     </div>
                                     <div>
@@ -518,7 +528,7 @@
                                             گروه منابع
                                         </label>
                                         <input type="text" id="azure_resource_group" name="azure_resource_group" 
-                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                                placeholder="my-dns-resource-group">
                                     </div>
                                     <div>
@@ -526,7 +536,7 @@
                                             شناسه کارگزار
                                         </label>
                                         <input type="text" id="azure_tenant_id" name="azure_tenant_id" 
-                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                                placeholder="12345678-1234-1234-1234-123456789012">
                                     </div>
                                     <div>
@@ -534,7 +544,7 @@
                                             شناسه کلاینت
                                         </label>
                                         <input type="text" id="azure_client_id" name="azure_client_id" 
-                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                                placeholder="12345678-1234-1234-1234-123456789012">
                                     </div>
                                     <div class="md:col-span-2">
@@ -542,8 +552,8 @@
                                             رمز کلاینت
                                         </label>
                                         <input type="password" id="azure_client_secret" name="azure_client_secret" 
-                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
-                                                placeholder="رمز کلاینت Azure شما"
+                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
+                                               placeholder="رمز کلاینت Azure شما"
                                                autocomplete="new-password" 
                                                spellcheck="false"
                                                data-lpignore="true">
@@ -584,7 +594,7 @@
                                             شناسه پروژه
                                         </label>
                                         <input type="text" id="google_project_id" name="google_project_id" 
-                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                                placeholder="my-gcp-project-123456">
                                     </div>
                                     <div>
@@ -592,7 +602,7 @@
                                             کلید JSON حساب سرویس
                                         </label>
                                         <textarea id="google_service_account_key" name="google_service_account_key" rows="4"
-                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                                placeholder='Paste your GCP service account JSON key here'></textarea>
                                     </div>
                                 </div>
@@ -631,7 +641,7 @@
                                             API URL
                                         </label>
                                         <input type="url" id="powerdns_api_url" name="powerdns_api_url" 
-                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                                placeholder="https://powerdns.example.com:8081">
                                     </div>
                                     <div>
@@ -639,7 +649,7 @@
                                             API Key
                                         </label>
                                         <input type="password" id="powerdns_api_key" name="powerdns_api_key" 
-                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                                placeholder="Your PowerDNS API key"
                                                autocomplete="new-password" 
                                                spellcheck="false"
@@ -681,7 +691,7 @@
                                             API Token
                                         </label>
                                         <input type="password" id="digitalocean_api_token" name="digitalocean_api_token" 
-                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                                placeholder="Your DigitalOcean API token"
                                                autocomplete="new-password" 
                                                spellcheck="false"
@@ -722,11 +732,90 @@
                                 </label>
                                 <div class="mt-1">
                                     <input type="password" id="vultr_api_key" name="vultr_api_key" 
-                                           class="block w-full border border-border dark:bg-gray-700 dark:text-white rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
+                                           class="block w-full border border-border bg-input text-foreground rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
                                            placeholder="Enter your Vultr API key">
                                 </div>
                                 <p class="mt-2 text-sm text-muted">
                                     Generate an API key from your Vultr control panel with DNS permissions.
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- SOLIDserver Configuration -->
+                    <div id="solidserver-config" class="dns-config hidden">
+                        <div class="border border-orange-200 dark:border-orange-600 rounded-lg p-4 bg-orange-50 dark:bg-orange-900/20">
+                            <div class="flex items-center justify-between mb-4">
+                                <h4 class="text-lg font-medium text-foreground">
+                                    <i class="fas fa-server mr-2 text-blue-600"></i>
+                                    پیکربندی DNS در EfficientIP SOLIDserver
+                                </h4>
+                                <button type="button" id="solidserver-add-account" onclick="showAddAccountModal('solidserver')" 
+                                        class="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md text-white bg-primary hover:bg-secondary focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary">
+                                    <i class="fas fa-plus mr-1"></i>
+                                    افزودن حساب
+                                </button>
+                            </div>
+                            
+                            <!-- Account Management List -->
+                            <div id="solidserver-accounts-list" class="space-y-3 mb-4">
+                                <!-- Accounts will be populated here -->
+                            </div>
+                            
+                            <!-- Legacy single account fields (hidden when multi-account mode is active) -->
+                            <div id="solidserver-legacy-config">
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <div>
+                                        <label for="solidserver_host" class="block text-sm font-medium text-label">
+                                            میزبان
+                                        </label>
+                                        <input type="text" id="solidserver_host" name="solidserver_host" 
+                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
+                                               placeholder="IP یا نام میزبان">
+                                    </div>
+                                    <div>
+                                        <label for="solidserver_username" class="block text-sm font-medium text-label">
+                                            نام کاربری
+                                        </label>
+                                        <input type="text" id="solidserver_username" name="solidserver_username" 
+                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
+                                               placeholder="کاربر API">
+                                    </div>
+                                    <div>
+                                        <label for="solidserver_password" class="block text-sm font-medium text-label">
+                                            رمز عبور
+                                        </label>
+                                        <input type="password" id="solidserver_password" name="solidserver_password" 
+                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
+                                               placeholder="رمز عبور API">
+                                    </div>
+                                    <div>
+                                        <label for="solidserver_dns_name" class="block text-sm font-medium text-label">
+                                            نام سرور DNS
+                                        </label>
+                                        <input type="text" id="solidserver_dns_name" name="solidserver_dns_name" 
+                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
+                                               placeholder="نام DNS در smart architecture سرور SOLIDserver">
+                                    </div>
+                                    <div>
+                                        <label for="solidserver_dnsview_name" class="block text-sm font-medium text-label">
+                                            نام DNS View (اختیاری)
+                                        </label>
+                                        <input type="text" id="solidserver_dnsview_name" name="solidserver_dnsview_name" 
+                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
+                                               placeholder="مثلاً External">
+                                    </div>
+                                    <div>
+                                        <label for="solidserver_propagation_seconds" class="block text-sm font-medium text-label">
+                                            تأخیر انتشار (ثانیه)
+                                        </label>
+                                        <input type="number" id="solidserver_propagation_seconds" name="solidserver_propagation_seconds" 
+                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
+                                               placeholder="120">
+                                    </div>
+                                </div>
+                                <p class="mt-2 text-sm text-muted">
+                                    اتصال REST API به EfficientIP SOLIDserver خود را پیکربندی کنید.
                                 </p>
                             </div>
                         </div>
@@ -745,7 +834,7 @@
                                         API Key
                                     </label>
                                     <input type="password" id="linode_api_key" name="linode_api_key"
-                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                            placeholder="Your Linode API key">
                                 </div>
                             </div>
@@ -768,7 +857,7 @@
                                         API Token
                                     </label>
                                     <input type="password" id="hetzner-cloud_api_token" name="hetzner-cloud_api_token"
-                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                            placeholder="Your Hetzner Cloud DNS API token">
                                 </div>
                             </div>
@@ -791,7 +880,7 @@
                                         API Key
                                     </label>
                                     <input type="password" id="arvancloud_api_key" name="arvancloud_api_key"
-                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                            placeholder="Your ArvanCloud API key">
                                 </div>
                             </div>
@@ -814,7 +903,7 @@
                                         API Token
                                     </label>
                                     <input type="password" id="infomaniak_api_token" name="infomaniak_api_token"
-                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                            placeholder="Your Infomaniak API token">
                                 </div>
                             </div>
@@ -837,7 +926,7 @@
                                         API URL
                                     </label>
                                     <input type="text" id="acme-dns_api_url" name="acme-dns_api_url"
-                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                            placeholder="https://auth.acme-dns.io">
                                 </div>
                                 <div>
@@ -845,7 +934,7 @@
                                         Subdomain
                                     </label>
                                     <input type="text" id="acme-dns_subdomain" name="acme-dns_subdomain"
-                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                            placeholder="The ACME-DNS subdomain">
                                 </div>
                                 <div>
@@ -853,7 +942,7 @@
                                         Username
                                     </label>
                                     <input type="text" id="acme-dns_username" name="acme-dns_username"
-                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                            placeholder="The ACME-DNS username">
                                 </div>
                                 <div>
@@ -861,7 +950,7 @@
                                         Password
                                     </label>
                                     <input type="password" id="acme-dns_password" name="acme-dns_password"
-                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                            placeholder="The ACME-DNS password">
                                 </div>
                             </div>
@@ -884,7 +973,7 @@
                                         API Token
                                     </label>
                                     <input type="password" id="desec_api_token" name="desec_api_token"
-                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                            placeholder="Your deSEC API token (desec.io, Token Management)">
                                 </div>
                             </div>
@@ -907,7 +996,7 @@
                                         API Secret Key
                                     </label>
                                     <input type="password" id="scaleway_application_token" name="scaleway_application_token"
-                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                            placeholder="Your Scaleway API Secret Key">
                                 </div>
                             </div>
@@ -930,7 +1019,7 @@
                                         Client Token
                                     </label>
                                     <input type="password" id="edgedns_client_token" name="edgedns_client_token"
-                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                            placeholder="akab-XXXXXXXXXXXXXXXX-XXXXXXXXXXXXXXXX">
                                 </div>
                                 <div>
@@ -938,7 +1027,7 @@
                                         Client Secret
                                     </label>
                                     <input type="password" id="edgedns_client_secret" name="edgedns_client_secret"
-                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                            placeholder="Your Akamai client secret">
                                 </div>
                                 <div>
@@ -946,7 +1035,7 @@
                                         Access Token
                                     </label>
                                     <input type="password" id="edgedns_access_token" name="edgedns_access_token"
-                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                            placeholder="akab-XXXXXXXXXXXXXXXX-XXXXXXXXXXXXXXXX">
                                 </div>
                                 <div>
@@ -954,7 +1043,7 @@
                                         API Host
                                     </label>
                                     <input type="text" id="edgedns_host" name="edgedns_host"
-                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                            placeholder="akab-XXXX.luna.akamaiapis.net">
                                 </div>
                             </div>
@@ -980,7 +1069,7 @@
                                         API Token
                                     </label>
                                     <input type="password" id="gandi_api_token" name="gandi_api_token" 
-                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                            placeholder="Your Gandi LiveDNS API token">
                                 </div>
                             </div>
@@ -1003,7 +1092,7 @@
                                         Endpoint
                                     </label>
                                     <select id="ovh_endpoint" name="ovh_endpoint" 
-                                            class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white">
+                                            class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground">
                                         <option value="">Select endpoint</option>
                                         <option value="ovh-eu">ovh-eu (Europe)</option>
                                         <option value="ovh-us">ovh-us (US)</option>
@@ -1019,7 +1108,7 @@
                                         Application Key
                                     </label>
                                     <input type="password" id="ovh_application_key" name="ovh_application_key" 
-                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                            placeholder="Your application key">
                                 </div>
                                 <div>
@@ -1027,7 +1116,7 @@
                                         Application Secret
                                     </label>
                                     <input type="password" id="ovh_application_secret" name="ovh_application_secret" 
-                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                            placeholder="Your application secret">
                                 </div>
                                 <div>
@@ -1035,7 +1124,7 @@
                                         Consumer Key
                                     </label>
                                     <input type="password" id="ovh_consumer_key" name="ovh_consumer_key" 
-                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                            placeholder="Your consumer key">
                                 </div>
                             </div>
@@ -1058,7 +1147,7 @@
                                         Username
                                     </label>
                                     <input type="text" id="namecheap_username" name="namecheap_username" 
-                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                            placeholder="Your Namecheap username">
                                 </div>
                                 <div>
@@ -1066,7 +1155,7 @@
                                         API Key
                                     </label>
                                     <input type="password" id="namecheap_api_key" name="namecheap_api_key" 
-                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                           class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                            placeholder="Your Namecheap API key">
                                 </div>
                             </div>
@@ -1104,7 +1193,7 @@
                                             Nameserver
                                         </label>
                                         <input type="text" id="rfc2136_nameserver" name="rfc2136_nameserver" 
-                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                                placeholder="ns.example.com">
                                     </div>
                                     <div>
@@ -1112,7 +1201,7 @@
                                             TSIG Key Name
                                         </label>
                                         <input type="text" id="rfc2136_tsig_key" name="rfc2136_tsig_key" 
-                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                                placeholder="mykey">
                                     </div>
                                     <div>
@@ -1120,7 +1209,7 @@
                                             TSIG Secret
                                         </label>
                                         <input type="password" id="rfc2136_tsig_secret" name="rfc2136_tsig_secret" 
-                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                               class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                                placeholder="Base64-encoded secret">
                                     </div>
                                     <div>
@@ -1128,7 +1217,7 @@
                                             TSIG Algorithm (Optional)
                                         </label>
                                         <select id="rfc2136_tsig_algorithm" name="rfc2136_tsig_algorithm" 
-                                                class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white">
+                                                class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground">
                                             <option value="">Default (HMAC-MD5)</option>
                                             <option value="HMAC-MD5">HMAC-MD5</option>
                                             <option value="HMAC-SHA1">HMAC-SHA1</option>
@@ -1160,11 +1249,11 @@
                                     API Token
                                 </label>
                                 <input type="password" id="hetzner_api_token" name="hetzner_api_token" 
-                                       class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                                       class="mt-1 block w-full border border-border rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground"
                                        placeholder="Your Hetzner DNS API token">
                             </div>
                             <p class="mt-2 text-sm text-muted">
-                                Create an API token at <a href="https://dns.hetzner.com/" target="_blank" class="text-primary hover:underline">Hetzner DNS Console</a> with DNS zone permissions.
+                                Create an API token at <a href="https://dns.hetzner.com/" target="_blank" rel="noopener" class="text-primary hover:underline">Hetzner DNS Console</a> with DNS zone permissions.
                             </p>
                         </div>
                     </div>
@@ -1182,7 +1271,7 @@
                                         API Key
                                     </label>
                                     <input type="password" id="porkbun_api_key" name="porkbun_api_key" 
-                                           class="mt-1 block w-full border border-border dark:bg-gray-700 dark:text-white rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
+                                           class="mt-1 block w-full border border-border bg-input text-foreground rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
                                            placeholder="Your Porkbun API key">
                                 </div>
                                 <div>
@@ -1190,12 +1279,12 @@
                                         Secret Key
                                     </label>
                                     <input type="password" id="porkbun_secret_key" name="porkbun_secret_key" 
-                                           class="mt-1 block w-full border border-border dark:bg-gray-700 dark:text-white rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
+                                           class="mt-1 block w-full border border-border bg-input text-foreground rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
                                            placeholder="Your Porkbun secret key">
                                 </div>
                             </div>
                             <p class="mt-2 text-sm text-muted">
-                                Get your API credentials from <a href="https://porkbun.com/account/api" target="_blank" class="text-primary hover:underline">Porkbun API page</a>.
+                                Get your API credentials from <a href="https://porkbun.com/account/api" target="_blank" rel="noopener" class="text-primary hover:underline">Porkbun API page</a>.
                             </p>
                         </div>
                     </div>
@@ -1213,7 +1302,7 @@
                                         API Key
                                     </label>
                                     <input type="password" id="godaddy_api_key" name="godaddy_api_key" 
-                                           class="mt-1 block w-full border border-border dark:bg-gray-700 dark:text-white rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
+                                           class="mt-1 block w-full border border-border bg-input text-foreground rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
                                            placeholder="Your GoDaddy API key">
                                 </div>
                                 <div>
@@ -1221,12 +1310,12 @@
                                         API Secret
                                     </label>
                                     <input type="password" id="godaddy_secret" name="godaddy_secret" 
-                                           class="mt-1 block w-full border border-border dark:bg-gray-700 dark:text-white rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
+                                           class="mt-1 block w-full border border-border bg-input text-foreground rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
                                            placeholder="Your GoDaddy API secret">
                                 </div>
                             </div>
                             <p class="mt-2 text-sm text-muted">
-                                Create API credentials at <a href="https://developer.godaddy.com/keys" target="_blank" class="text-primary hover:underline">GoDaddy Developer Portal</a>.
+                                Create API credentials at <a href="https://developer.godaddy.com/keys" target="_blank" rel="noopener" class="text-primary hover:underline">GoDaddy Developer Portal</a>.
                             </p>
                         </div>
                     </div>
@@ -1244,7 +1333,7 @@
                                         Username
                                     </label>
                                     <input type="text" id="he_ddns_username" name="he_ddns_username" 
-                                           class="mt-1 block w-full border border-border dark:bg-gray-700 dark:text-white rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
+                                           class="mt-1 block w-full border border-border bg-input text-foreground rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
                                            placeholder="Your Hurricane Electric username">
                                 </div>
                                 <div>
@@ -1252,12 +1341,12 @@
                                         Password
                                     </label>
                                     <input type="password" id="he_ddns_password" name="he_ddns_password" 
-                                           class="mt-1 block w-full border border-border dark:bg-gray-700 dark:text-white rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
+                                           class="mt-1 block w-full border border-border bg-input text-foreground rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
                                            placeholder="Your Hurricane Electric password">
                                 </div>
                             </div>
                             <p class="mt-2 text-sm text-muted">
-                                Use your <a href="https://dns.he.net/" target="_blank" class="text-primary hover:underline">Hurricane Electric DNS</a> account credentials.
+                                Use your <a href="https://dns.he.net/" target="_blank" rel="noopener" class="text-primary hover:underline">Hurricane Electric DNS</a> account credentials.
                             </p>
                         </div>
                     </div>
@@ -1274,11 +1363,11 @@
                                     API Token
                                 </label>
                                 <input type="password" id="dynudns_token" name="dynudns_token"
-                                       class="mt-1 block w-full border border-border dark:bg-gray-700 dark:text-white rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
+                                       class="mt-1 block w-full border border-border bg-input text-foreground rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
                                        placeholder="Your Dynu API token">
                             </div>
                             <p class="mt-2 text-sm text-muted">
-                                Generate an API token at <a href="https://www.dynu.com/en-US/ControlPanel/APICredentials" target="_blank" class="text-primary hover:underline">Dynu Control Panel</a>.
+                                Generate an API token at <a href="https://www.dynu.com/en-US/ControlPanel/APICredentials" target="_blank" rel="noopener" class="text-primary hover:underline">Dynu Control Panel</a>.
                             </p>
                         </div>
                     </div>
@@ -1309,7 +1398,7 @@
                                         Account Token
                                     </label>
                                     <input type="password" id="duckdns_api_token" name="duckdns_api_token"
-                                           class="mt-1 block w-full border border-border dark:bg-gray-700 dark:text-white rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
+                                           class="mt-1 block w-full border border-border bg-input text-foreground rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
                                            placeholder="UUID-format token from your DuckDNS account page">
                                 </div>
                             </div>
@@ -1347,7 +1436,7 @@
                                         Auth Hook Script Path
                                     </label>
                                     <input type="text" id="custom-script_auth_hook" name="custom-script_auth_hook"
-                                           class="mt-1 block w-full border border-border dark:bg-gray-700 dark:text-white rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
+                                           class="mt-1 block w-full border border-border bg-input text-foreground rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
                                            placeholder="/usr/local/bin/certmate-dns-auth.sh">
                                 </div>
                                 <div class="mt-3">
@@ -1355,7 +1444,7 @@
                                         Cleanup Hook Script Path - Optional
                                     </label>
                                     <input type="text" id="custom-script_cleanup_hook" name="custom-script_cleanup_hook"
-                                           class="mt-1 block w-full border border-border dark:bg-gray-700 dark:text-white rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
+                                           class="mt-1 block w-full border border-border bg-input text-foreground rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
                                            placeholder="/usr/local/bin/certmate-dns-cleanup.sh">
                                 </div>
                             </div>
@@ -1393,7 +1482,7 @@
                                         API Key
                                     </label>
                                     <input type="password" id="nsone_api_key" name="nsone_api_key"
-                                           class="mt-1 block w-full border border-border dark:bg-gray-700 dark:text-white rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
+                                           class="mt-1 block w-full border border-border bg-input text-foreground rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
                                            placeholder="Your NS1 API key">
                                 </div>
                                 <p class="mt-2 text-sm text-muted">
@@ -1431,7 +1520,7 @@
                                             API Key
                                         </label>
                                         <input type="password" id="dnsmadeeasy_api_key" name="dnsmadeeasy_api_key"
-                                               class="mt-1 block w-full border border-border dark:bg-gray-700 dark:text-white rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
+                                               class="mt-1 block w-full border border-border bg-input text-foreground rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
                                                placeholder="Your DNS Made Easy API key">
                                     </div>
                                     <div>
@@ -1439,7 +1528,7 @@
                                             Secret Key
                                         </label>
                                         <input type="password" id="dnsmadeeasy_secret_key" name="dnsmadeeasy_secret_key"
-                                               class="mt-1 block w-full border border-border dark:bg-gray-700 dark:text-white rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
+                                               class="mt-1 block w-full border border-border bg-input text-foreground rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary"
                                                placeholder="Your DNS Made Easy secret key">
                                     </div>
                                 </div>

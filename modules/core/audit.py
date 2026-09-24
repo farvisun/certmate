@@ -7,9 +7,8 @@ import os
 import logging
 import json
 import threading
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from datetime import datetime
-from collections import deque
 from .utils import utc_now
 from . import audit_chain
 from . import audit_signing
@@ -17,13 +16,76 @@ from typing import Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 
+# What separates the log line's prefix from the JSON entry, in both the form
+# the tail scan counts (bytes) and the form the parse splits on (text). One
+# definition so the counting and the parsing cannot drift: a scan that counted
+# something the parse did not accept would stop the read early and silently
+# return fewer entries than were asked for.
+_ENTRY_MARKER_TEXT = ' - INFO - '
+_ENTRY_MARKER = _ENTRY_MARKER_TEXT.encode('utf-8')
+
+# Rotation defaults for the human-readable audit .log (#443). Same shape as the
+# application log's (#431), and deliberately NOT applied to the hash chain:
+# `certificate_audit.chain.jsonl` is append-only and tamper-evident, and naive
+# rotation breaks the property it exists for (see #437).
+DEFAULT_AUDIT_LOG_MAX_BYTES = 10 * 1024 * 1024   # 10 MB per file
+DEFAULT_AUDIT_LOG_BACKUP_COUNT = 5               # ~60 MB ceiling
+
+
+def _int_env(name: str, default: int) -> int:
+    """Read a non-negative int from the environment, ignoring anything
+    unusable (0 is meaningful: it is how ``logging`` spells "never roll"). A
+    typo in a log-rotation setting must not take the application down."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning("Ignoring %s=%r (not an integer); using %d", name, raw, default)
+        return default
+    if value < 0:
+        logger.warning("Ignoring %s=%r (negative); using %d", name, raw, default)
+        return default
+    return value
+
+
+
+def _lock_file(fh) -> None:
+    """Take an exclusive advisory lock on an open file, where the platform has
+    them. POSIX only: the shipped image is Linux and the lock is advisory, so a
+    platform without flock degrades to the previous behaviour rather than
+    refusing to log."""
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - non-POSIX
+        return
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+    except OSError as e:  # pragma: no cover - e.g. a filesystem without locking
+        logger.debug(f"Audit chain: advisory lock unavailable ({e}); continuing")
+
+
+def _unlock_file(fh) -> None:
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - non-POSIX
+        return
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    except OSError:  # pragma: no cover
+        pass
+
 
 class AuditLogger:
     """Centralized audit logging for certificate operations."""
 
     def __init__(self, audit_log_dir: Path, chain_dir: Optional[Path] = None,
                  enable_chain: bool = True, signer=None,
-                 checkpoint_interval: int = 100):
+                 checkpoint_interval: int = 100,
+                 max_bytes: Optional[int] = None,
+                 backup_count: Optional[int] = None,
+                 audit_sink=None):
         """
         Initialize Audit Logger.
 
@@ -36,41 +98,102 @@ class AuditLogger:
                 under the (backup-excluded) ``logs`` tree.
             enable_chain: write the hash chain (default True). Disable via the
                 ``CERTMATE_AUDIT_CHAIN=0`` environment variable as a kill switch.
+            max_bytes / backup_count: rotation of the human-readable ``.log``
+                (#443). Default to ``CERTMATE_AUDIT_LOG_MAX_BYTES`` /
+                ``CERTMATE_AUDIT_LOG_BACKUP_COUNT``, then to 10 MB × 5.
+                ``max_bytes=0`` disables rotation, which is how ``logging`` spells
+                it and the only way to get an unbounded file back.
         """
         self.audit_log_dir = Path(audit_log_dir)
-        self.audit_log_dir.mkdir(parents=True, exist_ok=True)
         self.audit_log_file = self.audit_log_dir / "certificate_audit.log"
+        # Optional SIEM sink (#474): each audit entry is also streamed to an
+        # external collector. Failure-isolated; may be wired after construction.
+        self.audit_sink = audit_sink
 
-        # Configure audit file handler
-        self.file_handler = logging.FileHandler(self.audit_log_file)
-        self.file_handler.setFormatter(
-            logging.Formatter(
-                '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                datefmt='%Y-%m-%d %H:%M:%S'
+        if max_bytes is None:
+            max_bytes = _int_env('CERTMATE_AUDIT_LOG_MAX_BYTES',
+                                 DEFAULT_AUDIT_LOG_MAX_BYTES)
+        if backup_count is None:
+            backup_count = _int_env('CERTMATE_AUDIT_LOG_BACKUP_COUNT',
+                                    DEFAULT_AUDIT_LOG_BACKUP_COUNT)
+
+        # Configure the audit file handler. Rotating, not plain (#443): this
+        # file grew without bound, and #431's fix covered only the application
+        # log — this handler is built here and was never reached by it.
+        #
+        # Safe to rotate because it carries no integrity property: it is
+        # human-readable text, not hashed, not chained, and the `logs/` tree is
+        # excluded from backups. The verifiable artifact is the hash chain in
+        # `data/audit/`, which is emphatically NOT rotated (see #437).
+        #
+        # RotatingFileHandler is not multi-process safe; the container runs
+        # gunicorn with `--workers 1 --threads 8`, one process, which is the
+        # same single-writer assumption the hash chain already depends on.
+        self.file_handler = None
+        try:
+            self.audit_log_dir.mkdir(parents=True, exist_ok=True)
+            self.file_handler = RotatingFileHandler(
+                str(self.audit_log_file),
+                maxBytes=max_bytes,
+                backupCount=backup_count,
+                encoding='utf-8',
             )
-        )
+            self.file_handler.setFormatter(
+                logging.Formatter(
+                    '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                    datefmt='%Y-%m-%d %H:%M:%S'
+                )
+            )
+        except OSError as e:
+            # Previously this raised out of __init__, which the factory calls
+            # unguarded — an unwritable logs directory took the whole
+            # application down over a *log file*. The hash chain below is the
+            # record that matters and is written elsewhere; keep going.
+            logger.error(
+                "Could not open audit log file %s (%s); the human-readable "
+                "audit log is disabled. The tamper-evident chain is unaffected.",
+                self.audit_log_file, e,
+            )
 
-        # Create audit logger
+        # Create audit logger. `propagate` is deliberately left on: audit lines
+        # also reach the root handlers, i.e. stdout, which is what `docker logs`
+        # and every log shipper read. That is not duplication to be silenced —
+        # it is the reason the unwritable-directory case above is survivable,
+        # and turning it off would remove audit entries from the stream some
+        # operators collect them from.
         self.audit_logger = logging.getLogger('certmate.audit')
-        self.audit_logger.addHandler(self.file_handler)
+        if self.file_handler is not None:
+            self.audit_logger.addHandler(self.file_handler)
         self.audit_logger.setLevel(logging.INFO)
 
-        # Tamper-evident hash chain (Phase 2). One writer, one local file; the
-        # lock guards the shared next-seq/last-hash state because Flask request
-        # threads and the APScheduler renewal thread share this instance.
+        # Tamper-evident hash chain (Phase 2). The threading lock guards the
+        # shared next-seq/last-hash state across Flask request threads and the
+        # APScheduler renewal thread. It cannot see a SECOND PROCESS: two
+        # instances sharing a data directory each recover the same `_next_seq`
+        # at startup and then both append with it, producing duplicate seqs.
+        # That is not hypothetical — it happened on 2026-06-25, two `migrate`
+        # entries at an identical timestamp, and left the chain permanently
+        # unverifiable. CertMate is single-instance by design (the Helm chart
+        # refuses a second replica), but "by design" is not an enforcement, so
+        # the append also takes an advisory file lock and re-reads the tail
+        # whenever the file has grown underneath it.
         self._chain_enabled = enable_chain and os.environ.get('CERTMATE_AUDIT_CHAIN', '1') != '0'
         self._chain_dir = Path(chain_dir) if chain_dir is not None else self.audit_log_dir
         self.audit_chain_file = self._chain_dir / audit_chain.CHAIN_FILENAME
         self._chain_lock = threading.Lock()
         self._next_seq = 0
         self._last_hash = audit_chain.GENESIS_PREV
+        # Size of the chain file as of our last append. A mismatch under the
+        # file lock means somebody else wrote, so our cached seq/hash are stale.
+        self._chain_size = 0
         if self._chain_enabled:
             self._recover_chain_state()
 
-        # Phase 3: signed checkpoints. Every `checkpoint_interval` entries (and
-        # on demand / graceful shutdown) the current chain head is signed and
-        # appended to a checkpoint file, giving a third party signed anchors to
-        # verify an exported bundle against. No-op when no signer is wired.
+        # Phase 3: signed checkpoints. Every `checkpoint_interval` entries (or
+        # when write_checkpoint() is called directly) the current chain head is
+        # signed and appended to a checkpoint file, giving a third party signed
+        # anchors to verify an exported bundle against. No-op when no signer is
+        # wired.
         self._signer = signer
         self._checkpoint_interval = max(1, int(checkpoint_interval))
         self.audit_checkpoint_file = self._chain_dir / audit_chain.CHECKPOINT_FILENAME
@@ -102,6 +225,10 @@ class AuditLogger:
             if last_good is not None:
                 self._next_seq = last_good['seq'] + 1
                 self._last_hash = last_good['hash']
+            try:
+                self._chain_size = self.audit_chain_file.stat().st_size
+            except OSError:
+                self._chain_size = 0
         except Exception as e:
             # Recovery runs inside AuditLogger.__init__, which the factory calls
             # unguarded — it must NEVER abort app startup (that would take the
@@ -109,6 +236,28 @@ class AuditLogger:
             # rather than fork it from a wrong baseline or raise.
             logger.error(f"Could not recover audit chain state; disabling chain: {e}")
             self._chain_enabled = False
+
+
+    def _refresh_if_another_writer_appended(self) -> None:
+        """Re-read the chain tail when the file grew since our last append.
+
+        Cheap in the normal case: one stat, and the size matches. When it does
+        not, a second process has appended and our cached ``_next_seq`` /
+        ``_last_hash`` describe a line that is no longer the head — writing
+        from them is exactly how duplicate seqs are produced. Must be called
+        with the advisory file lock held.
+        """
+        try:
+            size = self.audit_chain_file.stat().st_size
+        except OSError:
+            return
+        if size == self._chain_size:
+            return
+        logger.warning(
+            "Audit chain grew from %s to %s bytes underneath this process — "
+            "another writer is appending to the same file. Re-reading the head "
+            "before appending.", self._chain_size, size)
+        self._recover_chain_state()
 
     def _chain_append(self, entry: Dict[str, Any]) -> None:
         """Append one audit entry to the hash chain. Best-effort and isolated:
@@ -119,12 +268,24 @@ class AuditLogger:
             return
         try:
             with self._chain_lock:
-                seq = self._next_seq
-                line = audit_chain.make_line(seq, entry, self._last_hash)
                 with open(self.audit_chain_file, 'a', encoding='utf-8') as f:
-                    f.write(json.dumps(line, ensure_ascii=False) + '\n')
-                    f.flush()
-                    os.fsync(f.fileno())
+                    # Advisory lock FIRST, then look at the file. Another
+                    # process holding it may be mid-append; taking the lock
+                    # before measuring is what makes the staleness check sound.
+                    _lock_file(f)
+                    try:
+                        self._refresh_if_another_writer_appended()
+                        seq = self._next_seq
+                        line = audit_chain.make_line(seq, entry, self._last_hash)
+                        f.write(json.dumps(line, ensure_ascii=False) + '\n')
+                        f.flush()
+                        os.fsync(f.fileno())
+                        try:
+                            self._chain_size = f.tell()
+                        except OSError:
+                            self._chain_size = 0
+                    finally:
+                        _unlock_file(f)
                 # Advance only after the line is durably written.
                 self._next_seq = seq + 1
                 self._last_hash = line['hash']
@@ -139,8 +300,17 @@ class AuditLogger:
     def write_checkpoint(self) -> Optional[Dict[str, Any]]:
         """Sign the current chain head and append it to the checkpoint file.
         No-op (returns None) without a signer or with an empty chain. Best-effort:
-        a checkpoint failure never breaks audit logging. Call on graceful
-        shutdown to seal the tail."""
+        a checkpoint failure never breaks audit logging.
+
+        Two callers: the every-`checkpoint_interval`-entries path in the
+        append, and `stop_background_work` on a clean shutdown, which seals
+        whatever arrived since the last one. This docstring used to say
+        nothing called it on shutdown — it was accurate, then the caller was
+        added and the sentence was not, which is the shape of defect the
+        release that added the caller spent its time removing.
+
+        A crash or a SIGKILL still leaves a tail: work that must never delay a
+        kill must not run on one. `docs/compliance.md` says so."""
         if self._signer is None or not getattr(self._signer, 'available', False):
             return None
         try:
@@ -195,7 +365,13 @@ class AuditLogger:
         instance fingerprint, public key, seq range and head hash; the signature
         is over the canonical manifest, which (via head_hash) transitively
         commits to every entry. ``bundle_signature`` is None when no signer is
-        wired (the entries + chain are still verifiable, just not attributed)."""
+        wired (the entries + chain are still verifiable, just not attributed).
+
+        This one legitimately holds the slice in memory: the bundle *is* the
+        entries, and the manifest's head_hash is only known after the last of
+        them. ``from_seq`` / ``to_seq`` are how a caller bounds it — an
+        anchored slice verifies on its own (#441), so exporting a large chain
+        in pieces is a supported workflow rather than a workaround."""
         with self._chain_lock:
             records = audit_chain.load_records(self.audit_chain_file, from_seq, to_seq)
         signed = self._signer is not None and getattr(self._signer, 'available', False)
@@ -217,15 +393,154 @@ class AuditLogger:
             'bundle_signature': bundle_signature,
         }
 
+    def has_checkpoints(self) -> bool:
+        """True if at least one signed checkpoint has been written. Used to tell
+        a genuinely fresh instance (no chain, no checkpoints — benign) from a
+        chain file that was DELETED after checkpoints attested it existed
+        (tamper). Deliberately propagates
+        :class:`audit_chain.CheckpointReadError`: an UNREADABLE checkpoint
+        file must fail closed at the caller, never read as "no checkpoints"."""
+        return bool(audit_chain.read_checkpoints(self.audit_checkpoint_file))
+
     def verify_chain(self) -> Dict[str, Any]:
-        """Verify this instance's hash chain. Thin wrapper over
-        :func:`audit_chain.verify_chain` for in-process callers and tests.
+        """Verify this instance's hash chain. Wraps
+        :func:`audit_chain.verify_chain` (internal consistency) and then, when a
+        signer is wired, cross-checks the chain against the latest signed
+        checkpoint — a fail-closed anchor.
+
+        The bare hash chain cannot, on its own, detect a tail truncation or a
+        wholesale rewrite (anyone who can write the file can recompute it). The
+        signed checkpoints were being WRITTEN but never READ, so that gap stood
+        open. Reading them back here means an attacker WITHOUT the signing key
+        can no longer roll the chain back to, or rewrite it at/below, the last
+        checkpoint without detection: they cannot forge a matching signed
+        checkpoint. (Binding an operator who HOLDS the key still needs off-box
+        anchoring — see the audit_chain / audit_signing docstrings; this does
+        not claim to provide that.)
 
         Takes the append lock so a verify that races an in-flight append does
         not observe a half-written final line and report a spurious truncation
         (the standalone CLI verifier cannot take the lock and accepts that)."""
         with self._chain_lock:
-            return audit_chain.verify_chain(self.audit_chain_file)
+            result = audit_chain.verify_chain(self.audit_chain_file)
+            if result.get("ok") and result.get("anchored"):
+                self._verify_anchor_signature(result)
+            if result.get("ok"):
+                self._cross_check_latest_checkpoint(result)
+            return result
+
+    def _verify_anchor_signature(self, result: Dict[str, Any]) -> None:
+        """An anchored chain is only as good as the anchor's signature (#445).
+
+        The structural check in audit_chain proved the chain continues from the
+        hash the anchor states. This proves the *instance* said so: without it,
+        anyone able to write two files could delete history and hand the
+        verifier a matching anchor, and verification would pass."""
+        if self._signer is None or not getattr(self._signer, 'available', False):
+            result["ok"] = False
+            result["reason"] = (
+                "the chain is anchored (entries were pruned) but this instance "
+                "has no signing key, so the anchor cannot be verified")
+            return
+        pubkey = self._signer.public_key_pem()
+        anchor_path = audit_chain.anchor_path_for(self.audit_chain_file)
+        try:
+            anchor = audit_chain.read_anchor(anchor_path)
+        except audit_chain.AnchorReadError as e:
+            result["ok"] = False
+            result["reason"] = str(e)
+            return
+        if anchor is None:
+            # It was there a moment ago (verify_chain read it) and is not now.
+            # Fail closed rather than raise: a chain that has just lost the file
+            # attesting its own prune is not a chain to call intact.
+            result["ok"] = False
+            result["reason"] = (
+                "the chain anchor disappeared while verifying: integrity cannot "
+                "be established")
+            return
+        signature = anchor.get("signature")
+        if not signature or not pubkey or not audit_signing.verify_signature(
+            pubkey, signature, audit_chain.anchor_signing_bytes(anchor)
+        ):
+            result["ok"] = False
+            result["reason"] = (
+                f"the anchor at seq {anchor.get('anchor_seq')} is not signed by "
+                f"this instance: entries were removed without a valid archive "
+                f"attestation")
+            return
+        result["anchor_signature_ok"] = True
+
+    def _cross_check_latest_checkpoint(self, result: Dict[str, Any]) -> None:
+        """Cross-check an internally-consistent chain against the newest signed
+        checkpoint that verifies under the current key. Mutates *result*:
+        always sets ``checkpoint_verified`` / ``checkpoint_reason``, and flips
+        ``ok`` to False if the chain diverges from the checkpoint."""
+        result["checkpoint_verified"] = False
+        if self._signer is None or not getattr(self._signer, "available", False):
+            result["checkpoint_reason"] = "no signer; checkpoints not cross-checked"
+            return
+        pubkey = self._signer.public_key_pem()
+        if not pubkey:
+            result["checkpoint_reason"] = "signer has no public key"
+            return
+        try:
+            checkpoints = audit_chain.read_checkpoints(self.audit_checkpoint_file)
+        except audit_chain.CheckpointReadError as e:
+            # Fail closed: an unreadable anchor means the chain CANNOT be
+            # verified against it, which must not read as "intact".
+            result["ok"] = False
+            result["checkpoint_unreadable"] = True
+            result["checkpoint_reason"] = str(e)
+            result["reason"] = "checkpoint file unreadable — cannot verify integrity"
+            return
+        if not checkpoints:
+            result["checkpoint_reason"] = "no checkpoints written yet"
+            return
+        # A prune (#445) removes entries that older checkpoints attest to, and
+        # those checkpoints are kept as evidence — but cross-checking against
+        # one of them would report the archived prefix as a truncation. That is
+        # the failure this whole design exists to avoid: routine maintenance
+        # raising a tamper alert. Checkpoints below the anchor are attested by
+        # the archive instead, so only those at or above it are usable here.
+        anchor_seq = result.get("anchor_seq")
+        if anchor_seq is not None:
+            usable = [cp for cp in checkpoints if cp.get("seq", -1) >= anchor_seq]
+            if not usable:
+                result["checkpoint_reason"] = (
+                    f"every checkpoint predates the archived prefix (seq < "
+                    f"{anchor_seq}); the archive attests those entries")
+                return
+            checkpoints = usable
+        # Newest checkpoint whose signature verifies under the current key. A
+        # checkpoint that does not verify is ignored (e.g. key rotation, or a
+        # chain imported from another instance) rather than treated as tamper,
+        # to avoid false positives; the newest VERIFIED one is the anchor.
+        latest = None
+        for cp in reversed(checkpoints):
+            sig = cp.get("signature")
+            if sig and audit_signing.verify_signature(
+                pubkey, sig, audit_chain.checkpoint_signing_bytes(cp)
+            ):
+                latest = cp
+                break
+        if latest is None:
+            result["checkpoint_reason"] = (
+                "no checkpoint signature verifies under the current key "
+                "(key rotated, or checkpoints from another instance)"
+            )
+            return
+        # Streamed: cross_check_checkpoint scans for one seq and stops, so the
+        # cross-check costs one record of memory, not the whole chain (#444).
+        records = audit_chain.iter_records(self.audit_chain_file)
+        check = audit_chain.cross_check_checkpoint(records, latest)
+        result["checkpoint_verified"] = bool(check.get("ok"))
+        result["checkpoint_seq"] = latest.get("seq")
+        result["checkpoint_reason"] = check.get("reason")
+        if not check.get("ok"):
+            result["ok"] = False
+            result["reason"] = check.get("reason")
+            result["error_seq"] = latest.get("seq")
 
     def log_operation(
         self,
@@ -288,6 +603,14 @@ class AuditLogger:
             # Mirror into the tamper-evident hash chain. Isolated: a chain
             # failure must never break audit logging or the audited operation.
             self._chain_append(audit_entry)
+            # Stream to the SIEM sink (#474), if configured. The sink is itself
+            # failure-isolated, but guard here too so a sink bug can never break
+            # audit logging.
+            if self.audit_sink is not None:
+                try:
+                    self.audit_sink.send(audit_entry)
+                except Exception as sink_err:  # pragma: no cover - defensive
+                    logger.warning("Audit sink error (isolated): %s", sink_err)
 
         except Exception as e:
             logger.error(f"Failed to write audit log: {e}")
@@ -485,6 +808,7 @@ class AuditLogger:
         local_auth_enabled_after: bool,
         user: Optional[str] = None,
         ip_address: Optional[str] = None,
+        confirm_unauthenticated: bool = False,
     ) -> None:
         """Log a change to the local-auth toggle."""
         self.log_operation(
@@ -495,6 +819,9 @@ class AuditLogger:
             details={
                 'before': bool(local_auth_enabled_before),
                 'after': bool(local_auth_enabled_after),
+                # True when the admin went past the one-way-door guard on
+                # purpose (#587): the instance now runs without authentication.
+                'confirm_unauthenticated': confirm_unauthenticated,
             },
             user=user,
             ip_address=ip_address,
@@ -662,6 +989,107 @@ class AuditLogger:
             ip_address=ip_address,
         )
 
+    #: Fields of an audit entry a caller may narrow on. Declared rather than
+    #: accepting arbitrary keys: a filter on a field that does not exist would
+    #: match nothing and read as "there is none of that", which is the exact
+    #: answer this method exists to stop giving wrongly.
+    SEARCHABLE_FIELDS = ('operation', 'resource_type', 'resource_id',
+                         'user', 'status')
+
+    def search_entries(self, limit: int = 100, **filters) -> Dict[str, Any]:
+        """Recent entries matching *filters*, newest first, and whether the
+        search reached the beginning of the log.
+
+        ``get_recent_entries`` reads a tail and stops once it has `limit`
+        ENTRIES. Filtering its result would mean "matches among the last
+        hundred", so asking an instance with history about its bootstrap —
+        the thing `docs/compliance.md` tells operators to go and look for —
+        would return nothing and read as "there were none". A filter that can
+        only answer about the tail is worse than no filter.
+
+        So the stop condition counts MATCHES. Worst case it walks the whole
+        file, which is the correct cost when the matches are old or absent,
+        and ``complete`` says which of those happened: True means the scan
+        reached the start, so an empty result means there are none. False
+        means it stopped at `limit` matches and there may be older ones.
+
+        Unknown filter keys raise rather than being ignored: a typo that
+        silently matched everything would be a worse answer than an error.
+        """
+        for key in filters:
+            if key not in self.SEARCHABLE_FIELDS:
+                raise ValueError(
+                    f'Unknown filter {key!r}; audit entries can be narrowed '
+                    f'by {", ".join(self.SEARCHABLE_FIELDS)}')
+        wanted = {k: v for k, v in filters.items() if v not in (None, '')}
+
+        def matches(entry):
+            return all(entry.get(k) == v for k, v in wanted.items())
+
+        if limit <= 0:
+            return {'entries': [], 'complete': True}
+
+        found, complete = [], True
+        try:
+            if not self.audit_log_file.exists():
+                return {'entries': [], 'complete': True}
+            file_size = self.audit_log_file.stat().st_size
+            if file_size == 0:
+                return {'entries': [], 'complete': True}
+
+            block_size = 8192
+            blocks = []
+            remaining = file_size
+            with open(self.audit_log_file, 'rb') as f:
+                while remaining > 0:
+                    read_size = min(block_size, remaining)
+                    remaining -= read_size
+                    f.seek(remaining)
+                    blocks.append(f.read(read_size))
+
+                    # Re-parsed each round rather than incrementally: a marker
+                    # straddling a block boundary is only whole once the block
+                    # before it has been read, and an entry counted as half a
+                    # line is the kind of off-by-one that makes a search stop
+                    # one entry early and call itself complete.
+                    found = self._parse_entries(
+                        b''.join(reversed(blocks)), partial_first=remaining > 0)
+                    found = [e for e in found if matches(e)]
+                    if len(found) >= limit:
+                        complete = False
+                        break
+        except (OSError, ValueError) as e:
+            logger.error(f"Failed to search audit log: {e}")
+            # Not an empty result: "I could not look" and "there are none" are
+            # different answers, and only one of them is safe to act on.
+            return {'entries': [], 'complete': False, 'error': str(e)}
+
+        return {'entries': found[-limit:], 'complete': complete}
+
+    @staticmethod
+    def _parse_entries(raw: bytes, partial_first: bool) -> list:
+        """Audit entries out of a chunk of the log, oldest first.
+
+        Shared with get_recent_entries so the two readers cannot disagree
+        about what counts as an entry — which they would, since one of them
+        is the one people change.
+        """
+        raw_lines = raw.splitlines()
+        if partial_first and raw_lines:
+            # Read did not start at the beginning of the file, so the first
+            # line is probably half of one.
+            raw_lines = raw_lines[1:]
+        entries = []
+        for line in raw_lines:
+            try:
+                text = line.decode('utf-8', errors='replace')
+                if _ENTRY_MARKER_TEXT not in text:
+                    continue
+                entries.append(json.loads(text.split(_ENTRY_MARKER_TEXT, 1)[1].strip()))
+            except (UnicodeDecodeError, json.JSONDecodeError, IndexError):
+                continue
+        return entries
+
     def get_recent_entries(self, limit: int = 100) -> list:
         """
         Get recent audit log entries.
@@ -687,68 +1115,52 @@ class AuditLogger:
 
             # Read only the tail of the file so large audit logs do not block
             # the activity page or other callers that only need recent entries.
+            #
+            # The stop condition counts ENTRIES FOUND, not blocks read. It used
+            # to be `len(blocks) <= limit`, which reads one 8 KiB block per
+            # entry asked for: the activity page's default of 100 read ~827 KiB
+            # to return 100 lines of a few hundred bytes each, and the API's
+            # maximum read ~4 MiB. Two blocks is the ordinary answer now.
+            #
+            # `len(blocks) <= limit` survives as a second condition, so the
+            # worst case — a tail with no entries in it at all, which would
+            # otherwise walk the whole file — stays exactly what it was.
             block_size = 8192
             blocks = []
             remaining = file_size
+            found = 0
 
             with open(self.audit_log_file, 'rb') as f:
-                while remaining > 0 and len(blocks) <= limit:
+                while remaining > 0 and found <= limit and len(blocks) <= limit:
                     read_size = min(block_size, remaining)
                     remaining -= read_size
                     f.seek(remaining)
-                    blocks.append(f.read(read_size))
+                    block = f.read(read_size)
+                    blocks.append(block)
+                    # The same marker the parse below splits on, so this counts
+                    # candidate entries rather than newlines: a traceback or a
+                    # non-INFO line in the tail cannot make the read stop short
+                    # of `limit` entries. A marker straddling a block boundary
+                    # is missed and costs one extra block, never an entry.
+                    found += block.count(_ENTRY_MARKER)
 
-            raw_lines = b''.join(reversed(blocks)).splitlines()
+            # Parse first, then take the last `limit` ENTRIES. Slicing the
+            # raw lines instead meant `limit` LINES, so anything in the tail
+            # that is not an entry — a traceback, a non-INFO line — came out
+            # of the caller's allowance: a tail with two noise lines per entry
+            # returned 33 rows for a request of 100, with nothing to say why.
+            entries = self._parse_entries(
+                b''.join(reversed(blocks)), partial_first=remaining > 0)
 
-            # If we did not read from the start of the file, the first line can be partial.
-            if remaining > 0 and raw_lines:
-                raw_lines = raw_lines[1:]
-
-            entries = []
-            for line in raw_lines[-limit:]:
-                try:
-                    raw = line.decode('utf-8', errors='replace')
-                    if ' - INFO - ' not in raw:
-                        continue
-                    json_str = raw.split(' - INFO - ', 1)[1].strip()
-                    entries.append(json.loads(json_str))
-                except (UnicodeDecodeError, json.JSONDecodeError, IndexError):
-                    continue
-
-            return entries
+            return entries[-limit:]
 
         except Exception as e:
             logger.error(f"Error reading audit logs: {e}")
             return []
 
-    def get_entries_by_resource(self, resource_id: str) -> list:
-        """
-        Get all audit entries for a specific resource.
-
-        Args:
-            resource_id: Resource identifier
-
-        Returns:
-            List of matching audit entries
-        """
-        try:
-            entries = []
-            if not self.audit_log_file.exists():
-                return entries
-
-            with open(self.audit_log_file, 'r') as f:
-                for line in f:
-                    try:
-                        if ' - INFO - ' in line:
-                            json_str = line.split(' - INFO - ', 1)[1].strip()
-                            entry = json.loads(json_str)
-                            if entry.get('resource_id') == resource_id:
-                                entries.append(entry)
-                    except (json.JSONDecodeError, IndexError):
-                        continue
-
-            return entries
-
-        except Exception as e:
-            logger.error(f"Error reading audit logs: {e}")
-            return []
+    # ``get_entries_by_resource`` was removed with #443. It read the entire
+    # audit log to filter by resource_id and had no callers anywhere in the
+    # codebase. Leaving a whole-file reader behind a rotating handler is how a
+    # "why is the history missing" bug gets born: it would have silently
+    # reported only what survived in the active file. Per-resource history
+    # belongs on the hash chain, which is complete and verifiable.

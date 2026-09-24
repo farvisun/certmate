@@ -1,10 +1,12 @@
-import copy
 import logging
 import re
+from functools import partial, wraps
 
 from flask import request, jsonify
 
+from modules.core.request_fields import json_booleans
 from modules.core.constants import iter_cert_domain_dirs
+from modules.core.domain_entries import entry_domain
 
 logger = logging.getLogger(__name__)
 
@@ -14,13 +16,93 @@ logger = logging.getLogger(__name__)
 # been dead code since the handlers switched to the shared helper.
 
 
+def _refuse_during_setup(auth_manager, audit_logger, operation, resource_type,
+                         resource_id, only_if=None):
+    """409 SETUP_BOOTSTRAP_ONLY while the instance is in setup mode.
+
+    *only_if*, when given, narrows the refusal (a first user is the
+    bootstrap and must be allowed). Every refusal is audited: an attempt to
+    create credentials in the setup window is worth knowing about.
+    """
+    if not auth_manager.is_setup_mode():
+        return None
+    if only_if is not None and not only_if():
+        return None
+    if audit_logger:
+        audit_logger.log_authz_denied(
+            operation=operation, resource_type=resource_type,
+            resource_id=str(resource_id)[:64],
+            reason='setup mode allows only the bootstrap admin',
+            user=(getattr(request, 'current_user', None) or {}).get('username'),
+            ip_address=request.remote_addr,
+        )
+    return jsonify({
+        'error': ('Setup is not complete: every request is still served as '
+                  'admin to anyone who can reach this instance, so it only '
+                  'creates the first admin. Enable local authentication (or '
+                  'set API_BEARER_TOKEN), sign in, then create this.'),
+        'code': 'SETUP_BOOTSTRAP_ONLY',
+    }), 409
+
+
+def bootstrap_only(auth_manager, audit_logger, operation, resource_type,
+                   id_field, methods=('POST',), only_if=None):
+    """Decorator: refuse *methods* with 409 while the instance is in setup mode.
+
+    A decorator rather than a check inside each view, so the views stay as they
+    were: the rule is "setup mode only bootstraps", and it reads that way at the
+    top of the route it applies to.
+    """
+    def decorator(view):
+        @wraps(view)
+        def guarded(*args, **kwargs):
+            if request.method in methods:
+                data = request.get_json(silent=True) or {}
+                refusal = _refuse_during_setup(
+                    auth_manager, audit_logger, operation, resource_type,
+                    data.get(id_field) or '-', only_if=only_if)
+                if refusal is not None:
+                    return refusal
+            return view(*args, **kwargs)
+        return guarded
+    return decorator
+
+
+def _confirm_setup_key(auth_manager, audit_logger, key_id):
+    """PATCH /api/keys/<id> {"confirmed": true}: vouch for a key created
+    while the instance was in setup mode, clearing its review flag."""
+    data = request.get_json(silent=True) or {}
+    if data.get('confirmed') is not True:
+        return jsonify({'error': 'Body must be {"confirmed": true}',
+                        'code': 'INVALID_REQUEST'}), 400
+    # Confirming in setup mode would let the same anonymous admin who
+    # could mint the key vouch for it.
+    refusal = _refuse_during_setup(auth_manager, audit_logger, 'confirm_api_key',
+                                   'api_key', key_id)
+    if refusal:
+        return refusal
+    user = getattr(request, 'current_user', {}) or {}
+    ok, msg = auth_manager.confirm_setup_key(key_id, user.get('username'))
+    if not ok:
+        status = 404 if 'not found' in msg.lower() else 400
+        code = 'API_KEY_NOT_FOUND' if status == 404 else 'API_KEY_NOT_CONFIRMABLE'
+        return jsonify({'error': msg, 'code': code}), status
+    if audit_logger:
+        audit_logger.log_operation(
+            operation='confirm_api_key', resource_type='api_key',
+            resource_id=key_id, status='success',
+            details={'reason': 'created during setup, vouched for by an operator'},
+            user=user.get('username'), ip_address=request.remote_addr,
+        )
+    return jsonify({'message': msg, 'key_id': key_id})
+
+
 def register_settings_routes(app, managers, require_web_auth, auth_manager,
                              settings_manager, dns_manager):
     """Register settings-related routes"""
     auth_manager_ref = auth_manager
     deploy_manager = managers.get('deployer')
     audit_logger = managers.get('audit')
-    file_ops = managers.get('file_ops')
 
     @app.route('/api/settings', methods=['GET'])
     @app.route('/api/web/settings', methods=['GET'])
@@ -59,10 +141,7 @@ def register_settings_routes(app, managers, require_web_auth, auth_manager,
                 raw_domains = masked.get('domains') or []
                 filtered = []
                 for entry in raw_domains:
-                    domain_name = (
-                        entry if isinstance(entry, str)
-                        else (entry.get('domain') if isinstance(entry, dict) else None)
-                    )
+                    domain_name = entry_domain(entry)
                     if domain_name and auth_manager.domain_matches_scope(domain_name, scope):
                         filtered.append(entry)
                 masked['domains'] = filtered
@@ -79,6 +158,17 @@ def register_settings_routes(app, managers, require_web_auth, auth_manager,
             ) if cert_dir else False
             if not has_users and not has_domains and has_certs:
                 masked['certmate_recovery_suggested'] = True
+
+            # The user roster and API-key inventory have dedicated admin-only
+            # endpoints (/api/users, /api/keys). mask_secrets_in_settings only
+            # redacts secret-named LEAF values, so usernames/roles/emails and
+            # key names/roles/allowed_domains/token_prefix would otherwise leak
+            # to any viewer through this settings view. Strip them for anyone
+            # who is not an admin (kept for admin so the settings UI is
+            # unchanged for the role that already reads them elsewhere).
+            if (user.get('role') != 'admin'):
+                masked.pop('users', None)
+                masked.pop('api_keys', None)
 
             response = jsonify(masked)
             response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, post-check=0, pre-check=0, max-age=0'
@@ -100,7 +190,7 @@ def register_settings_routes(app, managers, require_web_auth, auth_manager,
                 validate_settings_post,
                 diff_settings_keys,
             )
-            data = request.json
+            data = request.json or {}
             # Load *before* validating: validate_settings_post uses the
             # current state to drop no-op echoes from a GET-then-POST-back
             # round-trip (the dominant pattern from the web UI).
@@ -147,6 +237,17 @@ def register_settings_routes(app, managers, require_web_auth, auth_manager,
             if not settings_manager.atomic_update(filtered):
                 return jsonify({'error': 'Update failed'}), 500
 
+            # The deployment-status cache only reads its TTL at construction, so
+            # a persisted cache_ttl change was a silent no-op until restart. Push
+            # it live now that the write succeeded.
+            if 'cache_ttl' in filtered:
+                cache_manager = managers.get('cache')
+                if cache_manager and hasattr(cache_manager, 'update_cache_settings'):
+                    try:
+                        cache_manager.update_cache_settings()
+                    except Exception as e:
+                        logger.warning("Failed to apply cache_ttl live: %s", e)
+
             after = settings_manager.load_settings() or {}
             changed = diff_settings_keys(before, after)
             if audit_logger and changed:
@@ -168,13 +269,20 @@ def register_settings_routes(app, managers, require_web_auth, auth_manager,
     @app.route('/api/users', methods=['GET', 'POST'])
     @app.route('/api/web/settings/users', methods=['GET', 'POST'])
     @auth_manager.require_role('admin')
+    # Setup mode serves every request as admin, so it may only bootstrap: the
+    # first admin, then local auth. A second user created now would be created
+    # by whoever can reach the instance and would outlive setup. 409 is what
+    # the setup page already reads as "an admin exists, go on and enable
+    # login", so a half-finished setup still completes.
+    @bootstrap_only(auth_manager, audit_logger, 'create_user', 'user', 'username',
+                    only_if=auth_manager.list_users)
     def api_users():
         """User management"""
         if request.method == 'GET':
             users = auth_manager.list_users()
             return jsonify({'users': users})
 
-        data = request.json
+        data = request.json or {}
         username = data.get('username')
         password = data.get('password')
         role = data.get('role', 'viewer')
@@ -186,7 +294,6 @@ def register_settings_routes(app, managers, require_web_auth, auth_manager,
         # Password policy: 12 chars minimum with at least one digit and one
         # non-alphanumeric character. Aligns with the OWASP ASVS L1 guidance
         # for shared-credential apps.
-        import re
         if (len(password) < 12
                 or not re.search(r'\d', password)
                 or not re.search(r'[^A-Za-z0-9]', password)):
@@ -253,7 +360,6 @@ def register_settings_routes(app, managers, require_web_auth, auth_manager,
         if password is not None:
             if len(password) > 256:
                 return jsonify({'error': 'Password must be ≤ 256 chars'}), 400
-            import re
             if (len(password) < 12
                     or not re.search(r'\d', password)
                     or not re.search(r'[^A-Za-z0-9]', password)):
@@ -284,7 +390,13 @@ def register_settings_routes(app, managers, require_web_auth, auth_manager,
         return jsonify({'error': msg}), 400
 
     @app.route('/api/dns/<string:provider>/accounts', methods=['GET', 'POST'])
-    @app.route('/api/dns-providers/accounts', methods=['GET', 'POST'])
+    # Its own endpoint name, not a shared one. This function serves three
+    # paths, and DEPRECATIONS is keyed by `request.endpoint`: without a
+    # separate name, announcing that this duplicate is going away would put
+    # Deprecation and Sunset headers on /api/web/settings/accounts too, which
+    # is the dashboard's own call and is not going anywhere.
+    @app.route('/api/dns-providers/accounts', methods=['GET', 'POST'],
+               endpoint='api_dns_accounts_deprecated')
     @app.route('/api/web/settings/accounts', methods=['GET', 'POST'])
     @auth_manager.require_role('admin')
     def api_dns_accounts(provider=None):
@@ -297,15 +409,21 @@ def register_settings_routes(app, managers, require_web_auth, auth_manager,
             return jsonify(accounts)
 
         try:
-            data = request.json
+            data = request.json or {}
             name = data.get('name') or data.get('account_id')
             req_provider = provider or data.get('provider')
             config = data.get('config', {})
+            set_as_default = data.get('set_as_default', False)
 
             if not name or not req_provider:
                 return jsonify({'error': 'Account name and provider required'}), 400
 
             if dns_manager.add_account(name, req_provider, config):
+                # Honour the operator's explicit "set as default" choice on
+                # create, mirroring the update path — the flag the UI sends was
+                # previously dropped here.
+                if set_as_default:
+                    dns_manager.set_default_account(req_provider, name)
                 if audit_logger:
                     user = getattr(request, 'current_user', None) or {}
                     audit_logger.log_operation(
@@ -346,8 +464,11 @@ def register_settings_routes(app, managers, require_web_auth, auth_manager,
 
     @app.route('/api/dns/<string:provider>/accounts/<string:account_id>',
                methods=['DELETE', 'PUT'])
+    # Same reasoning as the listing above: a name of its own, so the
+    # announcement reaches this path and not the dashboard's.
     @app.route('/api/dns-providers/accounts/<string:account_id>',
-               methods=['DELETE', 'PUT'])
+               methods=['DELETE', 'PUT'],
+               endpoint='api_dns_account_detail_deprecated')
     @app.route('/api/web/settings/accounts/<string:account_id>',
                methods=['DELETE', 'PUT'])
     @auth_manager.require_role('admin')
@@ -446,6 +567,10 @@ def register_settings_routes(app, managers, require_web_auth, auth_manager,
 
     @app.route('/api/keys', methods=['GET', 'POST'])
     @auth_manager_ref.require_role('admin')
+    # A key minted in setup mode is minted by whoever can reach the instance,
+    # and it stays valid once the operator completes setup.
+    @bootstrap_only(auth_manager_ref, audit_logger, 'create_api_key', 'api_key', 'name')
+    @json_booleans(is_agent=False)
     def api_keys():
         """List or create API keys"""
         if request.method == 'GET':
@@ -462,7 +587,7 @@ def register_settings_routes(app, managers, require_web_auth, auth_manager,
             role = data.get('role', 'viewer')
             expires_at = data.get('expires_at')
             allowed_domains = data.get('allowed_domains')
-            is_agent = bool(data.get('is_agent', False))
+            is_agent = request.json_booleans['is_agent']
 
             if not name:
                 return jsonify({'error': 'Key name is required'}), 400
@@ -470,6 +595,37 @@ def register_settings_routes(app, managers, require_web_auth, auth_manager,
                 return jsonify({'error': 'Key name must be ≤ 64 characters'}), 400
 
             user = getattr(request, 'current_user', {}) or {}
+
+            # Prevent privilege escalation through key creation. require_role
+            # ('admin') gates this endpoint by role LEVEL only — it never checks
+            # the caller's own allowed_domains — so a *scoped* admin key
+            # (role=admin, allowed_domains=[...]) could otherwise mint an
+            # unrestricted admin key and escape its own scope. A minted key must
+            # never exceed its creator's role or domain scope.
+            from ..core.auth import ROLE_HIERARCHY
+            caller_role = user.get('role', 'viewer')
+            caller_scope = user.get('allowed_domains')  # None = unrestricted
+            requested_level = ROLE_HIERARCHY.get(role)
+            if requested_level is not None and requested_level > ROLE_HIERARCHY.get(caller_role, -1):
+                return jsonify({'error': 'Cannot create a key with a role higher than your own'}), 403
+            if caller_scope is not None:
+                # A domain-scoped creator may only mint keys scoped within its
+                # own domains: never an unscoped key, never a domain outside
+                # scope. An empty list (locked-out key) is more restrictive, so
+                # it is allowed.
+                if allowed_domains is None:
+                    return jsonify({'error': 'A domain-scoped key cannot create an unscoped key'}), 403
+                requested_scope = allowed_domains if isinstance(allowed_domains, list) else [allowed_domains]
+                outside = [d for d in requested_scope
+                           if not auth_manager_ref.domain_matches_scope(d, caller_scope)]
+                if outside:
+                    return jsonify({'error': 'Cannot grant domains outside your own key scope'}), 403
+            if role == 'admin' and allowed_domains is not None:
+                # admin bypasses domain scope on every non-per-domain endpoint
+                # (backups, settings, key management), so a "scoped admin" key is
+                # a false containment. Reject it; use operator for scoped access.
+                return jsonify({'error': 'Admin keys cannot be domain-scoped; use the operator role for scoped access'}), 400
+
             success, result_data = auth_manager_ref.create_api_key(
                 name, role=role, expires_at=expires_at,
                 created_by=user.get('username'),
@@ -492,6 +648,15 @@ def register_settings_routes(app, managers, require_web_auth, auth_manager,
         except Exception as e:
             logger.error(f"Failed to create API key: {e}")
             return jsonify({'error': 'Failed to create API key'}), 500
+
+    # PATCH is registered separately, as a module-level view bound to this
+    # instance's managers: an operator confirming a key created during setup
+    # has nothing to do with revoking one.
+    app.add_url_rule(
+        '/api/keys/<string:key_id>', 'api_key_confirm',
+        auth_manager_ref.require_role('admin')(
+            partial(_confirm_setup_key, auth_manager_ref, audit_logger)),
+        methods=['PATCH'])
 
     @app.route('/api/keys/<string:key_id>', methods=['DELETE'])
     @auth_manager_ref.require_role('admin')
@@ -540,7 +705,7 @@ def register_settings_routes(app, managers, require_web_auth, auth_manager,
                 return jsonify({'error': 'Failed to get deploy config'}), 500
 
         try:
-            data = request.json
+            data = request.json or {}
             ok, err = deploy_manager.save_config(data)
             if ok:
                 if audit_logger:
@@ -595,6 +760,27 @@ def register_settings_routes(app, managers, require_web_auth, auth_manager,
         except Exception as e:
             logger.error(f"Failed to test deploy hook {hook_id}: {e}")
             return jsonify({'error': 'Failed to test deploy hook'}), 500
+
+    @app.route('/api/deploy/pending', methods=['GET'])
+    @auth_manager_ref.require_role('admin')
+    def api_deploy_pending():
+        """Deploys held for a maintenance window (#632).
+
+        A held deploy is invisible everywhere else: the certificate renewed,
+        the history has no entry, and nothing failed. Without this an operator
+        cannot tell "waiting for 02:00" from "the hook never fired", which are
+        the same picture and very different problems.
+
+        Returns a bare list, like the sibling history endpoint.
+        """
+        if not deploy_manager:
+            return jsonify({'error': 'Deploy manager not available'}), 503
+
+        try:
+            return jsonify(deploy_manager.get_pending())
+        except Exception as e:
+            logger.error(f"Failed to list pending deploys: {e}")
+            return jsonify({'error': 'Failed to list pending deploys'}), 500
 
     @app.route('/api/deploy/history', methods=['GET'])
     @auth_manager_ref.require_role('admin')

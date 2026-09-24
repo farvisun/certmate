@@ -12,19 +12,17 @@ on:
 
 permissions: read-all
 
-# CodeQL runs on the same self-hosted host as CI. Two analysis runs from
-# different PRs overlapping there collide on the shared per-host CodeQL state
-# and one fails fast (observed: one PR's "CodeQL" check passing while a
-# concurrent PR's failed in ~1s). Serialize host-wide and queue rather than
-# cancel so each PR's analysis still completes.
+# GitHub-hosted runners give each run an ephemeral VM, so the per-host CodeQL
+# state collisions that forced a serialized self-hosted group no longer apply.
+# Scope concurrency per ref and cancel superseded runs (standard PR CI).
 concurrency:
-  group: certmate-selfhosted-codeql
-  cancel-in-progress: false
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   analyze:
     name: Analyze ${{ matrix.language }}
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     permissions:
       # Required to upload results to the Security tab.
       security-events: write
@@ -38,10 +36,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@458d36d7d4f47d0dd16ca424c1d3cda0060f1360  # v3
+        uses: github/codeql-action/init@1c5b675653bb5c22dbe9b12b556ec555138e09fd  # v4.38.1
         with:
           languages: ${{ matrix.language }}
           # `security-extended` adds higher-precision queries beyond the
@@ -50,9 +48,9 @@ jobs:
           queries: security-extended
 
       - name: Autobuild
-        uses: github/codeql-action/autobuild@458d36d7d4f47d0dd16ca424c1d3cda0060f1360  # v3
+        uses: github/codeql-action/autobuild@1c5b675653bb5c22dbe9b12b556ec555138e09fd  # v4.38.1
 
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@458d36d7d4f47d0dd16ca424c1d3cda0060f1360  # v3
+        uses: github/codeql-action/analyze@1c5b675653bb5c22dbe9b12b556ec555138e09fd  # v4.38.1
         with:
           category: "/language:${{ matrix.language }}"

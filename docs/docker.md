@@ -61,10 +61,14 @@ Create a `.env` file on your host (not in the Docker image):
 ```bash
 SECRET_KEY=your-super-secret-key-here
 # SECRET_KEY_FILE=/run/secrets/secret_key  # Alternative: takes precedence over SECRET_KEY
+# Set API_BEARER_TOKEN before exposing a not-yet-onboarded instance to a
+# network: until the first admin exists, an instance with no token serves the
+# setup bypass to anyone who can reach it. When set, paste it once on the
+# first-run screen to create the admin.
 API_BEARER_TOKEN=your-api-bearer-token-here
 # API_BEARER_TOKEN_FILE=/run/secrets/api_bearer_token  # Alternative: takes precedence over API_BEARER_TOKEN
-CLOUDFLARE_API_TOKEN=your-cloudflare-api-token
-LOG_LEVEL=INFO
+CLOUDFLARE_TOKEN=your-cloudflare-api-token
+CERTMATE_LOG_LEVEL=INFO
 ```
 
 ```bash
@@ -85,7 +89,7 @@ docker run -d --name certmate \
   # -e SECRET_KEY_FILE="/run/secrets/secret_key" \  # Alternative: takes precedence over SECRET_KEY
   -e API_BEARER_TOKEN="your-api-bearer-token" \
   # -e API_BEARER_TOKEN_FILE="/run/secrets/api_bearer_token" \  # Alternative: takes precedence over API_BEARER_TOKEN
-  -e CLOUDFLARE_API_TOKEN="your-api-token" \
+  -e CLOUDFLARE_TOKEN="your-api-token" \
   -p 8000:8000 \
   -v certmate_certificates:/app/certificates \
   -v certmate_data:/app/data \
@@ -97,16 +101,24 @@ docker run -d --name certmate \
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `SECRET_KEY` | No | Flask secret key for sessions (auto-generated if unset) |
-| `SECRET_KEY_FILE` | No | Path to a file containing the Flask secret key (takes precedence over `SECRET_KEY`) |
-| `API_BEARER_TOKEN` | No | Authentication token for API access (auto-generated if unset) |
+| `SECRET_KEY_FILE` | No | Path to a file containing the Flask secret key (takes precedence over `SECRET_KEY`). If set and the file cannot be read or is empty, CertMate refuses to start: a secret that failed to mount is a configuration error, and generating a key instead would sign out every user, on every restart, with sessions signed by a key you did not choose. |
+| `API_BEARER_TOKEN` | No (auto-generated) | API auth token. Auto-generated if unset, but set it before exposing a not-yet-onboarded instance to a network; when set, paste it once on the first-run screen to create the admin. **This value is authoritative:** if it differs from the token already stored, the stored one is replaced at startup and stops working. That is what makes adding or rotating the variable on an existing install take effect — previously enforcement used this value while authentication still checked the old one, and the first-run screen asked for a token it then rejected |
 | `API_BEARER_TOKEN_FILE` | No | Path to a file containing the API bearer token (takes precedence over `API_BEARER_TOKEN`) |
-| `LOG_LEVEL` | No | `INFO` (default), `DEBUG`, `WARNING`, `ERROR` |
-| `CERTMATE_BACKUP_PASSPHRASE` | No | When set, unified backups are encrypted at rest (`.zip.enc`, PBKDF2-SHA256 + Fernet). The same passphrase is required to restore them. Unset = legacy cleartext `.zip` backups |
-| `CLOUDFLARE_API_TOKEN` | No | Cloudflare DNS provider token |
-| `AWS_ACCESS_KEY_ID` | No | AWS Route53 access key |
-| `AWS_SECRET_ACCESS_KEY` | No | AWS Route53 secret key |
+| `CERTMATE_LOG_LEVEL` | No | `INFO` (default), `DEBUG`, `WARNING`, `ERROR` |
+| `CERTMATE_BACKUP_PASSPHRASE` | **Set it if you want automatic backups you can restore from** | Encrypts unified backups at rest (`.zip.enc`, PBKDF2-SHA256 + Fernet), and is what makes automatic backups *complete* — with it they can restore this instance, without it they keep their credentials masked and cannot. The same passphrase is required to restore them, and CertMate never stores it for you. Keep it somewhere other than the machine holding the backups |
+| `CLOUDFLARE_TOKEN` | No | API token for the default Cloudflare DNS account. Cloudflare is the only DNS provider read from the environment: Route53 and the others are configured in Settings → DNS Providers or through the API, and setting `AWS_ACCESS_KEY_ID` in the container does nothing |
 
 See the [Installation Guide](./installation.md#environment-variables) for the complete list.
+
+### Keeping DNS tokens out of `settings.json`
+
+DNS provider tokens configured through the UI are stored in `settings.json`,
+which is the file that gets backed up, copied and mounted. Any credential field
+can instead **name** where its value lives — `api_token_file` with a path, or
+`api_token_env` with a variable name — the same way `API_BEARER_TOKEN_FILE`
+works. The value is read when certbot runs and is never written back. The OIDC
+`client_secret` accepts the same pair. See
+[SECURITY.md](https://github.com/fabriziosalmi/certmate/blob/main/SECURITY.md#keeping-credentials-out-of-settingsjson).
 
 ---
 
@@ -115,24 +127,23 @@ See the [Installation Guide](./installation.md#environment-variables) for the co
 ### Basic Setup
 
 ```yaml
-version: '3.8'
-
 services:
   certmate:
     image: fabriziosalmi/certmate:latest
     container_name: certmate
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"  # localhost only; put a reverse proxy in front for external access
     environment:
       - SECRET_KEY=${SECRET_KEY:-}
       # - SECRET_KEY_FILE=${SECRET_KEY_FILE:-}  # Alternative: path to a file containing the secret key
       - API_BEARER_TOKEN=${API_BEARER_TOKEN:-}
       # - API_BEARER_TOKEN_FILE=${API_BEARER_TOKEN_FILE:-}  # Alternative: path to a file containing the bearer token
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - CERTMATE_LOG_LEVEL=${CERTMATE_LOG_LEVEL:-INFO}
     volumes:
       - certmate_certificates:/app/certificates
       - certmate_data:/app/data
       - certmate_logs:/app/logs
+      - certmate_backups:/app/backups
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -145,6 +156,7 @@ volumes:
   certmate_certificates:
   certmate_data:
   certmate_logs:
+  certmate_backups:
 ```
 
 ```bash
@@ -154,6 +166,132 @@ docker-compose up -d
 # Or specify a different env file
 docker-compose --env-file /path/to/.env up -d
 ```
+
+---
+
+## Rootless podman / OpenShift (arbitrary UID)
+
+The image runs as the non-root user `1000` by default, but it also follows the
+OpenShift **arbitrary-UID** pattern: the runtime-writable directories
+(`/app/data`, `/app/certificates`, `/app/logs`, `/app/backups`) are owned by
+**group 0 (root group)** and are group-writable + setgid. A container process
+running as *any* UID that belongs to group 0 — which is how rootless podman and
+OpenShift launch containers — can therefore create and rename files without a
+manual `chown -R 1000:1000` of the volumes. Secret files the app writes (the CA
+private key, the audit-signing key, DNS credential files, `.secret_key`) are
+always created `0600` owner-only, so the group-writable directories never expose
+a key. (Issue [#380](https://github.com/fabriziosalmi/certmate/issues/380).)
+
+### Named volumes — works out of the box
+
+A fresh **named volume** inherits the image's group-0 permissions, so no host
+preparation is needed regardless of the UID podman assigns:
+
+```bash
+podman run -d --name certmate \
+  -p 8000:8000 \
+  -v certmate_data:/app/data \
+  -v certmate_certificates:/app/certificates \
+  -v certmate_logs:/app/logs \
+  -v certmate_backups:/app/backups \
+  docker.io/fabriziosalmi/certmate:latest
+```
+
+### Bind mounts (host directories)
+
+A bind mount keeps the **host** directory's ownership, which shadows the image's
+permissions. Make the host directories writable by group 0 once, then run:
+
+```bash
+# Create the host dirs group-0 writable (any UID in group 0 can write)
+mkdir -p ./{data,certificates,logs,backups}
+chgrp -R 0 ./{data,certificates,logs,backups}
+chmod -R g+rwX ./{data,certificates,logs,backups}
+
+podman run -d --name certmate \
+  -p 8000:8000 \
+  -v ./data:/app/data \
+  -v ./certificates:/app/certificates \
+  -v ./logs:/app/logs \
+  -v ./backups:/app/backups \
+  docker.io/fabriziosalmi/certmate:latest
+```
+
+Alternatively let podman fix the ownership for you with the `:U` mount option
+(recursively chowns the source to match the container UID/GID):
+
+```bash
+podman run -d --name certmate \
+  -p 8000:8000 \
+  -v ./data:/app/data:U \
+  -v ./certificates:/app/certificates:U \
+  -v ./logs:/app/logs:U \
+  -v ./backups:/app/backups:U \
+  docker.io/fabriziosalmi/certmate:latest
+```
+
+### rootless podman-compose
+
+```yaml
+services:
+  certmate:
+    image: docker.io/fabriziosalmi/certmate:latest
+    ports:
+      - "8000:8000"
+    volumes:
+      - certmate_data:/app/data
+      - certmate_certificates:/app/certificates
+      - certmate_logs:/app/logs
+      - certmate_backups:/app/backups
+    restart: unless-stopped
+
+volumes:
+  certmate_data:
+  certmate_certificates:
+  certmate_logs:
+  certmate_backups:
+```
+
+If startup aborts with *"Required directories are not writable by the CertMate
+process"*, the mount is not group-0 writable — apply the `chgrp 0 … && chmod
+g+rwX …` above, switch to a named volume, or add `:U` to the bind mounts.
+
+> **Kubernetes / OpenShift:** no changes needed. Set
+> `spec.securityContext.fsGroup: 0` (or rely on the default restricted SCC,
+> which already assigns an arbitrary UID in group 0) and the mounted volumes
+> become group-0 writable automatically.
+
+---
+
+## Upgrading
+
+CertMate keeps all persistent state in the mounted volumes — chiefly `./data`
+(`settings.json`, the admin users, the auto-generated `.secret_key`, the audit
+signing key, and the scheduler database) and `./certificates`. Because state
+lives in those volumes and **not** in the image, upgrading is just pulling a
+newer image and recreating the container; your configuration, certificates, and
+login carry forward.
+
+```bash
+# Recommended: take a backup first (Settings → Backup, or the API)
+
+# Docker Compose
+docker compose pull          # fetch the new image
+docker compose up -d         # recreate the container (data/ + certificates/ persist)
+
+# Plain docker run — stop/remove and re-run with the SAME volume mounts
+docker pull fabriziosalmi/certmate:latest
+docker rm -f certmate
+docker run -d --name certmate --env-file .env -p 127.0.0.1:8000:8000 \
+  -v "$(pwd)/data:/app/data" -v "$(pwd)/certificates:/app/certificates" \
+  -v "$(pwd)/logs:/app/logs" -v "$(pwd)/backups:/app/backups" \
+  fabriziosalmi/certmate:latest
+```
+
+Settings-format migrations run automatically on boot. For production, pin a
+version tag (e.g. `fabriziosalmi/certmate:2.19`) instead of `:latest` so repulls
+don't surprise you with an unintended upgrade — the multi-platform build
+publishes `MAJOR`, `MAJOR.MINOR`, and `MAJOR.MINOR.PATCH` tags.
 
 ---
 
@@ -167,7 +305,7 @@ CertMate supports multi-platform Docker images for both ARM and AMD64 architectu
 |----------|-------------|------------------|
 | `linux/amd64` | Intel/AMD 64-bit | Most cloud servers, desktops |
 | `linux/arm64` | ARM 64-bit | Apple Silicon, ARM cloud instances |
-| `linux/arm/v7` | ARM 32-bit v7 | Raspberry Pi 3+ |
+| `linux/arm/v7` | ARM 32-bit v7 | Raspberry Pi 3+ — **not published**: buildable on request (see below), the release images are amd64 + arm64 |
 | `linux/arm/v6` | ARM 32-bit v6 | Raspberry Pi 1, Zero |
 
 ### Build Scripts
@@ -250,7 +388,7 @@ docker push USERNAME/certmate:v1.0.0
 ### GitHub Actions
 
 Required secrets:
-- `DOCKERHUB_USERNAME`
+- `DOCKERHUB_USER`
 - `DOCKERHUB_TOKEN`
 
 ```bash

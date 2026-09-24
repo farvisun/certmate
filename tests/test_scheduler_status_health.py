@@ -27,6 +27,9 @@ from flask import Flask
 from modules.web.misc_routes import register_misc_routes
 
 
+pytestmark = [pytest.mark.unit]
+
+
 def _build_app(managers: dict) -> Flask:
     """Mount /health against a stub auth_manager and the given managers dict."""
     app = Flask(__name__)
@@ -40,6 +43,7 @@ def _build_app(managers: dict) -> Flask:
         return deco
 
     auth_manager.require_role = _passthrough
+    auth_manager.require_session_role = _passthrough
     auth_manager.is_local_auth_enabled.return_value = False
     auth_manager.has_any_users.return_value = False
 

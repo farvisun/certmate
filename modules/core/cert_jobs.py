@@ -25,6 +25,28 @@ logger = logging.getLogger(__name__)
 
 _TERMINAL = ('succeeded', 'failed')
 
+
+class IssuanceQueueFull(Exception):
+    """Raised by `submit` when too much issuance is already outstanding.
+
+    The pool has two workers and had an unbounded queue, so a client in a
+    retry loop — or a script iterating a domain list — could park hundreds of
+    certbot runs behind them. Nothing rejected the work, so every one of those
+    callers got a 202 and a job id promising a certificate that would not be
+    attempted for hours, and the pending ones were invisible: the eviction that
+    bounds the registry never touches a job that has not finished, so the
+    memory they hold is not bounded by the history cap either.
+
+    Refusing is the honest answer. A 429 tells the caller to come back; a 202
+    for work nobody will reach for an hour does not.
+    """
+
+    def __init__(self, depth, limit):
+        super().__init__(
+            f'{depth} issuance job(s) already queued or running (limit {limit})')
+        self.depth = depth
+        self.limit = limit
+
 # Success event per issuance kind, mirroring the synchronous routes. Renewal
 # failures (other than "busy") emit certificate_failed like the sync API renew
 # route; create failures emit nothing, also matching the sync create route.
@@ -54,7 +76,8 @@ class IssuanceExecutor:
     ``CERTMATE_ISSUANCE_JOB_HISTORY`` (default 200, clamped 20-2000).
     """
 
-    def __init__(self, app, event_bus=None, max_workers=None, capacity=None):
+    def __init__(self, app, event_bus=None, max_workers=None, capacity=None,
+                 queue_limit=None):
         self._app = app
         self._event_bus = event_bus
         self._pool = ThreadPoolExecutor(
@@ -62,14 +85,35 @@ class IssuanceExecutor:
             thread_name_prefix='cert-issue',
         )
         self._capacity = capacity or _clamp_env_int('CERTMATE_ISSUANCE_JOB_HISTORY', 200, 20, 2000)
+        # How much unfinished work is allowed to exist at once, counting both
+        # the running jobs and the ones waiting for a worker. Separate from the
+        # history cap above, which bounds how many FINISHED jobs are remembered
+        # and deliberately never evicts an unfinished one.
+        self._queue_limit = queue_limit or _clamp_env_int(
+            'CERTMATE_ISSUANCE_QUEUE_LIMIT', 20, 1, 500)
         self._jobs = OrderedDict()  # job_id -> record (insertion-ordered for eviction)
         self._lock = threading.Lock()
 
     def submit(self, kind, domain, fn):
         """Register a job and run *fn* (a zero-arg callable performing the
-        blocking issuance) on the pool. Returns the job_id immediately."""
+        blocking issuance) on the pool. Returns the job_id immediately.
+
+        Raises `IssuanceQueueFull` when the backlog is already at the limit,
+        which the API turns into a 429. The check and the registration happen
+        under one lock: two requests arriving together must not both read a
+        depth one below the limit and both be admitted.
+        """
         job_id = uuid.uuid4().hex
         with self._lock:
+            depth = self._pending_locked()
+            if depth >= self._queue_limit:
+                logger.warning(
+                    "Issuance refused for %s: %d job(s) already queued or "
+                    "running against a limit of %d. Raise "
+                    "CERTMATE_ISSUANCE_QUEUE_LIMIT or CERTMATE_ISSUANCE_WORKERS "
+                    "if this is steady-state load rather than a retry storm.",
+                    domain, depth, self._queue_limit)
+                raise IssuanceQueueFull(depth, self._queue_limit)
             self._jobs[job_id] = {
                 'job_id': job_id,
                 'operation': kind,
@@ -83,7 +127,16 @@ class IssuanceExecutor:
                 'error_code': None,
             }
             self._evict_locked()
-        self._pool.submit(self._run, job_id, kind, domain, fn)
+        try:
+            self._pool.submit(self._run, job_id, kind, domain, fn)
+        except RuntimeError as e:
+            # The pool is shut down, which now actually happens: nothing will
+            # ever run this job, so it must not be left at 'queued' for a
+            # poller to wait on forever.
+            logger.warning("Issuance job %s for %s rejected: %s", job_id, domain, e)
+            self._set(job_id, status='failed', finished_at=utc_now_iso(),
+                      error='shutting down', error_code='SHUTTING_DOWN')
+            raise
         return job_id
 
     def get(self, job_id):
@@ -91,6 +144,43 @@ class IssuanceExecutor:
         with self._lock:
             job = self._jobs.get(job_id)
             return dict(job) if job else None
+
+    def pending(self):
+        """How much issuance is outstanding: queued plus running.
+
+        The number an operator needs before raising the worker count, and the
+        one a 429 is explained by. `EventBus.pending_dispatches` is the same
+        idea for the other queue in this process.
+        """
+        with self._lock:
+            return self._pending_locked()
+
+    def _pending_locked(self):
+        """Caller holds the lock."""
+        return sum(1 for job in self._jobs.values()
+                   if job['status'] not in _TERMINAL)
+
+    def queue_limit(self):
+        """The configured ceiling, so the metric and the depth can be read
+        against each other rather than against a number in a docstring."""
+        return self._queue_limit
+
+    def list_active(self):
+        """Every job still queued or running, oldest first.
+
+        The dashboard renders an "issuing" row from client-side state only, so
+        a page refresh made an in-flight issuance vanish from the list and look
+        like it had failed (issue #399). This is what lets any session
+        rediscover the work already in flight — including a different browser,
+        which no amount of client-side persistence could do.
+
+        Terminal jobs are deliberately excluded: a finished certificate is
+        already in the certificate list, and replaying completed jobs would
+        double it up.
+        """
+        with self._lock:
+            return [dict(job) for job in self._jobs.values()
+                    if job['status'] not in _TERMINAL]
 
     def _set(self, job_id, **fields):
         with self._lock:
@@ -122,7 +212,11 @@ class IssuanceExecutor:
             sanitized = self._sanitize_result(result)
             # Publish the completion event BEFORE marking the job terminal, so a
             # poller that observes 'succeeded' is guaranteed the event has fired.
-            self._publish(_SUCCESS_EVENT.get(kind), {'domain': domain})
+            # Exception: a renew that no-oped (renewed=False, certbot "not yet
+            # due") replaced nothing, so deploy hooks must not fire for it —
+            # mirrors the synchronous renew route.
+            if not (isinstance(result, dict) and result.get('renewed') is False):
+                self._publish(_SUCCESS_EVENT.get(kind), {'domain': domain})
             self._set(job_id, status='succeeded', finished_at=utc_now_iso(),
                       result=sanitized)
         except Exception as e:  # record every failure on the job, never crash the worker
@@ -155,4 +249,33 @@ class IssuanceExecutor:
         return None
 
     def shutdown(self, wait=False):
-        self._pool.shutdown(wait=wait)
+        """Stop the pool and name the issuance work that never finished.
+
+        Called when the process is going away. Queued jobs that no worker has
+        picked up are cancelled; jobs already running are not — a certbot
+        subprocess cannot be taken back, and waiting for one would hold
+        shutdown open until the container runtime killed it anyway.
+
+        What it does instead is say what was lost, in the same shape as
+        `EventBus.stop`: the registry is in memory and dies with the process,
+        so a job left at 'queued' or 'running' is a certificate an operator
+        asked for and will not get, and the only place that can be recorded is
+        the log line written on the way out.
+
+        Returns the abandoned job records, newest last.
+        """
+        self._pool.shutdown(wait=wait, cancel_futures=True)
+
+        with self._lock:
+            abandoned = [dict(job) for job in self._jobs.values()
+                         if job['status'] not in _TERMINAL]
+
+        if abandoned:
+            logger.warning(
+                "Issuance executor stopped with %d job(s) unfinished: %s. "
+                "These were not completed and are not retried on startup; "
+                "re-run them if the certificate is still needed.",
+                len(abandoned),
+                ', '.join(f"{job['operation']} {job['domain']} ({job['status']})"
+                          for job in abandoned))
+        return abandoned

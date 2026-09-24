@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [ main, develop ]
   workflow_dispatch:
+  schedule:
+    # Mondays 06:00 UTC, for the ca-endpoints job. The other jobs opt out of
+    # this trigger explicitly (`if: github.event_name != 'schedule'`) — saying
+    # so in a comment did not make it so, and a weekly full run would turn a
+    # CA-reachability signal into noise from whatever else happened to break
+    # that week (Copilot, #538).
+    - cron: '0 6 * * 1'
 
 # Default to read-only. The single job below only reads source and uploads
 # coverage via codecov-action (which manages its own auth via the upload
@@ -22,19 +29,19 @@ concurrency:
 
 jobs:
   test:
-    # Host-global serialization. The e2e suite (tests/conftest.py) binds a
-    # FIXED-name container (certmate-test-suite) and port (18888) on the
-    # self-hosted host and `docker rm -f`s it on startup, so two test jobs from
-    # DIFFERENT refs/PRs running at once cycle each other's container mid-run
-    # and the HTTP e2e tests fail with connection-refused (observed when two
-    # PRs were opened together). The per-ref group above cannot see across
-    # refs; this single host-wide group makes every test job — regardless of
-    # branch — queue and run one at a time. cancel-in-progress:false so a
-    # waiting PR's tests are queued, never dropped.
-    concurrency:
-      group: certmate-selfhosted-test-container
-      cancel-in-progress: false
-    runs-on: [self-hosted, Linux, X64]
+    if: github.event_name != 'schedule'
+    # GitHub-hosted, ephemeral VM per job. The e2e suite (tests/conftest.py)
+    # builds and runs a FIXED-name container (certmate-test-suite) on port
+    # 18888; on a shared self-hosted host, two test jobs from different
+    # refs/PRs clobbered each other's container mid-run, which forced a
+    # host-global concurrency group that serialized every test job one at a
+    # time (a single-point bottleneck: a burst of PRs + Dependabot builds
+    # queued for 10-20 min behind one box). On ubuntu-latest every job gets
+    # its own VM and localhost, so there is no cross-ref collision and no need
+    # to serialize. Docker is preinstalled, so the container e2e tests still
+    # run. The per-ref concurrency group at the top of the file still cancels
+    # a branch's own superseded runs.
+    runs-on: ubuntu-latest
     strategy:
       matrix:
         # 3.12 matches the production Dockerfile. Python 3.14 is temporarily
@@ -46,15 +53,15 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5 (was v4)
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v5 (was v4)
       with:
         python-version: ${{ matrix.python-version }}
 
     - name: Cache pip dependencies
-      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4 (was v3)
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v4 (was v3)
       with:
         path: ~/.cache/pip
         key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
@@ -73,9 +80,31 @@ jobs:
         # Pinned-Dependencies flags bare, unversioned pip installs).
         pip install flake8==7.3.0
         # stop the build if there are Python syntax errors or undefined names
-        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-        # exit-zero treats all errors as warnings
-        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+        # Fails the build. E9/F63/F7/F82 are syntax errors and undefined
+        # names; the rest are bug classes that are already clean in this
+        # codebase and must stay that way — F811 (a redefinition that silently
+        # shadows an import), F632 (is-comparison against a literal), E711/E712
+        # (== None / == True), E713/E714 (not ... in / not ... is). #428
+        flake8 . --count --select=E9,F63,F7,F82,F811,F632,E711,E712,E713,E714,F401,F841,E722 --show-source --statistics
+        # Complexity RATCHET, not a standard. The line before this one
+        # computed every function over --max-complexity=10 and then threw the
+        # exit code away with --exit-zero, so all 85 over-threshold functions
+        # were measured and ignored (#652).
+        #
+        # Its replacement was a single --max-complexity=115: the tree's real
+        # worst, register_settings_routes. One number for 1,700 functions has
+        # to be set by the worst of them, so everything under the worst was
+        # ungated — a new function at 100 passed. The ceiling is now per
+        # function: a general limit of 40, and the thirteen functions already
+        # above it pinned individually at what they measure, so each can only
+        # come down. The script fails on a new offender, on a regression, on an
+        # improvement left unrecorded, and on an entry matching nothing.
+        python scripts/check_complexity_budget.py
+        # The same shape for broad exception handlers. #671 counted 397 and
+        # nothing measured it again, so it reached 425 with the issue open.
+        python scripts/check_exception_budget.py
+        # Style is reported, never enforced: line length is not a defect class.
+        flake8 . --count --exit-zero --max-line-length=127 --statistics
 
     - name: Security check with bandit
       run: |
@@ -90,11 +119,42 @@ jobs:
         # Measure the application package (modules/), not the whole repo: a
         # bare --cov=. folds the tests/ and scripts/ trees (which run at ~100%)
         # into the number, inflating it and hiding the real app coverage.
-        pytest -v --tb=short --cov=modules --cov-report=xml --cov-report=html -m "not ui"
+        # --cov-fail-under is a FLOOR, not a target (#428): before it, project
+        # and patch statuses were both informational and fail_ci_if_error was
+        # false, so coverage could fall to zero with CI still green.
+        # RATCHET IT UP, NEVER DOWN to make a red build pass. It had been
+        # left far below the coverage actually achieved, so entire modules
+        # could lose their tests with CI still green — the one thing a
+        # coverage floor exists to prevent (#651). Keep it just under the
+        # measured number: close enough to catch a module going dark, with a
+        # small margin for run-to-run skip variance. Re-measure and raise it
+        # when coverage climbs; do not record the measurement here, where it
+        # would age into a false claim.
+        # `not network`: the CA-reachability checks in
+        # tests/test_ca_endpoints_are_live.py fetch five external ACME
+        # directories. They found two real defects (a DigiCert host that no
+        # longer resolves, a Google staging endpoint whose certificate is for
+        # another name) — but as a required check they would turn every PR red
+        # on someone else's outage. They run on the weekly schedule below
+        # instead, where a failure is news rather than a blocked merge.
+        pytest -v --tb=short --cov=modules --cov-report=xml --cov-report=html --cov-report=json:coverage.json --cov-fail-under=75 -m "not ui and not network"
+
+    - name: Coverage floors for the HTTP layer
+      if: matrix.python-version == '3.12'
+      run: |
+        # One project-wide number cannot protect a layer. resources_ca.py
+        # sat at 11% while the project figure stayed above its floor,
+        # because 3,800 well-covered statements elsewhere absorbed it —
+        # which is the failure #662 describes: the network-exposed
+        # request-handling and settings-mutation code was the least
+        # covered part and nothing in the everyday gate said so.
+        # The script also fails when a module with a floor vanishes from
+        # the report, and when a new HTTP module arrives without one.
+        python scripts/check_coverage_floors.py coverage.json
 
     - name: Upload coverage reports
       if: matrix.python-version == '3.12'
-      uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe  # v5 (was v3)
+      uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5  # v5 (was v3)
       with:
         # Required since main is a protected branch — without a token Codecov
         # rejects the upload ("Token required because branch is protected") and
@@ -106,24 +166,681 @@ jobs:
         name: codecov-umbrella
         fail_ci_if_error: false
 
-    - name: Test Docker build
+    # Build AND boot both requirements sets.
+    #
+    # This step used to run `docker build` alone. A successful build proves the
+    # layers assemble, not that the process starts — and `requirements-minimal
+    # .txt`, which the Dockerfile advertises via REQUIREMENTS_FILE, was never
+    # built by anything at all. It had been missing SQLAlchemy for months:
+    # factory.py imports APScheduler's SQLAlchemyJobStore at module scope, so
+    # gunicorn's worker died on import and the container restart-looped (#514).
+    # It took a user building it to find out.
+    #
+    # So: every advertised requirements file gets built, started, and asked for
+    # /health. A container that cannot answer that has not been tested.
+    - name: Build and boot every advertised image variant
       if: matrix.python-version == '3.12'
       run: |
-        docker build -t certmate:test .
+        set -euo pipefail
+        for req in requirements.txt requirements-minimal.txt; do
+          tag="certmate:test-$(basename "$req" .txt)"
+          echo "::group::build $req"
+          docker build --build-arg REQUIREMENTS_FILE="$req" -t "$tag" .
+          echo "::endgroup::"
+
+          echo "::group::boot $req"
+          cid=$(docker run -d -p 18900:8000 "$tag")
+          ok=0
+          for _ in $(seq 1 30); do
+            if curl -fsS http://localhost:18900/health >/dev/null 2>&1; then ok=1; break; fi
+            # Fail fast if the container is already gone: waiting out the
+            # timeout on a dead container just hides the traceback.
+            if [ "$(docker inspect -f '{{.State.Running}}' "$cid")" != "true" ]; then break; fi
+            sleep 2
+          done
+          if [ "$ok" != 1 ]; then
+            echo "::error::$req produced an image that never served /health"
+            docker logs "$cid" 2>&1 | tail -40
+            docker rm -f "$cid" >/dev/null 2>&1 || true
+            exit 1
+          fi
+          echo "$req -> /health OK"
+
+          # /health says nothing about certbot, and CertMate drives it as a
+          # subprocess. pip's metadata used to refuse any cryptography new
+          # enough to pull a pyOpenSSL that breaks the ACME stack; as of
+          # 2026-08-08 it no longer does, so a bump can install cleanly, boot
+          # cleanly, and fail on the first issuance. Ask the binary directly.
+          if ! docker exec "$cid" certbot --version; then
+            echo "::error::$req built an image whose certbot cannot start — no certificate can be issued. See SECURITY.md 'Known dependency constraint'."
+            docker rm -f "$cid" >/dev/null 2>&1 || true
+            exit 1
+          fi
+
+          # Ask the built image whether every provider it offers can actually
+          # reach certbot. The suite validates the issuance path against mocks
+          # — nine test files stub `check_certbot_plugin_installed` to True —
+          # so the guard between a configured provider and certbot's
+          # "unrecognized arguments" is never exercised for real. That is how
+          # Infomaniak shipped with a strategy, a credentials writer, a README
+          # row and no plugin in any published image.
+          #
+          # In the image, not in a developer's virtualenv, where the answer is
+          # whatever happens to be installed locally. The requirements file is
+          # passed explicitly: it is what this build was meant to carry, and
+          # guessing it is the difference between a missing plugin and an
+          # optional one.
+          #
+          # Copied in rather than shipped: the image carries the two scripts
+          # the running process executes, and this is a gate, not a runtime
+          # component. Into /app/scripts, not /tmp, because the script resolves
+          # its requirements file relative to its own parent's parent — from
+          # /tmp it would look for /requirements.txt and refuse. `docker cp`
+          # fails loudly under `set -e` if the file is not where this expects
+          # it, so the check cannot silently stop running.
+          docker cp scripts/check_providers.py "$cid":/app/scripts/check_providers.py
+          if ! docker exec "$cid" python /app/scripts/check_providers.py "$req"; then
+            echo "::error::$req built an image whose providers cannot all reach certbot"
+            docker rm -f "$cid" >/dev/null 2>&1 || true
+            exit 1
+          fi
+
+          docker rm -f "$cid" >/dev/null 2>&1 || true
+          echo "::endgroup::"
+        done
+
+    # The optional requirements files are never built above, because no image
+    # ships them — and that is exactly why they rotted unnoticed:
+    #
+    #   * requirements-extended.txt could not be installed at all, in any
+    #     environment. certbot-dns-powerdns==0.2.1 wants dns-lexicon<=3.5.6 and
+    #     certbot-dns-linode wants >=3.14.1: ResolutionImpossible, alone in an
+    #     empty venv or layered either way. Advertised by the Dockerfile as an
+    #     EXTRA_REQUIREMENTS option the whole time.
+    #   * requirements-aws.txt and -gcp.txt pinned plugins above the certbot
+    #     pin. Since extras install in a *separate* pip run, pip upgraded
+    #     certbot off 2.10.0 — measured at 3.3.0 on 3.12 — in a build that
+    #     reported success.
+    #
+    # Resolving is enough to catch both and costs seconds, so every file and
+    # every combination the Dockerfile and docker-compose.yml advertise gets
+    # resolved on every run. `--dry-run` does full dependency resolution
+    # without downloading wheels.
+    - name: Resolve every optional requirements combination
+      if: matrix.python-version == '3.12'
+      run: |
+        set -euo pipefail
+        # Kept in step with what the Dockerfile, docker-compose.yml and the
+        # README actually advertise —
+        # tests/test_requirements_are_consistent.py fails if one of them names
+        # a combination this list does not resolve. The storage entries below
+        # arrived that way: the comment above claimed "every combination the
+        # Dockerfile advertises", and two of the three it advertises were not
+        # here (#686).
+        combos=(
+          "requirements-minimal.txt requirements-extended.txt"
+          "requirements.txt requirements-aws.txt"
+          "requirements.txt requirements-gcp.txt"
+          "requirements.txt requirements-azure.txt"
+          "requirements.txt requirements-aws.txt requirements-gcp.txt"
+          "requirements.txt requirements-storage-all.txt"
+          "requirements.txt requirements-azure.txt requirements-storage-all.txt"
+        )
+        pinned=$(grep -oE '^certbot==[0-9.]+' requirements.txt | cut -d= -f3)
+        echo "certbot is pinned at $pinned"
+        for combo in "${combos[@]}"; do
+          echo "::group::resolve $combo"
+          args=()
+          for f in $combo; do args+=(-r "$f"); done
+          # Resolved together, not one after another. The Dockerfile installs
+          # extras in a separate pip run, where a plugin requiring a newer
+          # certbot is silently granted it; asking pip to satisfy every file at
+          # once turns that same silent upgrade into ResolutionImpossible,
+          # which is the answer we want on a build machine. Both failure modes
+          # are covered: this catches the conflict, the version check below
+          # catches a drift pip could satisfy.
+          report=$(mktemp)
+          # --ignore-installed is what makes this a check. The job already has
+          # requirements.txt installed, so without it pip reports only the
+          # delta — four packages, certbot not among them — and any assertion
+          # about certbot's resolved version passes without having looked at
+          # one. Verified: the report goes from 4 entries to the full set.
+          if ! python -m pip install --dry-run --ignore-installed --quiet \
+               --report "$report" "${args[@]}"; then
+            echo "::error::$combo does not resolve — this combination is advertised and cannot be installed"
+            exit 1
+          fi
+          # One line on purpose: a multi-line `python -c "..."` inside a YAML
+          # block scalar has to start at column 0 to be valid Python, and that
+          # is not valid YAML. The default is 'ABSENT', never the pinned
+          # version — a resolution that does not mention certbot has not
+          # checked certbot, and must not read as a pass.
+          got=$(python -c "import json; d=json.load(open('$report')); print(next((i.get('metadata',{}).get('version','UNKNOWN') for i in d.get('install',[]) if i.get('metadata',{}).get('name','').lower()=='certbot'), 'ABSENT'))")
+          if [ "$got" != "$pinned" ]; then
+            echo "::error::$combo resolves certbot to $got, not the pinned $pinned. An optional file is dragging the ACME stack off its pin (#103 is still a plan, not a migration)."
+            exit 1
+          fi
+          echo "$combo -> certbot $got"
+          echo "::endgroup::"
+        done
+
+    # The step above resolves each combination as ONE pip run, which is the
+    # strict question ("could these coexist"). This one asks the Dockerfile's
+    # question instead: the base variant installs from its lockfile, then each
+    # extras file installs as a SEPARATE pip run constrained by that same lock.
+    #
+    # The two differ in a way that matters. `requirements.txt` constrains 42
+    # packages; `requirements.lock` constrains 118. Constraining extras with
+    # the lock is the only way an extras layer cannot move a transitive out
+    # from under the locked base — but it can also make an advertised
+    # combination unresolvable, and finding that out during a release build is
+    # too late. Every combination was measured to resolve under the lock before
+    # it was adopted; this re-measures it on every run, because "it resolved
+    # when I checked" is a statement about one afternoon.
+    - name: Resolve every combination under the lockfile constraint
+      if: matrix.python-version == '3.12'
+      run: |
+        set -euo pipefail
+        combos=(
+          "requirements-minimal.txt requirements-extended.txt"
+          "requirements.txt requirements-aws.txt"
+          "requirements.txt requirements-gcp.txt"
+          "requirements.txt requirements-azure.txt"
+          "requirements.txt requirements-aws.txt requirements-gcp.txt"
+          "requirements.txt requirements-storage-all.txt"
+          "requirements.txt requirements-azure.txt requirements-storage-all.txt"
+        )
+        for combo in "${combos[@]}"; do
+          set -- $combo
+          base="$1"; shift
+          # The same derivation the Dockerfile makes, so a variant that gains
+          # or loses a lock is covered here without editing this list.
+          constraint="${base%.txt}.lock"
+          [ -f "$constraint" ] || constraint="$base"
+          echo "::group::$base (constraint: $constraint) + $*"
+          for extra in "$@"; do
+            if ! python -m pip install --dry-run --ignore-installed --quiet \
+                 --no-cache-dir -c "$constraint" -r "$extra" >/dev/null; then
+              echo "::error::$extra does not resolve under $constraint. The lock pins a transitive package this extras file needs a different version of — regenerate the lock (scripts/regenerate_lockfiles.sh) or the advertised combination cannot be built."
+              exit 1
+            fi
+            echo "$extra resolves under $constraint"
+          done
+          echo "::endgroup::"
+        done
+
+    # The images are published for amd64 AND arm64, and every check above runs
+    # on exactly one of them. That is how `infisical-python>=2.3.6` sat in two
+    # advertised requirements files: 2.3.6 ships an aarch64 wheel, macOS wheels
+    # and Windows wheels, but no manylinux x86_64 wheel and no sdist. It
+    # installs on the arm64 image and cannot be installed on the amd64 one at
+    # all. A resolver running on either architecture alone sees nothing wrong.
+    #
+    # pip can resolve FOR another platform without emulating it. The check is
+    # not "does it resolve" — with --only-binary a source-only distribution
+    # fails everywhere, and most certbot plugins are source-only — but "do the
+    # two architectures AGREE". A file that fails on both is inconclusive, not
+    # broken, and is reported as such rather than counted as covered.
+    - name: Resolve the optional requirements for both published architectures
+      if: matrix.python-version == '3.12'
+      run: |
+        set -euo pipefail
+        skew=0
+        for req in requirements*.txt; do
+          case "$req" in requirements-test.txt) continue;; esac
+          verdicts=""
+          for plat in manylinux_2_28_x86_64 manylinux_2_28_aarch64; do
+            if python -m pip install --dry-run --quiet --no-cache-dir \
+                 --ignore-installed --only-binary=:all: \
+                 --platform "$plat" --python-version 3.12 \
+                 --target "$(mktemp -d)" -r "$req" >/dev/null 2>&1; then
+              verdicts="$verdicts $plat=ok"
+            else
+              verdicts="$verdicts $plat=no"
+            fi
+          done
+          case "$verdicts" in
+            *x86_64=ok*aarch64=ok*) echo "$req: both architectures resolve";;
+            *x86_64=no*aarch64=no*) echo "$req: inconclusive (source-only distributions; not covered by this check)";;
+            *) echo "::error::$req resolves on one published architecture and not the other:$verdicts. An image built for the other architecture cannot install it."
+               skew=1;;
+          esac
+        done
+        [ "$skew" -eq 0 ]
+
+  # Every CA in the registry, asked whether its ACME directory still exists.
+  #
+  # `digicert` pointed at acme.digicert.com for months after DigiCert retired
+  # CertCentral's legacy ACME service on 24 February 2026 — the hostname stopped
+  # resolving and nothing said so, because a CA endpoint is only exercised
+  # during a real issuance against that CA, and the release gate issues against
+  # Let's Encrypt staging. Weekly is the right cadence: a CA does not retire an
+  # endpoint between two pull requests, and this must never be the reason a
+  # merge is blocked.
+  # A translated page that is behind its English source has to say so (#674).
+  #
+  # It does not require current translations. It requires that improving the
+  # English brings the translation with it, or leaves the translation saying,
+  # in its own language, that it is behind. All four translations of
+  # docs/mcp.md described a job-polling loop for five weeks after the English
+  # page was fixed for describing one that could not run.
+  #
+  # No fetch-depth here: each page records the hash of the English it was
+  # translated from, so this needs no history at all. The first version
+  # compared commit dates and defeated itself, because marking a page as stale
+  # is an edit and an edit made it the fresher of the pair.
+  translations:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+    - name: Set up Python
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v5
+      with:
+        python-version: '3.12'
+
+    - name: Every stale translation says it is stale
+      run: python scripts/check_translation_freshness.py
+
+  ca-endpoints:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+    - name: Set up Python
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v5
+      with:
+        python-version: '3.12'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r requirements-test.txt
+
+    - name: Ask every CA whether its directory still exists
+      run: pytest tests/test_ca_endpoints_are_live.py -v --tb=short -m network
+
+  # The wiki is a separate git repository, so nothing in CI has ever looked at
+  # it — and it has now drifted three times, each time by keeping a second copy
+  # of something the repo had already corrected. The last sweep found four
+  # claims fixed in docs/ months earlier: Python 3.9, a DigiCert host that
+  # stopped resolving in February, an endpoint that returns 404, and an
+  # environment variable read by nothing.
+  #
+  # Weekly and not required, for the same reason as ca-endpoints: the wiki is
+  # not part of the merge decision, and a clone failing should never block a
+  # pull request. A finding here is news, not a broken build.
+  wiki:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+    - name: Set up Python
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v5
+      with:
+        python-version: '3.12'
+
+    - name: Clone the wiki
+      run: git clone --depth 1 https://github.com/${{ github.repository }}.wiki.git wiki
+
+    - name: Check the wiki against the repository
+      run: python scripts/check_wiki.py wiki
+
+  # Every dependency advisory we are living with must be written down.
+  #
+  # CertMate holds cryptography and pyopenssl behind their fixed versions on
+  # purpose, and records that decision in SECURITY.md while dismissing the
+  # alert as tolerable_risk pointing back at it. On 2026-08-21 the record had
+  # drifted: SECURITY.md documented one advisory, dismissed months earlier,
+  # while three published on 2026-08-03 against the same pin sat open,
+  # unassessed and unmentioned — through a release. The reasoning in the file
+  # was fine; it had stopped being the complete list, and nothing looked.
+  #
+  # Weekly rather than a merge gate because it needs the live alert list,
+  # which no test can see. A finding here is news: either an advisory arrived
+  # and nobody assessed it, or the pin can finally move.
+  advisories:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      # A job-level permissions block REPLACES the workflow-level read-all, it
+      # does not add to it. This block used to name `security-events: read`,
+      # on the belief that it was documenting what read-all already granted.
+      # It was not documenting it, it was narrowing it: the token came out
+      # with Contents / Metadata / SecurityEvents and without
+      # VulnerabilityAlerts, which is the one the Dependabot alerts endpoint
+      # actually checks, so the API answered 403 and this gate failed every
+      # week from 2026-08-31 without ever looking at an advisory.
+      #
+      # `vulnerability-alerts` is the documented key for "Read Dependabot
+      # alerts" and takes read or none, never write.
+      vulnerability-alerts: read
+      contents: read
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+    - name: Set up Python
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v5
+      with:
+        python-version: '3.12'
+
+    - name: Every carried advisory is documented in SECURITY.md
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: python scripts/check_advisories.py ${{ github.repository }}
+
+  # The wiki is the fourth place this project documents its API, and the only
+  # one no test could reach: it is a separate git repository, so
+  # test_advertised_endpoints_exist.py and test_the_api_surface_is_documented.py
+  # cannot see it.
+  #
+  # Left alone it rots, and it did. Twenty-seven days and seven releases after
+  # its last edit, DNS-Providers.md carried six copy-pasteable curl commands
+  # that all answered 404, against a prefix that does not exist and a
+  # `default-account` endpoint that never has. This repository has a test
+  # asserting that `default-account` has never existed; it could not see the
+  # page documenting it.
+  #
+  # Weekly rather than a merge gate for a structural reason, not taste: editing
+  # the wiki does not run this workflow, so a merge gate would only ever check
+  # the wiki at the moments it had not changed. Same shape as `advisories`.
+  wiki-endpoints:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+    - name: Set up Python
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v5
+      with:
+        python-version: '3.12'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    # The wiki has no CI of its own, so it is fetched here. A clone failure
+    # must fail the job rather than skip it: a check that reports success on a
+    # wiki it never read is the failure this job exists to prevent.
+    - name: Fetch the wiki
+      run: git clone --depth 1 https://github.com/${{ github.repository }}.wiki.git /tmp/wiki
+
+    - name: Every endpoint the wiki states is one the application serves
+      run: python scripts/check_wiki_endpoints.py /tmp/wiki
+
+  # Storage backends against real servers rather than a faithful fake.
+  #
+  # The in-memory S3 fake is a good test and cannot disagree with me: it
+  # reproduces my understanding of the protocol, including where that is
+  # wrong. Two of the five remote backends run for real at no meaningful cost,
+  # and the first live run found two things the fake never asked about — every
+  # remote backend silently mangled non-UTF-8 content, and S3 and Vault
+  # reported a successful delete for a certificate that was never there while
+  # the local backend reported False, on the path that warns an operator to
+  # check for a leftover private key.
+  #
+  # Runs on pull requests: unlike the CA probes these are local containers, so
+  # nobody else's outage can turn it red.
+  storage-live:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+    - name: Set up Python
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v5
+      with:
+        python-version: '3.12'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r requirements-test.txt
+        # hvac lives in the optional Vault set, not the core one. Installed
+        # from that file rather than by name so it carries the same constraint
+        # as a real Vault deployment; a bare `pip install hvac` would make this
+        # job the one place the version floats (Copilot, #559).
+        pip install -r requirements-vault-storage.txt
+
+    # Started here rather than under `services:` because a service container
+    # cannot be given a command, and the readiness wait below wants to be
+    # explicit rather than a health-check guess.
+    - name: Start the S3 server and Vault
+      run: |
+        set -euo pipefail
+        # Scality CloudServer, not MinIO. minio/minio now answers
+        # `unauthorized` to an anonymous pull on Docker Hub AND on quay.io,
+        # for every tag and for the digest that was pinned here — the quay
+        # move above bought about five weeks. Both registries were asked
+        # directly for the manifest and both returned 401, with a control
+        # pull from quay.io succeeding, so this is the image and not the
+        # network.
+        #
+        # Which makes the comment this job used to carry — "these are local
+        # containers, so nobody else's outage can turn it red" — the thing
+        # that was actually wrong. A container is local; the registry it
+        # comes from is not.
+        #
+        # CloudServer was chosen over the lighter S3 fakes for one reason:
+        # test_s3_bad_credentials_are_not_reported_as_a_missing_certificate
+        # needs a server that VERIFIES the signature. localstack and
+        # adobe/s3mock accept any credential, so that test would have passed
+        # by accepting the wrong password — the exact shape of defect this
+        # suite exists to catch. Measured: a deliberate wrong secret gets
+        # SignatureDoesNotMatch, the right one gets a bucket listing.
+        #
+        # S3BACKEND=mem keeps it in memory; nothing here outlives the job.
+        docker run -d --name s3 -p 19000:8000 \
+          -e S3BACKEND=mem \
+          -e SCALITY_ACCESS_KEY_ID=certmate \
+          -e SCALITY_SECRET_ACCESS_KEY=certmate123 \
+          -e REMOTE_MANAGEMENT_DISABLE=1 \
+          zenko/cloudserver:latest@sha256:b53e57829cf7df357323e60a19c9f98d2218f1b7ccb1d7cea5761a5a227a9ee3
+        docker run -d --name vault -p 18200:8200 --cap-add IPC_LOCK \
+          -e VAULT_DEV_ROOT_TOKEN_ID=certmate-root \
+          -e VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200 \
+          hashicorp/vault:latest@sha256:5be49781ecf78bfe775c5309c6a4d9f4e9e040b6c885c99eb2b12fb69855e1a2
+        # Readiness by doing the thing, not by asking a health endpoint:
+        # CloudServer's /_/healthcheck is IP-restricted and answers 403 even
+        # when the server is perfectly well, so a `curl -f` against it would
+        # loop until the timeout on a healthy container. A successful
+        # list_buckets proves the port answers AND that the credentials the
+        # suite uses are the ones the server accepts.
+        for i in $(seq 1 60); do
+          python - <<'READY' >/dev/null 2>&1 \
+            && curl -fsS http://localhost:18200/v1/sys/health >/dev/null 2>&1 \
+            && { echo "both up after ${i}s"; exit 0; }
+        import boto3
+        boto3.client('s3', endpoint_url='http://localhost:19000',
+                     aws_access_key_id='certmate',
+                     aws_secret_access_key='certmate123',
+                     region_name='us-east-1').list_buckets()
+        READY
+          sleep 1
+        done
+        echo "::error::the S3 server or Vault never became ready"
+        docker logs s3 2>&1 | tail -20
+        docker logs vault 2>&1 | tail -20
+        exit 1
+
+    - name: Exercise the storage backends against S3 and Vault
+      env:
+        CERTMATE_TEST_S3_ENDPOINT: http://localhost:19000
+        CERTMATE_TEST_VAULT_ADDR: http://localhost:18200
+      run: |
+        # The suite fails rather than skips when these are set and the server
+        # does not answer, so a container that died cannot pass as a green run
+        # of zero tests. Belt and braces: assert the count too, because
+        # "0 passed" is a suspiciously agreeable result.
+        pytest tests/test_storage_backends_live.py -m live -v | tee /tmp/live.log
+        grep -q "12 passed" /tmp/live.log || {
+          echo "::error::the live storage suite did not run the expected tests"
+          exit 1
+        }
+
+  # The acme-dns hook against a real acme-dns, including the DNS answer.
+  #
+  # This is the one path in the product with a documented history of never
+  # having worked: the certbot plugin CertMate used until v2.24.0 exposes no
+  # credentials-file option, so certbot rejected the command line and every
+  # acme-dns issuance failed, in every release that advertised it. The
+  # replacement publishes the TXT record itself and was verified by hand once.
+  # Nothing has verified it since.
+  #
+  # A mock cannot: the failure was an API contract that looked right. So the
+  # suite drives the real hook and then asks DNS whether the record is there —
+  # "the POST returned 200" is exactly what a fake would have told you.
+  #
+  # postgres is not optional: the official acme-dns image is built without the
+  # sqlite driver and dies with `sql: unknown driver "sqlite3"`.
+  acme-dns-live:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+    - name: Set up Python
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v5
+      with:
+        python-version: '3.12'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r requirements-test.txt
+
+    - name: Start acme-dns and the postgres it needs
+      run: |
+        set -euo pipefail
+        docker network create acmedns-net
+
+        docker run -d --name acmedns-pg --network acmedns-net \
+          -e POSTGRES_USER=acmedns -e POSTGRES_PASSWORD=acmedns \
+          -e POSTGRES_DB=acmedns \
+          postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+
+        mkdir -p "$RUNNER_TEMP/acme-dns"
+        # `port` must be quoted: acme-dns parses it as a string and refuses to
+        # start on an int with "incompatible types".
+        cat > "$RUNNER_TEMP/acme-dns/config.cfg" <<'CFG'
+        [general]
+        listen = "0.0.0.0:53"
+        protocol = "both"
+        domain = "auth.test"
+        nsname = "auth.test"
+        nsadmin = "admin.auth.test"
+        records = ["auth.test. A 127.0.0.1", "auth.test. NS auth.test."]
+        debug = false
+        [database]
+        engine = "postgres"
+        connection = "postgres://acmedns:acmedns@acmedns-pg:5432/acmedns?sslmode=disable"
+        [api]
+        ip = "0.0.0.0"
+        port = "8080"
+        tls = "none"
+        corsorigins = ["*"]
+        use_header = false
+        header_name = "X-Forwarded-For"
+        [logconfig]
+        loglevel = "info"
+        logtype = "stdout"
+        logformat = "text"
+        CFG
+
+        # Readiness over TCP (-h): during initdb the image's bootstrap server
+        # answers on the unix socket only, then restarts for real. 90 s: a
+        # cold runner has been seen to take more than 30 (#566).
+        for i in $(seq 1 90); do
+          docker exec acmedns-pg pg_isready -h 127.0.0.1 -U acmedns -d acmedns >/dev/null 2>&1 && break
+          sleep 1
+        done
+        # The loop above breaks on success and falls through on timeout; say
+        # so here, or the acme-dns container fails later with a less useful
+        # error (Copilot, #560).
+        docker exec acmedns-pg pg_isready -h 127.0.0.1 -U acmedns -d acmedns >/dev/null 2>&1 \
+          || { echo "postgres never became ready"; docker logs acmedns-pg; exit 1; }
+
+        docker run -d --name acmedns --network acmedns-net \
+          -p 18053:53/udp -p 18080:8080 \
+          -v "$RUNNER_TEMP/acme-dns:/etc/acme-dns:ro" \
+          joohoi/acme-dns:latest@sha256:8d327df58b1c9f6361c76734f9761a108fa4f12cf7ca94440a0404a28f75de62
+
+        for i in $(seq 1 30); do
+          curl -fsS -X POST http://localhost:18080/register >/dev/null 2>&1 \
+            && { echo "acme-dns up after ${i}s"; exit 0; }
+          sleep 1
+        done
+        echo "::error::acme-dns never became ready"
+        docker logs acmedns 2>&1 | tail -30
+        docker logs acmedns-pg 2>&1 | tail -10
+        exit 1
+
+    - name: Drive the hook and check DNS actually serves the record
+      env:
+        CERTMATE_TEST_ACMEDNS_URL: http://localhost:18080
+        CERTMATE_TEST_ACMEDNS_DNS: 127.0.0.1:18053
+      run: |
+        pytest tests/test_acme_dns_live.py -m live -v | tee /tmp/acmedns.log
+        grep -q "5 passed" /tmp/acmedns.log || {
+          echo "::error::the acme-dns suite did not run the expected tests"
+          exit 1
+        }
 
   # The Tailwind bundle (static/css/tailwind.min.css) is committed to the repo
   # and served as-is — there is no build step at deploy time. So a stale bundle
   # ships silently whenever input.css / tailwind.config.js change without a
   # rebuild. This job rebuilds from source and fails if the committed output
   # drifts, forcing `npm run css:build` to be part of every CSS-touching PR.
-  frontend-css:
-    runs-on: [self-hosted, Linux, X64]
+  # The MCP server ships in the image and is documented as a supported way to
+  # drive CertMate from an assistant, but its two test suites were run by
+  # nothing: no workflow, no Makefile target, not run-tests.sh, not release.sh.
+  # Dependabot DOES update mcp/ dependencies (.github/dependabot.yml), so those
+  # bumps were shipping with a suite that never executed — and the async
+  # regression that made the documented job-polling loop impossible sat there
+  # undetected because nothing asked.
+  mcp:
+    if: github.event_name != 'schedule'
+    name: MCP server
+    runs-on: ubuntu-latest
     steps:
     - name: Checkout code
-      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
     - name: Set up Node
-      uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af  # v4
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v4
+      with:
+        node-version: '20'
+
+    - name: Install MCP dependencies
+      working-directory: mcp
+      run: npm ci
+
+    - name: Run the MCP suites
+      working-directory: mcp
+      run: npm test
+
+  frontend-css:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+    - name: Set up Node
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v4
       with:
         node-version: '20'
         cache: npm

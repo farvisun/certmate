@@ -24,13 +24,15 @@ These tests pin five contracts:
 from __future__ import annotations
 
 from unittest.mock import patch
-from pathlib import Path
 
 import pytest
 from flask import Flask
 
 from modules.core.file_operations import FileOperations
 from modules.core.settings import SettingsManager
+
+
+pytestmark = [pytest.mark.unit]
 
 
 @pytest.fixture

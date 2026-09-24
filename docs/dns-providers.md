@@ -13,6 +13,7 @@ CertMate supports a wide range of DNS providers for Let's Encrypt DNS-01 challen
 | **Azure DNS** | `certbot-dns-azure` | Service Principal | Major Cloud |
 | **Google Cloud DNS** | `certbot-dns-google` | Service Account JSON | Major Cloud |
 | **PowerDNS** | `certbot-dns-powerdns` | API URL, API Key | Enterprise |
+| **EfficientIP SOLIDserver** | custom REST API script | Host, API Credentials | Enterprise |
 | **DNS Made Easy** | `certbot-dns-dnsmadeeasy` | API Key, Secret Key | Enterprise |
 | **NS1** | `certbot-dns-nsone` | API Key | Enterprise |
 | **DigitalOcean** | `certbot-dns-digitalocean` | API Token | Cloud |
@@ -29,7 +30,7 @@ CertMate supports a wide range of DNS providers for Let's Encrypt DNS-01 challen
 | **Infomaniak** | `certbot-dns-infomaniak` | API Token | Regional |
 | **ArvanCloud** | `certbot-dns-arvancloud` | API Key | Regional |
 | **RFC2136** | `certbot-dns-rfc2136` | Nameserver, TSIG Key | Standard Protocol |
-| **ACME-DNS** | `certbot-acme-dns` | API URL, Username, Password | Specialized |
+| **ACME-DNS** | _built-in_ (no plugin) | API URL, Username, Password, Subdomain | Specialized |
 | **Hurricane Electric** | `certbot-dns-he-ddns` | Username, Password | Free DNS |
 | **Dynu** | `certbot-dns-dynudns` | API Token | Dynamic DNS |
 | **DuckDNS** | `certbot-dns-duckdns` | Account Token | Free DDNS (no domain required) |
@@ -136,6 +137,25 @@ curl -X POST http://localhost:8000/api/settings \
     "powerdns": {
       "api_url": "https://your-powerdns-server:8081",
       "api_key": "your_powerdns_api_key"
+```
+    }
+  }
+}
+```
+
+### EfficientIP SOLIDserver
+
+```json
+{
+  "dns_provider": "solidserver",
+  "dns_providers": {
+    "solidserver": {
+      "host": "your-solidserver.example.com",
+      "username": "user",
+      "password": "password",
+      "dns_name": "dns_name",
+      "dnsview_name": "optionnal",
+      "propagation_seconds": 120
     }
   }
 }
@@ -404,6 +424,12 @@ The optional cleanup hook runs after validation to remove the record.
 
 Worked example for OCI DNS (covers [#285](https://github.com/fabriziosalmi/certmate/issues/285)). Note that a certificate covering both `example.com` and `*.example.com` produces TWO validation challenges on the same `_acme-challenge.example.com` name, and certbot runs all auth hooks before validating — so the hook must APPEND to the TXT rrset, never replace it (a plain `rrset update` would wipe the first token with the second):
 
+This example calls the `oci` CLI, which the stock CertMate image does **not**
+ship — the runtime stage installs `bash`, `curl` and `tini` and nothing else.
+Provide it yourself: add a layer on top of the image, or bind-mount the
+binary and its config into the container. The hook runs inside CertMate, so
+the CLI has to be on CertMate's PATH, not on the host's.
+
 ```bash
 #!/bin/sh
 # /usr/local/bin/certmate-dns-auth.sh
@@ -435,9 +461,12 @@ sleep "${CERTMATE_DNS_PROPAGATION_SECONDS:-60}"
 Requirements and trust model:
 
 - Paths must be **absolute**, the files must exist, be **executable**,
-  must not be world-writable, and must not contain whitespace or shell
-  metacharacters (certbot executes hooks through the shell). Validated at
-  issuance and by the test-provider API endpoint
+  must not be world- **or group-** writable (`chmod 755` or stricter), and
+  must not contain whitespace or shell metacharacters (certbot executes
+  hooks through the shell). A `chmod 775` hook — an ordinary mode for a
+  script owned by a deploy group — is refused: anyone in that group could
+  rewrite what CertMate is about to execute. Validated at issuance and by
+  the test-provider API endpoint
   (`POST /api/web/certificates/test-provider`)
 - Scripts run with CertMate's privileges — same trust model as deploy
   hooks: only admins can configure them, treat them as part of your
@@ -503,7 +532,7 @@ CertMate supports multiple accounts per DNS provider for enterprise environments
 
 ```bash
 # Add production account
-curl -X POST http://localhost:8000/api/settings/dns-providers/cloudflare/accounts \
+curl -X POST http://localhost:8000/api/dns/cloudflare/accounts \
   -H "Authorization: Bearer YOUR_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -516,7 +545,7 @@ curl -X POST http://localhost:8000/api/settings/dns-providers/cloudflare/account
   }'
 
 # Add staging account
-curl -X POST http://localhost:8000/api/settings/dns-providers/cloudflare/accounts \
+curl -X POST http://localhost:8000/api/dns/cloudflare/accounts \
   -H "Authorization: Bearer YOUR_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -528,22 +557,23 @@ curl -X POST http://localhost:8000/api/settings/dns-providers/cloudflare/account
     }
   }'
 
-# Set production as default
-curl -X PUT http://localhost:8000/api/settings/dns-providers/cloudflare/default-account \
+# Set production as default (there is no separate endpoint:
+# "set_as_default" travels with the account payload)
+curl -X PUT http://localhost:8000/api/dns/cloudflare/accounts/production \
   -H "Authorization: Bearer YOUR_API_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"account_id": "production"}'
+  -d '{"set_as_default": true}'
 ```
 
 ### Managing Accounts
 
 ```bash
 # List all accounts for a provider
-curl -X GET http://localhost:8000/api/settings/dns-providers/cloudflare/accounts \
+curl -X GET http://localhost:8000/api/dns/cloudflare/accounts \
   -H "Authorization: Bearer YOUR_API_TOKEN"
 
 # Update an account
-curl -X PUT http://localhost:8000/api/settings/dns-providers/cloudflare/accounts/staging \
+curl -X PUT http://localhost:8000/api/dns/cloudflare/accounts/staging \
   -H "Authorization: Bearer YOUR_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -554,7 +584,7 @@ curl -X PUT http://localhost:8000/api/settings/dns-providers/cloudflare/accounts
   }'
 
 # Delete an account
-curl -X DELETE http://localhost:8000/api/settings/dns-providers/cloudflare/accounts/old-account \
+curl -X DELETE http://localhost:8000/api/dns/cloudflare/accounts/old-account \
   -H "Authorization: Bearer YOUR_API_TOKEN"
 ```
 
@@ -648,6 +678,16 @@ Cloudflare, PowerDNS, and Route53 all use the same request shape:
 ```
 
 For ACME-DNS, `domain_alias` must exactly match the configured ACME-DNS `subdomain`/fulldomain. CertMate updates that ACME-DNS record directly and does not attempt cleanup because ACME-DNS stores the latest validation value.
+
+For **RFC2136** (BIND, Technitium, and other dynamic-update servers), `domain_alias` writes the `_acme-challenge.<alias>` TXT into the alias zone with a TSIG-signed dynamic update, using the same `nameserver` / `tsig_key` / `tsig_secret` (and optional `tsig_algorithm`, default HMAC-SHA512) as normal issuance. CertMate discovers the owning zone from the server's SOA, so one TSIG key can serve several zones — including externally-managed domains whose owners only added the delegating CNAME:
+
+```json
+{
+  "domain": "external.example.com",
+  "dns_provider": "rfc2136",
+  "domain_alias": "internal.example.net"
+}
+```
 
 ### Wildcard Certificates with Domain Alias
 
@@ -780,16 +820,20 @@ See the [Architecture Guide](./architecture.md) for full implementation details.
 
 | Error | Solution |
 |-------|----------|
-| "DNS provider not configured" | Verify all required credentials are provided |
+| `DNS provider '<provider>' account '<id>' not configured` | The account the certificate names has no credentials saved. Add them under Settings, or pick an account that exists |
 | "Certificate creation failed" | Check DNS permissions and domain ownership |
-| "Plugin not found" | Run `pip install -r requirements.txt` or rebuild Docker |
+| `The certbot plugin '<plugin>' is not installed` | Run `pip install certbot-<plugin>`, or rebuild the Docker image with `REQUIREMENTS_FILE=requirements.txt` |
 | "Provider detection failing" | Check `dns_provider` field in domain settings |
 
 ### Debug Mode
 
 ```bash
-export FLASK_DEBUG=1
-python app.py
+# Running app.py directly: use the flag. --log-level defaults to INFO
+# and overrides CERTMATE_LOG_LEVEL.
+python app.py --log-level DEBUG
+
+# Docker / gunicorn: set the environment variable, e.g. in .env
+CERTMATE_LOG_LEVEL=DEBUG
 ```
 
 ### Testing Provider Configuration

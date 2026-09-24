@@ -5,6 +5,7 @@ Implements the Strategy Pattern for DNS provider configuration and management.
 
 import logging
 import os
+import sys
 import shlex
 import subprocess
 from abc import ABC, abstractmethod
@@ -16,11 +17,36 @@ from .utils import (
     create_powerdns_config, create_digitalocean_config, create_linode_config,
     create_gandi_config, create_ovh_config, create_namecheap_config,
     create_arvancloud_config, create_infomaniak_config, create_acme_dns_config,
-    create_duckdns_config, create_edgedns_config, create_multi_provider_config,
-    _create_config_file
+    create_duckdns_config, create_edgedns_config, create_multi_provider_config
 )
 
 logger = logging.getLogger(__name__)
+
+# A DNS-01 propagation wait, bounded. One second is the shortest wait that
+# means anything; one hour is longer than any real zone takes, and an
+# issuance holds the domain lock for the whole of it.
+MIN_PROPAGATION_SECONDS = 1
+MAX_PROPAGATION_SECONDS = 3600
+
+
+def clamp_propagation_seconds(value, default):
+    """Bound *value* to the propagation range, falling back to *default*.
+
+    The global setting has been clamped since #666 "so a typo cannot make an
+    issuance hang". The account-level field — the one this project's own
+    custom-script example reads as `${CERTMATE_DNS_PROPAGATION_SECONDS:-60}`
+    — was exported with `str(propagation)` and no bound at all, and it is
+    never validated on save either. A typo'd `99999` therefore slept for 27
+    hours holding the domain lock, a negative value made `sleep -5` fail the
+    hook under `set -eu`, and a non-numeric value reached the shell verbatim.
+    """
+    try:
+        seconds = int(value)
+    except (ValueError, TypeError):
+        logger.debug("propagation_seconds %r is not a number; using %s",
+                     value, default)
+        return default
+    return max(MIN_PROPAGATION_SECONDS, min(MAX_PROPAGATION_SECONDS, seconds))
 
 
 def check_certbot_plugin_installed(plugin_name: str) -> bool:
@@ -47,13 +73,11 @@ class DNSProviderStrategy(ABC):
     @abstractmethod
     def create_config_file(self, config_data: Dict[str, Any]) -> Optional[Path]:
         """Create the configuration file for the provider"""
-        pass
     
     @property
     @abstractmethod
     def plugin_name(self) -> str:
         """Return the Certbot plugin name"""
-        pass
     
     @property
     def default_propagation_seconds(self) -> int:
@@ -112,11 +136,9 @@ class DNSProviderStrategy(ABC):
 
     def prepare_environment(self, env: Dict[str, str], config_data: Dict[str, Any]) -> None:
         """Set up environment variables if needed"""
-        pass
 
     def cleanup_environment(self, env: Dict[str, str]) -> None:
         """Clean up environment variables"""
-        pass
 
 class CloudflareStrategy(DNSProviderStrategy):
     def create_config_file(self, config_data: Dict[str, Any]) -> Optional[Path]:
@@ -224,11 +246,35 @@ class AzureStrategy(DNSProviderStrategy):
     # can fall through to it unchanged.
 
 class GoogleStrategy(DNSProviderStrategy):
+    """Google Cloud DNS.
+
+    The credentials file IS the service-account JSON — see create_google_config
+    and issue #385. Nothing else is written, so there are no extra secret files
+    to clean up: the single returned path is the SA key, and the caller's
+    ``finally`` already deletes the credentials file.
+    """
+
+    def __init__(self):
+        self.extra_credential_files: list = []
+        self._project_id: str = ''
+
     def create_config_file(self, config_data: Dict[str, Any]) -> Optional[Path]:
+        # Stashed for configure_certbot_arguments: the project is a certbot
+        # flag, not a field in any file.
+        self._project_id = str(config_data.get('project_id') or '').strip()
         return create_google_config(
-            config_data.get('project_id', ''),
+            self._project_id,
             config_data.get('service_account_key', ''),
         )
+
+    def configure_certbot_arguments(self, cmd: list, credentials_file: Optional[Path],
+                                    domain_alias: Optional[str] = None) -> None:
+        super().configure_certbot_arguments(cmd, credentials_file, domain_alias=domain_alias)
+        # Optional for the plugin, which otherwise reads project_id out of the
+        # SA JSON. Passed when configured so an operator whose key belongs to a
+        # different project than the zone still resolves the right one.
+        if self._project_id:
+            cmd.extend([f'--{self.plugin_name}-project', self._project_id])
 
     @property
     def plugin_name(self) -> str:
@@ -425,15 +471,21 @@ class AcmeDNSStrategy(DNSProviderStrategy):
         return 30
 
     def configure_certbot_arguments(self, cmd: list, credentials_file: Optional[Path], domain_alias: Optional[str] = None) -> None:
-        cmd.extend(['--authenticator', 'acme-dns'])
-        if credentials_file:
-            cmd.extend(['--acme-dns-credentials', str(credentials_file)])
-
-        if domain_alias:
-            logger.info(
-                f"DNS alias '{domain_alias}' requested for ACME-DNS — ensure a CNAME "
-                f"from _acme-challenge.<domain> to _acme-challenge.{domain_alias} exists."
-            )
+        # Unreachable by design. There is no working certbot authenticator for
+        # acme-dns: the published ``certbot-acme-dns`` package exposes only
+        # --acme-dns-server / --acme-dns-propagation-seconds / --acme-dns-is-trusted
+        # and never implements a credentials-file option, so the
+        # ``--acme-dns-credentials`` this method used to emit was rejected by
+        # certbot's argument parser and acme-dns issuance always failed
+        # (issue #466). CertificateManager routes acme-dns through the native
+        # hook instead — see CertificateManager._acme_dns_native_alias. Failing
+        # loudly here keeps a future refactor from silently restoring the
+        # broken flags.
+        raise RuntimeError(
+            "acme-dns does not use a certbot authenticator; it is driven by "
+            "CertMate's native DNS hook. This is a bug in the caller: issuance "
+            "and renewal must route through _acme_dns_native_alias."
+        )
 
 class DuckDNSStrategy(DNSProviderStrategy):
     """DuckDNS free DDNS provider via certbot-dns-duckdns plugin.
@@ -474,6 +526,15 @@ class DuckDNSStrategy(DNSProviderStrategy):
 
 
 class GenericMultiProviderStrategy(DNSProviderStrategy):
+    # CertMate provider name -> certbot entry-point name, where the plugin
+    # does not follow the dns-<provider> convention. Everything keyed on the
+    # plugin name (--authenticator, --<name>-credentials,
+    # --<name>-propagation-seconds, the installed-plugin check, and the
+    # dns_<name>_* ini key prefix in _MULTI_PROVIDER_TEMPLATE_MAP) must use
+    # the entry-point name: certbot-dns-dynudns registers 'dns-dynu'
+    # (setup.py entry_points), so 'dns-dynudns' selects nothing.
+    _PLUGIN_NAME_OVERRIDES = {'dynudns': 'dns-dynu'}
+
     def __init__(self, provider_name: str):
         self.provider_name = provider_name
 
@@ -482,7 +543,8 @@ class GenericMultiProviderStrategy(DNSProviderStrategy):
 
     @property
     def plugin_name(self) -> str:
-        return f'dns-{self.provider_name}'
+        return self._PLUGIN_NAME_OVERRIDES.get(
+            self.provider_name, f'dns-{self.provider_name}')
 
 
 class CustomScriptStrategy(DNSProviderStrategy):
@@ -548,9 +610,14 @@ class CustomScriptStrategy(DNSProviderStrategy):
                 f"Refusing to execute a script anyone on the host can modify."
             )
         if mode & 0o020:
-            logger.warning(
-                f"custom-script {label} {path} is group-writable "
-                f"({oct(mode & 0o777)}); consider chmod 755 or stricter."
+            # Same trust boundary as the world-writable branch above: the
+            # script runs with CertMate's privileges, and any group member
+            # who can rewrite it gets those privileges. A warning here was
+            # advice nobody reads at issuance time; refuse instead.
+            raise ValueError(
+                f"custom-script {label} is group-writable ({oct(mode & 0o777)}): {path}. "
+                f"Refusing to execute a script other group members can modify; "
+                f"chmod 755 or stricter."
             )
         return str(path)
 
@@ -601,7 +668,9 @@ class CustomScriptStrategy(DNSProviderStrategy):
         # polling their DNS API: surfaces the account-level setting.
         propagation = config_data.get('propagation_seconds')
         if propagation:
-            env['CERTMATE_DNS_PROPAGATION_SECONDS'] = str(propagation)
+            env['CERTMATE_DNS_PROPAGATION_SECONDS'] = str(
+                clamp_propagation_seconds(propagation,
+                                          self.default_propagation_seconds))
 
 def acme_webroot_dir() -> Path:
     """Absolute filesystem root for HTTP-01 webroot challenges.
@@ -644,6 +713,41 @@ class HTTP01Strategy(DNSProviderStrategy):
         return 0  # No propagation needed for HTTP-01
 
 
+class SolidServerStrategy(DNSProviderStrategy):
+    """EfficientIP SOLIDserver DNS strategy using custom hook script."""
+
+    def create_config_file(self, config_data: Dict[str, Any]) -> Optional[Path]:
+        return None
+
+    @property
+    def plugin_name(self) -> str:
+        return 'manual'
+
+    @property
+    def supports_propagation_seconds_flag(self) -> bool:
+        return False
+
+    def configure_certbot_arguments(self, cmd: list, credentials_file: Optional[Path], domain_alias: Optional[str] = None) -> None:
+        script_path = str(Path('scripts/solidserver_hook.py').resolve())
+        cmd.extend([
+            '--manual',
+            '--preferred-challenges', 'dns',
+            '--manual-auth-hook', f'{sys.executable} {script_path} auth',
+            '--manual-cleanup-hook', f'{sys.executable} {script_path} cleanup'
+        ])
+
+    def prepare_environment(self, env: Dict[str, str], config_data: Dict[str, Any]) -> None:
+        env['SOLIDSERVER_HOST'] = config_data.get('host', '')
+        env['SOLIDSERVER_USERNAME'] = config_data.get('username', '')
+        env['SOLIDSERVER_PASSWORD'] = config_data.get('password', '')
+        env['SOLIDSERVER_DNS_NAME'] = config_data.get('dns_name', '')
+        env['SOLIDSERVER_DNSVIEW_NAME'] = config_data.get('dnsview_name', '')
+        if config_data.get('propagation_seconds'):
+            env['CERTMATE_DNS_PROPAGATION_SECONDS'] = str(
+                clamp_propagation_seconds(config_data['propagation_seconds'],
+                                          self.default_propagation_seconds))
+
+
 class DNSStrategyFactory:
     """Factory to get the correct strategy for a provider"""
 
@@ -663,6 +767,7 @@ class DNSStrategyFactory:
         'infomaniak': InfomaniakStrategy,
         'acme-dns': AcmeDNSStrategy,
         'duckdns': DuckDNSStrategy,
+        'solidserver': SolidServerStrategy,
         'custom-script': CustomScriptStrategy,
         'http-01': HTTP01Strategy,
     }

@@ -6,7 +6,7 @@ This guide covers all methods of installing and deploying CertMate.
 
 ## Prerequisites
 
-- Python 3.9 or higher
+- Python 3.12
 - pip (Python package manager)
 - Docker (optional, for containerized deployment)
 
@@ -154,23 +154,19 @@ BEHIND_PROXY=true
 # Backup encryption at rest (optional, recommended).
 # When set, unified backups are written as encrypted .zip.enc files
 # (PBKDF2-SHA256 key derivation + Fernet/AES) instead of cleartext .zip.
-# Backups embed every certificate private key, so without this an
-# exfiltrated backup file is a full key compromise. The same passphrase
+# A disaster-recovery backup (include_secrets=true) embeds every
+# certificate private key and every credential, so without this an
+# exfiltrated copy is a full compromise; the default share-safe backup
+# carries neither. The same passphrase
 # must be present to restore. Deliberately env-only: a passphrase stored
 # in settings.json would itself end up inside plaintext backups.
 CERTMATE_BACKUP_PASSPHRASE=choose-a-long-random-passphrase
 
-# DNS Providers (choose one or multiple)
+# DNS provider. Cloudflare is the only provider read from the environment:
+# this token sets the default Cloudflare account. Route53, Azure, Google Cloud
+# DNS, PowerDNS and the rest are configured in Settings -> DNS Providers or
+# through the API; AWS_*, AZURE_* and similar variables here do nothing.
 CLOUDFLARE_TOKEN=your_cloudflare_token
-AWS_ACCESS_KEY_ID=your_aws_access_key
-AWS_SECRET_ACCESS_KEY=your_aws_secret_key
-AZURE_SUBSCRIPTION_ID=your_azure_subscription
-AZURE_TENANT_ID=your_azure_tenant
-AZURE_CLIENT_ID=your_azure_client
-AZURE_CLIENT_SECRET=your_azure_secret
-GOOGLE_PROJECT_ID=your_gcp_project
-POWERDNS_API_URL=https://your-powerdns:8081
-POWERDNS_API_KEY=your_powerdns_key
 ```
 
 ### Resolution Order
@@ -229,6 +225,25 @@ proxy_set_header X-Real-IP         $remote_addr;
 proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
 proxy_set_header X-Forwarded-Proto $scheme;
 ```
+
+#### The bundled nginx profile
+
+`docker-compose.yml` ships an optional `nginx` service (`--profile nginx`)
+that terminates TLS in front of CertMate. Its configuration is **not**
+tracked as `nginx.conf` — that file is yours and gitignored — but as
+`nginx.conf.example`, the same pattern as `.env.example` / `.env`:
+
+```bash
+cp nginx.conf.example nginx.conf
+# edit nginx.conf: replace every <your-domain> in ssl_certificate / ssl_certificate_key
+docker compose --profile nginx up -d
+```
+
+Copy **before** `up`: if `nginx.conf` does not exist on the host when the
+bind mount is created, Docker creates it as an empty *directory* and nginx
+fails to start. Upgrading from a release where `nginx.conf` was tracked:
+your edited copy stays in place (git now ignores it); diff it against the
+new `nginx.conf.example` after a pull to pick up upstream changes.
 
 #### Example: Zion (Rust TLS gateway + WAF)
 
@@ -405,13 +420,14 @@ If you mount `data/` on a network filesystem (NFS, SMB), be aware:
 
 If NFS is unavoidable, mount with `soft,timeo=30,retrans=3` (or your
 distro's equivalent) so I/O fails fast instead of hanging on a stalled
-server, and check `data/logs/certmate.log` for the WAL-fallback line
-after first start.
+server, and check the application log for the WAL-fallback warning
+after first start (stdout, or the file named by `CERTMATE_LOG_FILE` if
+you set one).
 
 ### Using Gunicorn
 
 ```bash
-gunicorn --bind 0.0.0.0:8000 --workers 4 app:app
+gunicorn --bind 0.0.0.0:8000 --workers 1 --threads 8 --timeout 300 app:app
 ```
 
 ### Using systemd
@@ -428,7 +444,8 @@ Type=simple
 User=certmate
 WorkingDirectory=/opt/certmate
 Environment=PATH=/opt/certmate/venv/bin
-ExecStart=/opt/certmate/venv/bin/gunicorn --bind 0.0.0.0:8000 --workers 4 app:app
+Environment=GUNICORN_TIMEOUT=300
+ExecStart=/opt/certmate/venv/bin/gunicorn --bind 0.0.0.0:8000 --workers 1 --threads 8 --timeout ${GUNICORN_TIMEOUT} app:app
 Restart=always
 
 [Install]
@@ -445,18 +462,19 @@ sudo systemctl start certmate
 ### Using Docker in Production
 
 ```yaml
-version: '3.8'
 services:
   certmate:
     build: .
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"  # localhost only; the reverse proxy is what faces the network
     environment:
       - API_BEARER_TOKEN=${API_BEARER_TOKEN}
       - CLOUDFLARE_TOKEN=${CLOUDFLARE_TOKEN}
     volumes:
       - ./certificates:/app/certificates
       - ./data:/app/data
+      - ./logs:/app/logs
+      - ./backups:/app/backups
     restart: unless-stopped
 ```
 
@@ -466,42 +484,47 @@ services:
 
 ### DNS Plugin Version Conflicts
 
-If you encounter version conflicts, use these specific versions:
+Install from the requirements file CertMate ships. That set is resolved, built
+and booted in CI on every run; a list assembled by hand is not.
 
-```txt
-certbot==4.1.1
-certbot-dns-cloudflare==4.1.1
-certbot-dns-route53==4.1.1
-certbot-dns-azure==2.6.1
-certbot-dns-google==4.1.1
-certbot-dns-powerdns==0.2.1
+```bash
+pip install -r requirements.txt            # every bundled provider
+pip install -r requirements-minimal.txt    # certbot + Cloudflare only
+pip install -r requirements-extended.txt   # more providers, on top of minimal
+pip install -r requirements-aws.txt        # Route53, on top of either
 ```
 
-> Most DNS plugins require Certbot 4.1.1. The Azure plugin has independent versioning (2.6.1) and PowerDNS is a newer plugin (0.2.1).
+> This page used to publish its own pinned list, and it had drifted to
+> `certbot==4.1.1` in all five languages while the project is pinned to
+> `2.10.0` — the 5.x migration is still a plan (issue #103), not a release.
+>
+> Correcting those numbers is not enough, which is why the list is gone rather
+> than fixed. What holds the stack together is not the plugin versions but
+> `cryptography`, `pyopenssl`, `josepy` and `acme` holding each other in place:
+> newer pyOpenSSL drops `OpenSSL.crypto.X509Extension`, which `acme` evaluates
+> at import. Assembled by hand, certbot dies before it can issue anything —
+> measured four times, adding one pin at a time. See SECURITY.md, "Known
+> dependency constraint".
+>
+> `certbot-dns-powerdns` needs its own environment: it requires
+> `dns-lexicon<=3.5.6` while the Linode, OVH, RFC2136, DNSMadeEasy and NS1
+> plugins require `>=3.14.1`, and pip cannot satisfy both.
 
 ### Manual Dependency Installation
 
-If automatic installation fails, install DNS providers individually:
+If one provider fails to install, add it on top of a working base rather than
+assembling one by hand:
 
 ```bash
-# Core certbot
-pip install certbot==4.1.1
-
-# Cloudflare
-pip install certbot-dns-cloudflare==4.1.1
-
-# AWS Route53
-pip install certbot-dns-route53==4.1.1 boto3==1.35.76
-
-# Azure DNS
-pip install certbot-dns-azure==2.6.1 azure-identity==1.19.0 azure-mgmt-dns==8.1.0
-
-# Google Cloud DNS
-pip install certbot-dns-google==4.1.1 google-cloud-dns==0.35.0
-
-# PowerDNS
-pip install certbot-dns-powerdns==0.2.1
+pip install -r requirements-minimal.txt    # the working base, first
+pip install -r requirements-aws.txt        # Route53 + boto3
+pip install -r requirements-gcp.txt        # Google Cloud DNS
+pip install -r requirements-azure.txt      # Azure DNS
 ```
+
+Each file carries the versions its plugin needs, and CI resolves every
+combination on every run — including the check that certbot does not move off
+its pin.
 
 ### Validation Commands
 

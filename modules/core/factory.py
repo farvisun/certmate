@@ -1,9 +1,12 @@
+import atexit
 import os
+import re
 import secrets
 import sys
 import threading
 import time
 import traceback
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -20,6 +23,7 @@ from modules.core import (
     RateLimitConfig, SimpleRateLimiter,
     get_certmate_logger
 )
+from modules.core.metrics import metrics_collector
 from modules.core.shell import ShellExecutor
 from modules.core.notifier import Notifier
 from modules.core.events import EventBus
@@ -56,6 +60,9 @@ class AppContainer:
         self.backup_dir = None
         self.logs_dir = None
         self.request_watchdog = None
+        # Set by stop_background_work so the atexit handler and app.py's
+        # Ctrl-C path do not both stop everything twice.
+        self.shutdown_complete = False
 
 
 def _env_float(name: str, default: float, min_value: float = 0.0) -> float:
@@ -206,12 +213,114 @@ def _verify_dir_writable(directory: Path) -> Optional[str]:
     return None
 
 
+def _make_dir_arbitrary_uid_ready(directory: Path):
+    """Create *directory* and make it usable under an arbitrary UID.
+
+    Rootless podman (issue #380) and OpenShift run the container as a UID that
+    is not 1000 and not in /etc/passwd, but is always a member of the root group
+    (GID 0). A directory this process creates at runtime must therefore be
+    group-writable and carry setgid so children inherit the group — otherwise a
+    later boot (or the certbot subprocess) as a same-group UID cannot write here.
+
+    Only touches directories we actually create this boot: a pre-existing mount
+    point owned by another UID keeps whatever perms the host/volume gave it (we
+    are not the owner, so the chmod is a harmless no-op that we ignore).
+    """
+    import stat as _stat
+    try:
+        directory.mkdir()
+        _created = True
+    except FileExistsError:
+        _created = False
+    except OSError as e:
+        logger.error(f"Failed to create {directory}: {e}")
+        return
+
+    if not _created:
+        return
+    # Only relax group perms inside a container (the rootless-podman / OpenShift
+    # arbitrary-UID case). On a bare-metal install we keep the umask default so a
+    # freshly created ./data is not made group-writable unexpectedly.
+    if not (Path('/.dockerenv').exists() or os.getenv('container')):
+        return
+    try:
+        mode = directory.stat().st_mode
+        # Add group rwx + setgid; leave owner/other bits and any secret files
+        # (created 0600 in code) untouched.
+        directory.chmod(mode | _stat.S_ISGID | _stat.S_IRWXG)
+    except OSError:
+        # Not the owner (mount owned elsewhere) — perms already come from the
+        # host/volume; nothing we can or need to do.
+        pass
+
+
+def _data_dir_is_on_its_own_mount(data_dir: Path) -> bool:
+    """True when *data_dir* lives on a mount other than the container root.
+
+    A Docker volume, a bind mount and a Kubernetes PVC all appear as a mount
+    point at or above the data directory; the container's writable layer does
+    not. Walking up to '/' covers the case where the operator mounted a parent
+    (e.g. /app) rather than /app/data itself, which would otherwise read as
+    ephemeral and produce a false alarm.
+    """
+    try:
+        current = Path(data_dir).resolve()
+    except OSError:
+        return False
+    root = Path('/')
+    while True:
+        try:
+            if current != root and os.path.ismount(current):
+                return True
+        except OSError:
+            return False
+        if current == root or current.parent == current:
+            return False
+        current = current.parent
+
+
+# The four directories CertMate keeps its state in, with the environment
+# variable that relocates each and the name it has under the install root.
+STATE_DIRECTORIES = (
+    ('cert_dir', 'CERTMATE_CERT_DIR', 'certificates'),
+    ('data_dir', 'CERTMATE_DATA_DIR', 'data'),
+    ('backup_dir', 'CERTMATE_BACKUP_DIR', 'backups'),
+    ('logs_dir', 'CERTMATE_LOGS_DIR', 'logs'),
+)
+
+
+def resolve_state_directories(test_config=None) -> dict:
+    """Where the four state directories are, in order of who decides.
+
+    They were derived from `Path(__file__).parent.parent.parent` and nothing
+    could move them. That is a sound default — it is what makes the image and
+    the systemd unit work with no configuration — but it was also the only
+    answer available, so a deployment that wanted certificates on one volume
+    and backups on another had to bind-mount over the install tree, and this
+    repository's own test suite redirects state by monkeypatching
+    `modules.core.factory.__file__`, which is not a thing an application
+    should require of anyone.
+
+    `test_config` is honoured first because it was already in the signature
+    and read nowhere: `create_app(test_config={...})` accepted a config that
+    could not affect anything, which is worse than not accepting one.
+
+    Relative values resolve against the current working directory, and every
+    result is resolved, so what the container reports is always absolute.
+    """
+    base = Path(__file__).resolve().parent.parent.parent
+    config = test_config or {}
+    resolved = {}
+    for attribute, env_name, default_name in STATE_DIRECTORIES:
+        override = config.get(env_name) or os.getenv(env_name, '').strip()
+        resolved[attribute] = (Path(override) if override
+                               else base / default_name).resolve()
+    return resolved
+
+
 def setup_directories(container: AppContainer, test_config=None):
-    _base = Path(__file__).resolve().parent.parent.parent
-    container.cert_dir = (_base / "certificates").resolve()
-    container.data_dir = (_base / "data").resolve()
-    container.backup_dir = (_base / "backups").resolve()
-    container.logs_dir = (_base / "logs").resolve()
+    for attribute, value in resolve_state_directories(test_config).items():
+        setattr(container, attribute, value)
 
     required = [
         ('certificates', container.cert_dir),
@@ -223,15 +332,9 @@ def setup_directories(container: AppContainer, test_config=None):
     # Best-effort create. If the parent is read-only this raises;
     # we'd rather hit the writable probe below for a single clean error.
     for _, directory in required:
-        try:
-            directory.mkdir(exist_ok=True)
-        except OSError as e:
-            logger.error(f"Failed to create {directory}: {e}")
+        _make_dir_arbitrary_uid_ready(directory)
 
-    try:
-        (container.backup_dir / "unified").mkdir(exist_ok=True)
-    except OSError as e:
-        logger.error(f"Failed to create {container.backup_dir / 'unified'}: {e}")
+    _make_dir_arbitrary_uid_ready(container.backup_dir / "unified")
 
     # Boot-time writeability check (#121). Surface a clear error so the
     # operator knows exactly which host mount is wrong instead of having
@@ -245,8 +348,11 @@ def setup_directories(container: AppContainer, test_config=None):
     if failures:
         msg = (
             "Required directories are not writable by the CertMate process. "
-            "Fix host-mount permissions (the container runs as UID/GID 1000:1000) "
-            "and restart:\n" + "\n".join(failures)
+            "Fix host-mount permissions and restart. The default image runs as "
+            "UID/GID 1000:1000; under rootless podman / OpenShift it runs as an "
+            "arbitrary UID in group 0, so the mounts must be group-0 writable "
+            "(chown :0 and chmod g+rwX, or use a named volume / the ':U' mount "
+            "option). See issue #380:\n" + "\n".join(failures)
         )
         logger.error(msg)
         raise RuntimeError(msg)
@@ -261,8 +367,16 @@ def setup_directories(container: AppContainer, test_config=None):
                         logger.debug(f"Cleaned up orphan temp file: {_tmp}")
                     except OSError:
                         pass
-        except Exception:
-            pass
+        except OSError as e:
+            # The inner handler covers a single unlink; this one covers the
+            # scan itself (an unreadable directory). Cleaning orphan temp
+            # files is best-effort, but "best-effort" and "invisible" are
+            # different things.
+            # f-string, not %-args: this module's logger is a StructuredLogger
+            # whose level methods are (msg, **kwargs), so the stdlib idiom
+            # raises TypeError exactly when the code wanted to report a
+            # problem — the same failure shape #671 is about.
+            logger.debug(f"Could not sweep orphan temp files: {e}")
 
     # Docker volume persistence check (#130). Warn loudly if /app/data
     # appears to be ephemeral container storage rather than a persistent
@@ -270,33 +384,104 @@ def setup_directories(container: AppContainer, test_config=None):
     # to mount ./data:/app/data in docker-compose.yml.
     _in_docker = Path('/.dockerenv').exists() or os.getenv('container') is not None
     if _in_docker:
-        sentinel = container.data_dir / '.certmate_persistent'
-        if sentinel.exists():
-            logger.info("Persistent volume verified — data directory survives container restarts")
-        else:
-            # First boot on this volume: create sentinel. If the sentinel
-            # doesn't survive the next restart, the volume wasn't mounted.
-            try:
-                sentinel.write_text('1')
-            except OSError:
-                pass
-            logger.warning(
-                "PERSISTENCE CHECK: This appears to be the first boot on this data directory. "
-                "If you see this message on every restart, your /app/data volume is NOT "
-                "persistent and ALL configuration (admin account, settings, certificates) "
-                "will be LOST on container recreation. Mount a persistent volume: "
-                "-v ./data:/app/data:rw (Docker) or a PVC (Kubernetes). "
-                "Required volumes: /app/data, /app/certificates, /app/logs, /app/backups"
+        # Ask the filesystem which of the persistent directories are actually
+        # on a mount, instead of inferring it from a marker file.
+        #
+        # The marker only ever proved "something wrote here before". A plain
+        # `docker restart` keeps the container's writable layer, so the marker
+        # survived and the check reported a verified volume on an instance with
+        # NO volume mounted at all — the reassuring line appeared precisely
+        # while the data was ephemeral, and stayed right until the container was
+        # recreated and everything was gone. A mount point cannot be faked that
+        # way: if any ancestor below '/' is a mount, the directory lives on a
+        # volume or bind mount and survives recreation.
+        #
+        # Every directory is checked, and the warning names only the ones that
+        # are actually ephemeral. Warning about certificates and the CA key on
+        # the strength of /app/data alone would be false for the operator who
+        # mounted /app/certificates and forgot /app/data — a message must not
+        # claim more than the check established.
+        _persistent_dirs = (
+            ('/app/data (settings, admin account, private CA key)',
+             container.data_dir),
+            ('/app/certificates (issued certificates and their keys)',
+             container.cert_dir),
+            ('/app/backups (restore points)', container.backup_dir),
+            ('/app/logs', container.logs_dir),
+        )
+        ephemeral = [label for label, directory in _persistent_dirs
+                     if not _data_dir_is_on_its_own_mount(directory)]
+
+        if not ephemeral:
+            logger.info(
+                "Persistent storage detected — every data directory is on a "
+                "mounted volume and survives container recreation"
             )
+            sentinel = container.data_dir / '.certmate_persistent'
+            if not sentinel.exists():
+                try:
+                    sentinel.write_text('1')
+                except OSError:
+                    pass
+        else:
+            # f-string, not %-args: these loggers are StructuredLogger, whose
+            # level methods take (msg, **kwargs). A positional %-arg raises
+            # TypeError at the call site — which here would mean the warning
+            # about a misconfigured deployment blew up instead of appearing.
+            logger.warning(
+                "PERSISTENCE CHECK: the following are on the container's "
+                "writable layer, not a mounted volume. They survive `docker "
+                "restart`, but everything they hold is LOST when the container "
+                f"is recreated: {'; '.join(ephemeral)}. Mount a persistent "
+                "volume for each (-v ./data:/app/data:rw with Docker, or a "
+                "PVC in Kubernetes)."
+            )
+
+
+class SecretKeyUnreadableError(RuntimeError):
+    """SECRET_KEY_FILE is set and cannot be used, so the process must stop.
+
+    Reading it failed, or it is empty. Both are configuration errors — the
+    operator named a file as the source of this key, usually a Docker or
+    Kubernetes secret mount — and neither is an invitation to invent a
+    different key.
+
+    Inventing one used to be the behaviour, behind a WARNING, and it has two
+    consequences the warning did not state. Every existing session cookie
+    becomes invalid, so every logged-in user is signed out; and because the key
+    is regenerated on each start, a restart loop signs them out again each
+    time, with nothing in the message connecting the symptom to the unmounted
+    secret. Worse, the operator believes sessions are signed with a key they
+    control — perhaps one shared across replicas — and they are not.
+
+    Refusing to start is what this repository already does for an unreadable
+    settings.json (SettingsUnreadableError) and for an unreadable
+    API_BEARER_TOKEN_FILE. app.py wraps create_app and exits 1, so the operator
+    gets one clear line and a container that stops.
+    """
+
+    def __init__(self, path, cause):
+        self.path = path
+        self.cause = cause
+        super().__init__(
+            f"SECRET_KEY_FILE is set to {path} but cannot be used: {cause}. "
+            f"Refusing to start. Generating a key instead would sign out every "
+            f"logged-in user, would do it again on every restart, and would "
+            f"leave sessions signed by a key you did not choose. Fix the mount "
+            f"or the permissions, or unset SECRET_KEY_FILE to let CertMate "
+            f"manage the key in its data directory."
+        )
 
 
 def _secret_key_from_env_or_generate(data_dir: Path) -> str:
     """Return a Flask secret key.
 
     Resolution order (mutually exclusive):
-    1. SECRET_KEY_FILE — if set, read the key from that file. Any read error
-       or empty result generates a fresh key immediately; SECRET_KEY is never
-       consulted (to avoid encouraging both vars).
+    1. SECRET_KEY_FILE — if set, read the key from that file. A read error or
+       an empty file raises SecretKeyUnreadableError and the process stops:
+       the operator named a file as the source, and failing to read it is a
+       configuration error, not an invitation to invent a different key.
+       SECRET_KEY is never consulted (to avoid encouraging both vars).
     2. SECRET_KEY — only checked when SECRET_KEY_FILE is absent. Insecure
        defaults ('', 'your-secret-key-here', 'change-me', 'secret') are
        treated as unset and fall through to step 3.
@@ -311,12 +496,11 @@ def _secret_key_from_env_or_generate(data_dir: Path) -> str:
     if explicit_key_file:
         try:
             key = Path(explicit_key_file).read_text().strip()
-            if key:
-                return key
-            logger.warning(f"SECRET_KEY_FILE ({explicit_key_file}) is empty; generating a fresh secret key.")
         except Exception as e:
-            logger.warning(f"Could not read SECRET_KEY_FILE ({explicit_key_file}): {e}; generating a fresh secret key.")
-        return secrets.token_hex(32)
+            raise SecretKeyUnreadableError(explicit_key_file, e) from e
+        if not key:
+            raise SecretKeyUnreadableError(explicit_key_file, 'the file is empty')
+        return key
 
     env_key = os.getenv('SECRET_KEY', '')
     if env_key and env_key not in insecure_defaults:
@@ -331,8 +515,14 @@ def _secret_key_from_env_or_generate(data_dir: Path) -> str:
 
     key = secrets.token_hex(32)
     try:
-        implicit_key_file.write_text(key)
-        implicit_key_file.chmod(0o600)
+        # Create the file 0600 race-free (O_CREAT|O_EXCL-less O_TRUNC with an
+        # explicit mode) so the key is never briefly world-readable between a
+        # write and a follow-up chmod — matches audit_signing / file_operations.
+        fd = os.open(str(implicit_key_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, key.encode('utf-8'))
+        finally:
+            os.close(fd)
     except OSError as e:
         logger.warning(f"Could not persist SECRET_KEY to {implicit_key_file}: {e}. Sessions will not survive restarts.")
     return key
@@ -340,6 +530,19 @@ def _secret_key_from_env_or_generate(data_dir: Path) -> str:
 def configure_app(container: AppContainer, app, test_config=None):
     app.secret_key = _secret_key_from_env_or_generate(container.data_dir)
     app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
+
+    # Harden the Flask session cookie. It carries the OIDC PKCE transients
+    # (state / nonce / code_verifier) and the post-login `next` URL. HttpOnly is
+    # already Flask's default; SameSite=Lax (not Strict — the OIDC callback is a
+    # cross-site top-level GET, and Strict would drop the cookie on return).
+    # Mark it Secure only when an HTTPS deployment is signalled, so plain-HTTP
+    # local/dev installs still receive the cookie (and OIDC login keeps working).
+    app.config['SESSION_COOKIE_HTTPONLY'] = True
+    app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+    app.config['SESSION_COOKIE_SECURE'] = (
+        os.getenv('PREFERRED_URL_SCHEME', '').lower() == 'https'
+        or os.getenv('CERTMATE_ENABLE_HSTS', '').lower() == 'true'
+    )
 
     # HTTP-01 webroot: certbot writes challenge tokens here and the Flask route
     # in modules/web/routes.py serves them. Both sides resolve the path through
@@ -354,8 +557,12 @@ def configure_app(container: AppContainer, app, test_config=None):
     except OSError as e:
         # Non-fatal at boot; HTTP-01 issuance would fail later with a clear
         # error if the directory is genuinely unwritable.
-        logger.warning("Could not create ACME challenge directory %s: %s",
-                       challenge_dir, e)
+        # f-string, not %-args: this logger is a StructuredLogger, whose
+        # warning(msg, **kwargs) takes no positional args — the lazy-% form
+        # raised TypeError here and took the boot down with a one-line
+        # message and no traceback, exactly when the directory was not
+        # writable (audit 2026-08-18; tests/test_structured_logger_call_shape.py).
+        logger.warning(f"Could not create ACME challenge directory {challenge_dir}: {e}")
 
     if test_config:
         app.config.update(test_config)
@@ -378,6 +585,68 @@ def configure_app(container: AppContainer, app, test_config=None):
          max_age=3600)
 
 
+_EVENT_TITLES = {
+    'certificate_created': 'Certificate Created',
+    'certificate_renewed': 'Certificate Renewed',
+    'certificate_failed': 'Certificate Failed',
+    'certificate_revoked': 'Certificate Revoked',
+    'certificate_deployed': 'Certificate Deployed',
+    'certificate_expiring': 'Certificate Expiring',
+    'domain_expiring': 'Domain Registration Expiring',
+    'deploy_hook_failed': 'Deploy Hook Failed',
+    # Published by DeployManager and listed in the notifier's
+    # _ALWAYS_NOTIFY_EVENTS, which exists so an operator cannot filter it away
+    # by accident. Without a title here this function returned None and the
+    # notifier was never reached, so the event nobody could silence was silent.
+    'certificate_deploy_incomplete': 'Certificate Not Deployed',
+}
+
+
+def build_notification_message(event, data):
+    """Render ``(title, message)`` for a bus event, or ``None`` when the event
+    is not one operators are notified about.
+
+    Module-level rather than inline in the listener so the rendering can be
+    asserted without building the whole manager graph.
+
+    Adoption (#640) publishes ``certificate_created`` rather than an event of
+    its own. Three subscribers filter on the event NAME and each silently
+    ignores what it does not recognise — this listener, ``DeployManager`` and
+    ``CacheManager`` — so a dedicated name would have to be taught to all
+    three, and missing one would restore exactly the silent deploy hooks the
+    fix is for. The ``adopted`` marker in the payload carries the distinction
+    instead, so the alert still says what actually happened while the operator
+    keeps the single toggle they already have.
+    """
+    data = data or {}
+    title = _EVENT_TITLES.get(event)
+    if not title:
+        return None
+    if event == 'certificate_created' and data.get('adopted'):
+        title = 'Certificate Adopted'
+    domain = data.get('domain', 'unknown')
+    message = f"{title}: {domain}"
+    # Deploy-hook failures carry the hook name and the error; surface both
+    # so the alert is actionable without opening the audit log.
+    hook_name = data.get('hook_name')
+    if hook_name:
+        message += f" (hook: {hook_name})"
+    # An expiry warning is only useful with the number in it.
+    days_left = data.get('days_left')
+    if event in ('certificate_expiring', 'domain_expiring') and days_left is not None:
+        when = f" ({data['expires_at']})" if data.get('expires_at') else ''
+        if data.get('expired'):
+            message += f' — expired{when}'
+        elif days_left == 0:
+            message += f' — expires today{when}'
+        else:
+            message += f" — {days_left} day{'s' if days_left != 1 else ''} left{when}"
+    err = data.get('error')
+    if err:
+        message += f" — {err}"
+    return title, message
+
+
 def initialize_managers(container: AppContainer, app):
     file_ops = FileOperations(
         cert_dir=container.cert_dir,
@@ -390,15 +659,30 @@ def initialize_managers(container: AppContainer, app):
     dns_manager = DNSManager(settings_manager)
     auth_manager = AuthManager(settings_manager)
     auth_manager.set_hmac_key(app.secret_key)
+    # Diagnose a SECRET_KEY that changed under a restore: the stored bearer
+    # token hash is HMAC'd with SECRET_KEY, so a mismatch here means the
+    # operator's token will 401 with no other explanation. Read-only warning.
+    auth_manager.warn_if_bearer_token_hash_is_stale()
     # Let SettingsManager hash the legacy api_bearer_token on save using the
     # same HMAC scheme as scoped API keys.
     settings_manager.set_token_hasher(auth_manager.hash_api_token)
+    # AFTER the hasher is installed, and only then: reconciliation writes the
+    # token through a normal save, and that save is what hashes it. Called
+    # earlier it would persist the plaintext (#401).
+    auth_manager.reconcile_bearer_token_from_env()
     cache_manager = CacheManager(settings_manager)
-    storage_manager = StorageManager(settings_manager)
+    storage_manager = StorageManager(settings_manager, default_cert_dir=container.cert_dir)
     ca_manager = CAManager(settings_manager)
 
     ca_dir = container.data_dir / "certs" / "ca"
-    private_ca = PrivateCAGenerator(ca_dir)
+    # The client CA's subject, read ONCE when the CA is first created (#578).
+    # PrivateCAGenerator.initialize() returns early when the CA exists, so
+    # editing this later changes nothing: a settings edit silently replacing
+    # the CA would stop every certificate it ever signed from verifying. The
+    # deliberate path is POST /api/client-certs/ca/reset.
+    client_ca_subject = (settings_manager.load_settings() or {}).get('client_ca_subject')
+    private_ca = PrivateCAGenerator(
+        ca_dir, subject=client_ca_subject if isinstance(client_ca_subject, dict) else None)
     private_ca.initialize()
 
     client_certs_dir = container.data_dir / "certs" / "client"
@@ -429,7 +713,12 @@ def initialize_managers(container: AppContainer, app):
     # hash chain still works.
     from .audit_signing import AuditSigner
     audit_signer = AuditSigner(container.data_dir)
-    audit_logger = AuditLogger(audit_dir, chain_dir=audit_chain_dir, signer=audit_signer)
+    # SIEM audit sink (#474): stream every audit entry to a configured collector
+    # (syslog/CEF/HTTP), sanitized + failure-isolated. Reads its config live.
+    from .audit_sink import AuditSink
+    audit_sink = AuditSink(settings_manager)
+    audit_logger = AuditLogger(audit_dir, chain_dir=audit_chain_dir,
+                               signer=audit_signer, audit_sink=audit_sink)
     # Let AuthManager emit RBAC + scope denials through the same audit
     # surface the rest of the app uses (2026-05-12 API auth audit, F-2).
     auth_manager.set_audit_logger(audit_logger)
@@ -446,23 +735,17 @@ def initialize_managers(container: AppContainer, app):
     from .oidc import OIDCManager
     oidc_manager = OIDCManager(settings_manager, auth_manager, audit_logger)
 
-    rate_limit_config = RateLimitConfig()
+    rate_limit_config = RateLimitConfig(settings_manager=settings_manager)
     rate_limiter = SimpleRateLimiter(rate_limit_config)
 
     notifier = Notifier(settings_manager, data_dir=str(container.data_dir))
     event_bus = EventBus()
 
     def _on_event(event, data):
-        event_titles = {
-            'certificate_created': 'Certificate Created',
-            'certificate_renewed': 'Certificate Renewed',
-            'certificate_failed': 'Certificate Failed',
-        }
-        title = event_titles.get(event)
-        if not title:
+        rendered = build_notification_message(event, data)
+        if rendered is None:
             return
-        domain = data.get('domain', 'unknown')
-        message = f"{title}: {domain}"
+        title, message = rendered
         notifier.notify(event, title, message, details=data)
 
     event_bus.add_listener(_on_event)
@@ -476,6 +759,18 @@ def initialize_managers(container: AppContainer, app):
         data_dir=str(container.data_dir),
     )
     event_bus.add_listener(deploy_manager.on_certificate_event)
+    # Invalidate a domain's cached deployment-status verdict the moment its
+    # certificate is (re)issued or renewed, so the dashboard re-probes instead
+    # of serving a stale "deployed & matching" result for up to cache_ttl while
+    # the deploy hook may not have run yet (the LB can still serve the OLD
+    # cert). One subscription covers the manual/API, async, web, and scheduled
+    # renewal paths — they all publish certificate_created / certificate_renewed.
+    event_bus.add_listener(cache_manager.on_certificate_event)
+    # Let unattended (scheduler-driven) renewals publish 'certificate_renewed'
+    # so deploy hooks fire for background renewals, not just manual/API ones
+    # (#329). The manual path publishes via the IssuanceExecutor; the scheduler
+    # calls certificate_manager.renew_certificate() directly.
+    certificate_manager.set_event_bus(event_bus)
     app.config['EVENT_BUS'] = event_bus
     # DATA_DIR is the partition the DiagnosticsSnapshot endpoint queries
     # for disk_free / disk_total. Stored on the Flask app config so the
@@ -491,8 +786,42 @@ def initialize_managers(container: AppContainer, app):
     from .cert_jobs import IssuanceExecutor
     cert_executor = IssuanceExecutor(app, event_bus=event_bus)
 
+    # Certificate inventory + discovery (#468/#469). The inventory is a SQLite
+    # store under data_dir; the discovery manager probes the configured
+    # monitored endpoints into it on a schedule.
+    from .cert_inventory import CertInventory
+    from .cert_discovery import CertDiscoveryManager
+    from .ct_monitor import CTMonitorManager
+    from .domain_health import DomainHealthManager
+    from .domain_registration import DomainRegistrationManager
+    from .expiry_watch import ExpiryWatch
+    cert_inventory = CertInventory(container.data_dir)
+    cert_discovery = CertDiscoveryManager(settings_manager, cert_inventory)
+    ct_monitor = CTMonitorManager(settings_manager, cert_inventory)
+    # Registration expiry of every tracked domain (RDAP, WHOIS where a TLD has
+    # no RDAP). Opt-in, like the rest of discovery.
+    domain_registration = DomainRegistrationManager(
+        settings_manager, cert_inventory, container.cert_dir)
+    # The checks that are about the name rather than the certificate: SPF,
+    # DMARC, MX, the blocklists and the HSTS header. Opt-in like the rest.
+    domain_health = DomainHealthManager(
+        settings_manager, cert_inventory, container.cert_dir)
+
+    # Says that a certificate or a domain registration is about to expire,
+    # once per threshold, through the same event bus every other alert uses.
+    expiry_watch = ExpiryWatch(settings_manager, certificate_manager,
+                               cert_inventory, event_bus)
+
+    # Opt-in, and off until it is. docs/ca-providers.md offers the private CA
+    # for air-gapped systems, so an instance nobody asked to reach the
+    # internet must not reach it.
+    from .update_check import UpdateCheck
+    from modules import __version__ as _running_version
+    update_check = UpdateCheck(settings_manager, _running_version)
+
     container.managers = {
         'file_ops': file_ops,
+        'update_check': update_check,
         'settings': settings_manager,
         'auth': auth_manager,
         'certificates': certificate_manager,
@@ -518,6 +847,12 @@ def initialize_managers(container: AppContainer, app):
         ),
         'deployer': deploy_manager,
         'oidc': oidc_manager,
+        'cert_inventory': cert_inventory,
+        'cert_discovery': cert_discovery,
+        'ct_monitor': ct_monitor,
+        'domain_registration': domain_registration,
+        'domain_health': domain_health,
+        'expiry_watch': expiry_watch,
     }
 
 
@@ -546,6 +881,14 @@ def _run_manager_job(manager_key: str, method_name: str):
                 manager_key=manager_key,
             )
             return
+        # Record that this job actually ran, on both the success and the
+        # failure path. Without this the renewal sweep is unobservable: the
+        # collector exposes certmate_background_job_last_run_timestamp but
+        # nothing ever set it, so a scheduler that silently stopped looked
+        # identical to one that was working, and the single alert an operator
+        # most needs ("the sweep has not run in N days") could not be written.
+        job_type = f"{manager_key}.{method_name}"
+        started = time.time()
         try:
             getattr(manager, method_name)()
         except Exception:
@@ -554,21 +897,188 @@ def _run_manager_job(manager_key: str, method_name: str):
                 manager_key=manager_key,
                 method_name=method_name,
             )
+        finally:
+            try:
+                metrics_collector.record_background_job(
+                    job_type, time.time() - started)
+            except Exception:
+                # Telemetry must never be the reason a renewal run is lost.
+                logger.debug("Failed to record background-job metrics",
+                             job_type=job_type)
+
+
+@contextmanager
+def _renewal_process_lock(lock_name: str = '.renewal.lock'):
+    """Best-effort, host-local cross-process lock for scheduled renewal.
+
+    The APScheduler renewal jobs fire in EVERY process. CertMate ships as a
+    single process (Dockerfile: gunicorn --workers 1), but if an operator
+    raises the worker count or runs multiple containers sharing the SAME data
+    dir, each process would run check_renewals concurrently — issuing duplicate
+    ACME orders and burning the CA's duplicate-certificate rate limit. This
+    flock lets exactly one holder proceed; the others skip this tick.
+
+    ``lock_name`` names the lock file so INDEPENDENT jobs get INDEPENDENT locks
+    (TLS renewal and client-cert renewal must never contend — a long TLS run
+    would otherwise suppress the client-cert sweep and let mTLS certs expire
+    unrenewed). It defaults to '.renewal.lock' for back-compat; callers pass a
+    distinct name per job. Only multiple processes running the SAME job should
+    ever contend on the SAME lock.
+
+    Advisory + host-local: flock does NOT coordinate replicas on SEPARATE
+    filesystems (e.g. k8s pods without a shared volume) — that needs external
+    coordination; see the deployment docs. Yields True when the caller may run,
+    False when another process already holds this lock. On ANY error acquiring
+    the lock (no data dir, platform without fcntl, the lock file cannot even be
+    opened) it yields True and never raises: single-process is the default and
+    must never be blocked by the guard itself."""
+    lock_file = None
+    acquired = False
+    try:
+        data_dir = _flask_app.config.get('DATA_DIR') if _flask_app is not None else None
+        if not data_dir:
+            yield True
+            return
+        try:
+            import fcntl
+        except ImportError:
+            yield True  # non-POSIX host; single-process assumption holds
+            return
+        try:
+            lock_file = open(Path(data_dir) / lock_name, 'w')
+        except OSError as e:
+            # Cannot open the lock file at all (read-only FS, perms, ...). The
+            # guard must never block the single-process default: proceed.
+            logger.warning(
+                "Renewal lock file could not be opened; proceeding without it",
+                lock_name=lock_name, error=str(e),
+            )
+            yield True
+            return
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquired = True
+        except OSError:
+            # LOCK_NB contended: another process already holds THIS lock. This
+            # is the designed "another holder runs, we skip" signal, not a
+            # failure — yield False so exactly one process renews.
+            acquired = False
+        yield acquired
+    finally:
+        if lock_file is not None:
+            try:
+                if acquired:
+                    import fcntl
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            finally:
+                lock_file.close()
 
 
 def _certificate_renewal_job():
-    """Picklable wrapper for certificate renewal check"""
-    _run_manager_job('certificates', 'check_renewals')
+    """Picklable wrapper for certificate renewal check, guarded so only one
+    process runs it when several share a data dir (see _renewal_process_lock).
+    Uses its OWN lock so it never contends with the client-cert sweep."""
+    with _renewal_process_lock('.renewal.lock') as may_run:
+        if not may_run:
+            logger.info("Scheduled certificate renewal skipped: another process "
+                        "holds the renewal lock (multiple workers/containers on a "
+                        "shared data dir); one process renews.")
+            return
+        _run_manager_job('certificates', 'check_renewals')
 
 
 def _client_certificate_renewal_job():
-    """Picklable wrapper for client certificate renewal check"""
-    _run_manager_job('client_certificates', 'check_renewals')
+    """Picklable wrapper for client certificate renewal check. Uses a SEPARATE
+    lock from the TLS renewal job so a long TLS run can never suppress it and
+    let mTLS certs expire unrenewed."""
+    with _renewal_process_lock('.client-renewal.lock') as may_run:
+        if not may_run:
+            logger.info("Scheduled client-certificate renewal skipped: another "
+                        "process holds the client-renewal lock.")
+            return
+        _run_manager_job('client_certificates', 'check_renewals')
 
 
 def _weekly_digest_job():
     """Picklable wrapper for weekly digest"""
     _run_manager_job('digest', 'send')
+
+
+def _certificate_discovery_job():
+    """Picklable wrapper for the certificate discovery sweep (#469). Uses its
+    own lock so multiple workers on a shared data dir don't redundantly probe
+    external endpoints; the inventory upsert is idempotent regardless."""
+    with _renewal_process_lock('.discovery.lock') as may_run:
+        if not may_run:
+            logger.info("Scheduled certificate discovery skipped: another "
+                        "process holds the discovery lock.")
+            return
+        _run_manager_job('cert_discovery', 'run_discovery')
+
+
+def _ct_monitor_job():
+    """Picklable wrapper for the CT-log poll (#470). Own lock so multiple
+    workers don't hammer crt.sh in parallel; ingestion is idempotent anyway."""
+    with _renewal_process_lock('.ct-monitor.lock') as may_run:
+        if not may_run:
+            logger.info("Scheduled CT-log poll skipped: another process holds "
+                        "the ct-monitor lock.")
+            return
+        _run_manager_job('ct_monitor', 'run_poll')
+
+
+def _domain_registration_job():
+    """Picklable wrapper for the daily registration-expiry check. Own lock so
+    several workers on one data dir do not ask the same registries twice —
+    registries rate-limit, and some answer a burst with a temporary ban."""
+    with _renewal_process_lock('.domain-registration.lock') as may_run:
+        if not may_run:
+            logger.info("Scheduled domain registration check skipped: another "
+                        "process holds the lock.")
+            return
+        _run_manager_job('domain_registration', 'run_check')
+
+
+def _domain_health_job():
+    """Picklable wrapper for the daily name-level checks. Own lock so several
+    workers on one data dir do not each query the blocklists: the lists
+    rate-limit, and a burst is what gets a resolver refused in the first
+    place — the condition these checks report as `unknown`."""
+    with _renewal_process_lock('.domain-health.lock') as may_run:
+        if not may_run:
+            logger.info("Scheduled domain health check skipped: another "
+                        "process holds the lock.")
+            return
+        _run_manager_job('domain_health', 'run_check')
+
+
+def _expiry_watch_job():
+    """Picklable wrapper for the daily expiry warnings. Own lock so several
+    workers on one data dir do not each announce the same expiry — the notice
+    table would dedupe them, but the lock keeps the work to one process."""
+    with _renewal_process_lock('.expiry-watch.lock') as may_run:
+        if not may_run:
+            logger.info("Scheduled expiry watch skipped: another process holds the lock.")
+            return
+        _run_manager_job('expiry_watch', 'run')
+
+
+def _deploy_window_drain_job():
+    """Run deploys held for a maintenance window (#632).
+
+    Every minute, and deliberately so. A window is at least one minute long —
+    `normalize_window` refuses start == end — so minute polling means no window
+    can ever be missed entirely. At a coarser interval a short window would be
+    stepped over and its deploy held until the next day, which is exactly the
+    kind of silent, hours-late failure the feature exists to prevent.
+
+    It costs nothing on an instance that configures no windows: the queue file
+    does not exist, and `drain_pending` returns without reading anything else.
+    No process lock, unlike the renewal jobs — running a queued deploy twice is
+    the same shape as the manual Deploy Now button, whereas a lock held by a
+    dead process would silently stop deploys altogether.
+    """
+    _run_manager_job('deployer', 'drain_pending')
 
 
 def setup_scheduler(container: AppContainer):
@@ -607,23 +1117,96 @@ def setup_scheduler(container: AppContainer):
         jobstores = {
             'default': SQLAlchemyJobStore(engine=_engine)
         }
-        scheduler = BackgroundScheduler(jobstores=jobstores)
+        # Job-default hardening for the renewal cron jobs:
+        #  - misfire_grace_time: APScheduler's default is 1 second, so a fire
+        #    that the scheduler can't service within 1s of its scheduled time
+        #    (thread starvation, a prior run overrunning, brief unavailability)
+        #    is silently DROPPED, not run late. A 6-hour grace lets a delayed
+        #    02:00 renewal check still run instead of skipping the day.
+        #  - coalesce: if several fires were missed while unavailable, run the
+        #    check once on catch-up rather than back-to-back.
+        #  - max_instances: never let two renewal runs overlap.
+        job_defaults = {
+            'coalesce': True,
+            'misfire_grace_time': 21600,  # 6 hours
+            'max_instances': 1,
+        }
+        scheduler = BackgroundScheduler(jobstores=jobstores, job_defaults=job_defaults)
         scheduler.start()
 
+        # Spread the renewal sweeps across a window instead of firing every
+        # instance at exactly HH:00:00. Without this, every CertMate in the
+        # world hits its ACME CA at the same wall-clock second, a synchronised
+        # load spike the CA has to absorb; Let's Encrypt asks integrators to
+        # renew at randomised times for precisely this reason. APScheduler's
+        # cron `jitter` adds a random +/- offset (seconds) to each fire, so the
+        # 02:00 certificate sweep lands anywhere in 01:00-03:00 and the 03:00
+        # client-certificate sweep in 02:00-04:00 — the same overnight window,
+        # de-synchronised. It composes with the misfire grace above.
+        renewal_jitter = 3600  # +/- 1 hour
         scheduler.add_job(
             func=_certificate_renewal_job,
-            trigger="cron", hour=2, minute=0,
+            trigger="cron", hour=2, minute=0, jitter=renewal_jitter,
             id='certificate_renewal_check', replace_existing=True
         )
         scheduler.add_job(
             func=_client_certificate_renewal_job,
-            trigger="cron", hour=3, minute=0,
+            trigger="cron", hour=3, minute=0, jitter=renewal_jitter,
             id='client_certificate_renewal_check', replace_existing=True
         )
         scheduler.add_job(
             func=_weekly_digest_job,
             trigger="cron", day_of_week='sun', hour=0, minute=0,
             id='weekly_digest', replace_existing=True
+        )
+        # Certificate discovery sweep (#469): probe monitored endpoints into the
+        # inventory once a day, after the renewal jobs. It is a no-op unless the
+        # operator enabled monitored_endpoints, so scheduling it unconditionally
+        # is safe.
+        scheduler.add_job(
+            func=_certificate_discovery_job,
+            trigger="cron", hour=4, minute=0,
+            id='certificate_discovery', replace_existing=True
+        )
+        # CT-log poll (#470): once a day at 05:00. A no-op unless the operator
+        # enabled ct_monitoring and configured domains.
+        scheduler.add_job(
+            func=_ct_monitor_job,
+            trigger="cron", hour=5, minute=0,
+            id='ct_log_monitor', replace_existing=True
+        )
+        # Domain registration expiry: once a day at 06:00, after discovery
+        # and the CT poll have refreshed what the inventory knows. A no-op
+        # unless the operator enabled it.
+        scheduler.add_job(
+            func=_domain_registration_job,
+            trigger="cron", hour=6, minute=0,
+            id='domain_registration_check', replace_existing=True
+        )
+        # Name-level checks: once a day at 06:30, between the registration
+        # check and the expiry warnings. A no-op unless the operator enabled it.
+        scheduler.add_job(
+            func=_domain_health_job,
+            trigger="cron", hour=6, minute=30,
+            id='domain_health_check', replace_existing=True
+        )
+        # Expiry warnings: once a day at 07:00, after the renewal sweep has
+        # had its chance (02:00) and after the registration check (06:00), so
+        # what it announces is what is still true this morning.
+        scheduler.add_job(
+            func=_expiry_watch_job,
+            trigger="cron", hour=7, minute=0,
+            id='expiry_watch', replace_existing=True
+        )
+        # Deploy maintenance windows (#632). See the job's docstring for why
+        # this is every minute. `coalesce` from job_defaults collapses a burst
+        # of missed fires into one, and the 6-hour misfire grace would let a
+        # long-delayed drain still run — both harmless here, because the drain
+        # re-reads the window and does nothing when it is shut.
+        scheduler.add_job(
+            func=_deploy_window_drain_job,
+            trigger="cron", minute='*',
+            id='deploy_window_drain', replace_existing=True
         )
         container.scheduler = scheduler
         container.managers['scheduler'] = scheduler
@@ -653,8 +1236,65 @@ def setup_scheduler(container: AppContainer):
 
 def setup_api(container: AppContainer, app):
     from modules import __version__
+    # `version` here is the release, which is what an OpenAPI document
+    # conventionally carries and what a reader expects to see. It is NOT the
+    # contract version: that is API_CONTRACT_VERSION, sent on every response
+    # as X-CertMate-API-Version and reported by /health, because the release
+    # number moves on every patch whether or not the surface did.
+    from .constants import API_CONTRACT_VERSION
     api = Api(app, version=__version__, title='CertMate API',
-              description='SSL Certificate API', doc='/docs/', prefix='/api')
+              description=(
+                  'SSL Certificate API. The interface contract is version '
+                  f'{API_CONTRACT_VERSION}, reported on every response as '
+                  'X-CertMate-API-Version and by GET /health as '
+                  'api_contract_version; it changes only when this surface '
+                  'does, unlike the release number above.'),
+              doc='/docs/', prefix='/api')
+
+    # flask-restx answers its own aborts, and its answer was a third error
+    # shape: `{"message": ...}` with neither `error` nor `code`, and — with
+    # ERROR_404_HELP on, which is its default — a message that appends "you have
+    # requested this URI ... but did you mean" followed by matching rules from
+    # the route table. So one API replied in three shapes depending on which
+    # layer refused, and the restx one also narrated the route table to an
+    # unauthenticated caller.
+    # RESTX_ERROR_404_HELP, not ERROR_404_HELP: the latter is flask-restful's
+    # name, which flask-restx renamed. Setting the old one looks right, changes
+    # nothing, and is how the route-table narration survived being turned off.
+    app.config['RESTX_ERROR_404_HELP'] = False
+
+    from werkzeug.exceptions import HTTPException as _HTTPException
+
+    def _restx_error(error):
+        """One envelope, whichever layer refused."""
+        if isinstance(error, _HTTPException):
+            status = error.code or 500
+            return {
+                'error': error.name,
+                'message': error.description,
+                'code': error_code_for_status(status, error.name),
+                'status': status,
+            }, status
+        # Not an HTTPException: something escaped a resource. The description
+        # of an arbitrary exception is not for a client to read — the app-level
+        # handler makes the same choice, and for the same reason.
+        logger.exception("Unhandled exception in an API resource")
+        return {
+            'error': 'Internal Server Error',
+            'message': 'An unexpected error occurred. Check the server logs for details.',
+            'code': 'INTERNAL_SERVER_ERROR',
+            'status': 500,
+        }, 500
+
+    # Registered for HTTPException explicitly AND as the default. Not
+    # belt-and-braces: flask-restx consults its default handler only for
+    # exceptions that are NOT HTTPException — for those it builds
+    # `{"message": ...}` itself, ignoring the default (Api.handle_error). A
+    # handler registered against the type goes into the map it checks first,
+    # which is the only way to answer an abort() from a resource in the same
+    # shape as the rest of the API.
+    api.errorhandler(_HTTPException)(_restx_error)
+    api.errorhandler(_restx_error)
 
     api.authorizations = {
         'Bearer': {'type': 'apiKey', 'in': 'header', 'name': 'Authorization', 'description': 'Bearer token'}
@@ -674,10 +1314,13 @@ def setup_api(container: AppContainer, app):
     ns_cache = Namespace('cache', description='Cache management operations')
     ns_metrics = Namespace('metrics', description='Prometheus metrics and monitoring')
     ns_diagnostics = Namespace('diagnostics', description='Sanitized diagnostic snapshot for bug reports')
+    ns_inventory = Namespace('inventory', description='Certificate inventory (issued + discovered)')
+    ns_probe = Namespace('probe', description='Read the certificate a host is serving, now')
 
     namespaces = [
         ns_certificates, ns_client_certs, ns_ocsp, ns_crl, ns_settings,
-        ns_health, ns_backups, ns_cache, ns_metrics, ns_diagnostics
+        ns_health, ns_backups, ns_cache, ns_metrics, ns_diagnostics,
+        ns_inventory, ns_probe
     ]
     for ns in namespaces:
         api.add_namespace(ns)
@@ -694,6 +1337,7 @@ def setup_api(container: AppContainer, app):
     ns_certificates.add_resource(api_resources['CreateCertificate'], '/create')
     ns_certificates.add_resource(api_resources['ZombieScan'], '/zombies/scan')
     ns_certificates.add_resource(api_resources['CheckDNSAlias'], '/check-dns-alias')
+    ns_certificates.add_resource(api_resources['CheckCAA'], '/check-caa')
     ns_certificates.add_resource(api_resources['CertificateDetail'], '/<string:domain>')
     ns_certificates.add_resource(api_resources['CertificateDeploymentStatus'], '/<string:domain>/deployment-status')
     ns_certificates.add_resource(api_resources['CertificateDeploymentBrowserReports'], '/deployment-status/browser')
@@ -702,11 +1346,13 @@ def setup_api(container: AppContainer, app):
     ns_certificates.add_resource(api_resources['DownloadCertificateFile'], '/<string:domain>/download/<string:file_type>')
     ns_certificates.add_resource(api_resources['RenewCertificate'], '/<string:domain>/renew')
     ns_certificates.add_resource(api_resources['CertificateReissue'], '/<string:domain>/reissue')
+    ns_certificates.add_resource(api_resources['CertificateJobs'], '/jobs')
     ns_certificates.add_resource(api_resources['CertificateJob'], '/jobs/<string:job_id>')
     ns_certificates.add_resource(api_resources['CertificateAutoRenew'], '/<string:domain>/auto-renew')
     ns_certificates.add_resource(api_resources['CertificateRunDeploy'], '/<string:domain>/deploy')
     ns_backups.add_resource(api_resources['BackupList'], '')
     ns_backups.add_resource(api_resources['BackupCreate'], '/create')
+    ns_backups.add_resource(api_resources['BackupUpload'], '/upload')
     ns_backups.add_resource(api_resources['BackupDownload'], '/download/<backup_type>/<filename>')
     ns_backups.add_resource(api_resources['BackupRestore'], '/restore/<backup_type>')
     ns_backups.add_resource(api_resources['BackupDelete'], '/delete/<backup_type>/<filename>')
@@ -720,9 +1366,25 @@ def setup_api(container: AppContainer, app):
     ns_client_certs.add_resource(api_resources['ClientCertificateRenew'], '/<string:identifier>/renew')
     ns_client_certs.add_resource(api_resources['ClientCertificateStatistics'], '/stats')
     ns_client_certs.add_resource(api_resources['ClientCertificateBatch'], '/batch')
+    ns_client_certs.add_resource(api_resources['ClientCertificateAuthorityCert'], '/ca')
+    ns_client_certs.add_resource(api_resources['ClientCertificateAuthorityReset'], '/ca/reset')
 
     ns_ocsp.add_resource(api_resources['OCSPStatus'], '/status/<int:serial_number>')
     ns_crl.add_resource(api_resources['CRLDistribution'], '/download/<string:format_type>')
+
+    ns_inventory.add_resource(api_resources['InventoryList'], '')
+    ns_inventory.add_resource(api_resources['InventoryConfig'], '/config')
+    ns_inventory.add_resource(api_resources['InventoryScan'], '/scan')
+    ns_inventory.add_resource(api_resources['InventoryDomains'], '/domains')
+    ns_inventory.add_resource(api_resources['InventoryHealth'], '/health')
+    ns_probe.add_resource(api_resources['ProbeEndpoint'], '')
+    ns_inventory.add_resource(api_resources['InventoryCryptoReport'], '/crypto-report')
+    ns_inventory.add_resource(api_resources['InventoryAdopt'], '/<string:fingerprint>/adopt')
+    # '/<string:fingerprint>' sits at the same depth as '/config', '/scan' and
+    # '/crypto-report'. Werkzeug weights static segments above converters, so
+    # those keep winning regardless of registration order — verified, not
+    # assumed, and pinned by test_inventory_records_can_be_removed (#634).
+    ns_inventory.add_resource(api_resources['InventoryRecord'], '/<string:fingerprint>')
 
     container.api = api
 
@@ -789,6 +1451,29 @@ def setup_csrf_protection(app):
         return None
 
 
+def error_code_for_status(status, name=None):
+    """The symbolic `code` for an HTTP-level failure, e.g. 404 -> NOT_FOUND.
+
+    `code` is the machine-readable half of an error body and it is a string
+    everywhere the application produces one: CERTIFICATE_NOT_FOUND,
+    DOMAIN_OUT_OF_SCOPE, ACME_RATE_LIMITED. The two handlers below used to put
+    the HTTP status INTEGER in the same field, so one API answered with two
+    incompatible types under one name and a client could not branch on it
+    without type-checking first — while the SDK this repository publishes
+    already documented it as "CertMate's machine-readable error code (e.g.
+    DOMAIN_OUT_OF_SCOPE) when present".
+
+    Derived from Werkzeug's own name so a status this function has never seen
+    still produces a usable symbol rather than falling back to a number. The
+    HTTP status itself is not lost: it is the status line, and it stays in
+    `status` for the handlers that carry it.
+    """
+    text = (name or '').strip()
+    if not text:
+        return f'HTTP_{status}'
+    return re.sub(r'[^A-Z0-9]+', '_', text.upper()).strip('_') or f'HTTP_{status}'
+
+
 def setup_error_handlers(app):
     """Force JSON responses for unhandled errors on /api/* paths.
 
@@ -807,7 +1492,8 @@ def setup_error_handlers(app):
             return jsonify({
                 'error': e.name,
                 'message': e.description,
-                'code': e.code,
+                'code': error_code_for_status(e.code, e.name),
+                'status': e.code,
             }), e.code
         return e
 
@@ -823,8 +1509,178 @@ def setup_error_handlers(app):
         return jsonify({
             'error': 'Internal Server Error',
             'message': 'An unexpected error occurred. Check the server logs for details.',
-            'code': 500,
+            'code': 'INTERNAL_SERVER_ERROR',
+            'status': 500,
         }), 500
+
+
+def worker_count():
+    """How many gunicorn workers this process is one of, or None.
+
+    A worker cannot ask itself this — each one is a separate process — so it
+    reads the command line of its parent, which is the gunicorn master. That
+    works on Linux, which is what the image runs; anywhere else it answers
+    None and the caller says nothing rather than guessing.
+
+    Returns None as well when the parent is not gunicorn at all, which is the
+    case for `python app.py`, for pytest, and for anything embedding the app.
+    """
+    try:
+        parent = os.getppid()
+        with open(f'/proc/{parent}/cmdline', 'rb') as handle:
+            argv = handle.read().split(b'\0')
+    except (OSError, ValueError):
+        return None
+
+    args = [a.decode('utf-8', 'replace') for a in argv if a]
+    if not any('gunicorn' in a for a in args):
+        return None
+    for index, arg in enumerate(args):
+        if arg in ('-w', '--workers'):
+            # A flag with no value is a command gunicorn would itself reject.
+            # Answer None rather than falling through to the default: a guess
+            # about a command line that cannot run is worse than no answer.
+            if index + 1 >= len(args):
+                return None
+            try:
+                return int(args[index + 1])
+            except ValueError:
+                return None
+        if arg.startswith('--workers='):
+            try:
+                return int(arg.split('=', 1)[1])
+            except ValueError:
+                return None
+    # gunicorn's own default is 1 when nothing says otherwise.
+    return 1
+
+
+def warn_if_multiple_workers():
+    """Say so, loudly, if the single-worker assumption has been violated.
+
+    Two things in CertMate are correct only under one worker, and both fail
+    silently rather than visibly:
+
+    * **APScheduler runs in-process.** Two workers means two schedulers, so
+      every certificate is examined — and renewed — twice, against the CA's
+      rate limits.
+    * **The per-domain lock is a threading.Lock**, so with two workers it is
+      two locks. Two requests for one domain would run certbot concurrently
+      against the same --config-dir and interleave the four-file publish,
+      producing the torn generation `reconcile_served_copies` exists to
+      repair — deliberately rather than by a crash.
+
+    The image ships `--workers 1` and the Helm chart pins one replica and
+    refuses more at template time. Nothing checked the case where someone
+    overrides the command, which is the one way left to reach it.
+    """
+    workers = worker_count()
+    if workers is None or workers <= 1:
+        return workers
+    # get_certmate_logger returns a StructuredLogger, whose methods take
+    # (message, **fields) — not the stdlib's lazy %-args. Passing them raises
+    # TypeError, which inside a startup check would turn a warning about a
+    # misconfiguration into a failure to boot.
+    logger.critical(
+        f"CertMate is running with {workers} gunicorn workers. It is a "
+        "single-worker application: the renewal scheduler runs in-process, "
+        "so every certificate will be examined and renewed once PER WORKER "
+        "against the CA's rate limits, and the per-domain lock that "
+        "serialises issuance is per-process, so two requests for one domain "
+        "can run certbot concurrently and publish a mixed set of files. Run "
+        "with --workers 1 and raise --threads instead.",
+        workers=workers)
+    return workers
+
+
+def setup_api_contract_headers(app):
+    """Tell every caller which interface they are talking to.
+
+    The only version a client could read was the release number — in the
+    Swagger document and in /health — and it moves on every patch whether or
+    not anything a caller depends on moved with it. A client that pinned it
+    would refuse a patch that changed nothing; one that ignored it had nothing
+    else to read.
+
+    `X-CertMate-API-Version` carries API_CONTRACT_VERSION, which moves only
+    when the surface does. Sent as a header rather than only as a field so a
+    client learns it from any response, including the error it is trying to
+    understand, without a second call.
+
+    Deprecation announcements ride along here for the same reason: see
+    modules/api/deprecation.py.
+    """
+    from .constants import API_CONTRACT_VERSION
+    from ..api.deprecation import apply_deprecation_headers
+
+    @app.after_request
+    def _api_version(response):
+        response.headers.setdefault('X-CertMate-API-Version',
+                                    API_CONTRACT_VERSION)
+        return response
+
+    apply_deprecation_headers(app)
+
+
+def setup_correlation_ids(app):
+    """Give every request an id, and put it in every log line it produces.
+
+    The structured logger has always had a `request_id` field and a LogContext
+    to fill it. Nothing ever set either: the field was read off `g.request_id`,
+    which no code assigned, and the slow-request watchdog took the raw
+    `X-Request-Id` header — so on the overwhelmingly common case of a caller
+    that sends no such header, every log line carried `request_id: null` and
+    two lines from the same request could not be told from two lines from
+    different ones.
+
+    Three decisions here, none of them obvious:
+
+    * a caller-supplied id is honoured, because the point of the header is to
+      let a caller stitch its logs to ours — but only if it is an opaque token
+      (see clean_correlation_id). An id reaches a log line and a response
+      header, so an unbounded or newline-carrying one would let a caller write
+      its own log entries and split the header. A rejected id is REPLACED by a
+      generated one rather than sanitised: an id the caller did not send and
+      cannot match is worse than an honest new one.
+    * the id is echoed back in `X-Request-Id`, so a caller that sent nothing
+      can still quote it in a bug report.
+    * `g.request_id` is set as well as the log context, because
+      `get_request_context()` already reads it and the slow-request watchdog
+      reports it.
+    """
+    from .structured_logging import (
+        LogContext, clean_correlation_id, new_correlation_id,
+    )
+
+    @app.before_request
+    def _bind_correlation_id():
+        from flask import g, request
+        supplied = clean_correlation_id(request.headers.get('X-Request-Id'))
+        g.request_id = supplied or new_correlation_id()
+        # Entered here and exited in teardown rather than wrapping the view:
+        # the id must be on the log lines of before_request handlers, error
+        # handlers and after_request handlers too, which a decorator around
+        # the view would miss.
+        g._log_context = LogContext(request_id=g.request_id)
+        g._log_context.__enter__()
+
+    @app.after_request
+    def _echo_correlation_id(response):
+        from flask import g
+        request_id = getattr(g, 'request_id', None)
+        if request_id and 'X-Request-Id' not in response.headers:
+            response.headers['X-Request-Id'] = request_id
+        return response
+
+    @app.teardown_request
+    def _release_correlation_id(_exc):
+        from flask import g
+        context = getattr(g, '_log_context', None)
+        if context is not None:
+            try:
+                context.__exit__(None, None, None)
+            except Exception:  # pragma: no cover - defensive
+                logger.debug("Could not release the request log context")
 
 
 def setup_security_headers(app):
@@ -845,9 +1701,18 @@ def setup_security_headers(app):
                 # ReDoc and its Montserrat/Roboto fonts used to require a CDN
                 # script-src/style-src/font-src whitelist. v2.4.15 self-hosts the
                 # redoc.standalone.js bundle under static/js/ and pins ReDoc's
-                # typography to the system-font stack, removing the need for
-                # cdn.redoc.ly, fonts.googleapis.com, fonts.gstatic.com — the
-                # /redoc/ page is now air-gapped clean.
+                # typography to the system-font stack, so no font or script is
+                # fetched from fonts.googleapis.com, fonts.gstatic.com or
+                # cdn.redoc.ly.
+                #
+                # One residue: the vendored bundle still hardcodes
+                # `cdn.redoc.ly/redoc/logo-mini.svg` for the sidebar logo
+                # (static/js/redoc.standalone.js). `img-src 'self' data:` below
+                # is what stops that request being made — ReDoc's own onError
+                # handler then hides the element, so /redoc renders correctly
+                # and makes no third-party request. Worth knowing that the
+                # air-gap property there rests on the CSP, not on the bundle
+                # being clean: loosening img-src would reintroduce the egress.
                 "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
                 "style-src 'self' 'unsafe-inline'; "
                 "font-src 'self'; "
@@ -886,25 +1751,40 @@ def setup_rate_limiting(app, container: AppContainer):
         # Only skip rate limiting for auth endpoints (login needs its own limiter)
         if path.startswith('/api/auth/'):
             return None
+        # Admin can turn API rate limiting off entirely from settings (#319),
+        # e.g. when a trusted automation fleet behind one IP would otherwise
+        # trip a shared bucket. Defaults to on.
+        if not rate_limiter.config.is_enabled():
+            return None
 
         client_ip = flask_request.remote_addr or '0.0.0.0'  # nosec B104
-        # Rate-limit bucket: prefer a per-API-key bucket so many clients behind
-        # one NAT/proxy IP don't share a single limit (false positives), and an
-        # abusive key is throttled independently of its source IP. The bearer
-        # token is hashed so it is never used as a cleartext bucket key.
-        # Cookie/session and anonymous requests fall back to the IP bucket.
+        # Bucketing (#420). The per-API-key bucket exists so that many clients
+        # behind one NAT/proxy IP don't share a single limit, and so an abusive
+        # key is throttled independently of its source IP. But keying ONLY on
+        # the caller-supplied token — hashed before it is validated — meant a
+        # fresh bucket per request: `curl -H "Authorization: Bearer $RANDOM"`
+        # in a loop was never limited, which also left the deliberately
+        # unauthenticated OCSP and CRL endpoints unprotected, and flooded the
+        # limiter towards MAX_KEYS until it evicted legitimate IP buckets.
+        #
+        # So: a coarse per-IP ceiling is ALWAYS checked, and checked first, so
+        # a token-varying caller is cut off (and stops minting buckets) before
+        # the per-key bucket is ever touched. The per-key bucket is then an
+        # additional, tighter limit, not a replacement.
         auth_header = flask_request.headers.get('Authorization', '')
+        key_identifier = None
         if auth_header.startswith('Bearer '):
             import hashlib
             token = auth_header[7:].strip()
-            identifier = 'key:' + hashlib.sha256(token.encode()).hexdigest()[:32]
-        else:
-            identifier = 'ip:' + client_ip
+            key_identifier = 'key:' + hashlib.sha256(token.encode()).hexdigest()[:32]
+        identifier = 'ip:' + client_ip
         endpoint = 'default'
         if 'certificates' in path and 'create' in path:
             endpoint = 'certificate_create'
         elif 'certificates' in path and 'batch' in path:
             endpoint = 'certificate_batch'
+        elif path.rstrip('/').endswith('/api/probe'):
+            endpoint = 'probe'
         elif 'certificates' in path and 'renew' in path:
             endpoint = 'certificate_renew'
         elif 'certificates' in path and 'revoke' in path:
@@ -916,12 +1796,23 @@ def setup_rate_limiting(app, container: AppContainer):
         elif 'crl' in path:
             endpoint = 'crl_download'
 
-        if not rate_limiter.is_allowed(identifier, endpoint):
+        def _rate_limited():
             return flask_jsonify({
                 'error': 'Rate limit exceeded',
                 'message': 'Too many requests.',
                 'retry_after': 60
             }), 429
+
+        # Order matters: the IP ceiling first, so an abusive caller is
+        # rejected without ever allocating a per-key bucket.
+        if not rate_limiter.is_allowed(identifier, 'ip_ceiling'):
+            return _rate_limited()
+
+        # Then the working limit, per key when a bearer token is presented,
+        # per IP otherwise (cookie/session and anonymous callers).
+        bucket = key_identifier if key_identifier is not None else identifier
+        if not rate_limiter.is_allowed(bucket, endpoint):
+            return _rate_limited()
 
 
 def create_app(test_config=None):
@@ -952,11 +1843,73 @@ def create_app(test_config=None):
     configure_app(container, app, test_config)
     initialize_managers(container, app)
     app.config['MANAGERS'] = container.managers
+
+    # Loud, once-at-startup warning when the instance will serve every request
+    # as admin because nothing is configured yet. An operator who exposes
+    # CertMate before completing setup — or who never set API_BEARER_TOKEN —
+    # otherwise has no signal that the whole API is wide open.
+    try:
+        _auth = container.managers.get('auth')
+        if _auth is not None and _auth.is_setup_mode():
+            logger.warning(
+                "CertMate is running UNAUTHENTICATED: no local-auth user and no "
+                "operator-provided API bearer token, so EVERY request is served "
+                "as admin. Anyone who can reach this instance has full control "
+                "of all certificates and private keys. Complete setup (create an "
+                "admin and enable local auth) or set API_BEARER_TOKEN before "
+                "exposing it."
+            )
+        elif _auth is not None:
+            # Keys created while the instance was in setup mode were created by
+            # whoever could reach it then, and they stay valid after setup. They
+            # can no longer be minted; the ones that exist wait for review.
+            # Said here, in the log, and in Settings -> API Keys: never on the
+            # unauthenticated /health, which would tell whoever planted one
+            # that it is still there.
+            # This module's logger is a StructuredLogger: message plus keyword
+            # fields, no %-arguments (a positional one raises TypeError, which
+            # the except below would have swallowed at debug level).
+            unreviewed = _auth.unreviewed_setup_keys()
+            if unreviewed:
+                logger.critical(
+                    f"{len(unreviewed)} API key(s) were created while this instance "
+                    "was in setup mode, when every request was served as admin to "
+                    "anyone who could reach it. Nobody can vouch for who created "
+                    "them, and they are still valid. Review them in Settings -> API "
+                    "Keys: confirm the ones you made, revoke the rest.",
+                    unreviewed_setup_keys=len(unreviewed))
+    except Exception as e:
+        logger.debug(f"Setup-mode startup check failed: {e}")
+
+    # Enforce the request models the API already publishes.
+    #
+    # Ten endpoints declare a model with @api.expect and put it in the Swagger
+    # document. Nothing validated against it: no validate=True, no
+    # RESTX_VALIDATE — so the published schema was documentation that nothing
+    # checked, and a caller reading it was told about a boundary that did not
+    # exist.
+    #
+    # What this actually adds, measured rather than assumed, is REQUIRED-field
+    # and TYPE checking. It does NOT add enum checking: a key_size of 1024 is
+    # still passed through to the application, which rejects it with a better
+    # message than JSON Schema would ("key_size must be one of [2048, 3072,
+    # 4096], got 1024"). The enums stay in the model because they are true and
+    # they document the API; tests/test_request_models_are_enforced.py pins
+    # them against the validators that do the enforcing, so the document and
+    # the behaviour cannot drift apart.
+    #
+    # One behaviour change worth stating: an explicit null for an optional
+    # typed field is now a 400 ("None is not of type 'integer'") rather than
+    # being ignored. Omitting the field is the way to say "use the default",
+    # and that is what the UI and the clients do.
+    app.config['RESTX_VALIDATE'] = True
     setup_api(container, app)
     register_web_routes(app, container.managers)
     setup_csrf_protection(app)
     setup_error_handlers(app)
     setup_security_headers(app)
+    setup_correlation_ids(app)
+    setup_api_contract_headers(app)
     setup_rate_limiting(app, container)
     setup_slow_request_logging(app, container)
 
@@ -964,5 +1917,182 @@ def create_app(test_config=None):
     # starting the scheduler so recovered misfired jobs can push an app context.
     _flask_app = app
     setup_scheduler(container)
+    reconcile_served_copies(container)
+    check_issuance_readiness(container)
+    warn_if_multiple_workers()
+    _stop_background_work_at_exit(container)
 
     return app, container
+
+
+def stop_background_work(container: AppContainer) -> dict:
+    """Stop everything this process started in the background, in order.
+
+    Four things run outside a request: the APScheduler that drives renewals,
+    the issuance thread pool behind the async API, the slow-request watchdog,
+    and the event bus that delivers deploy hooks. Three of them published a way
+    to be stopped and only one was ever called — `IssuanceExecutor.shutdown()`
+    had no caller anywhere, and the watchdog's `stop_event` was handed to the
+    container and never set. A stop handle nobody calls is not a safety net; it
+    reads like one in review, which is worse than not having it.
+
+    Order is the point, not the calls. Producers first, consumers last: the
+    scheduler can queue a renewal, a renewal publishes an event, and an event
+    dispatches a deploy hook — so stopping the bus first would drain a queue
+    that is still being filled. The watchdog goes with them because it only
+    reports on requests, and by here there are none.
+
+    Bounded throughout. Nothing here waits for a certbot subprocess or a deploy
+    hook: the scheduler is asked not to wait, the pool cancels what no worker
+    has started, and the bus drains against a deadline. What could not be
+    finished is named in the log rather than waited for.
+
+    Idempotent: `python app.py` calls this on Ctrl-C and atexit calls it again
+    on the way out, and under gunicorn only atexit does.
+    """
+    summary = {'scheduler': None, 'issuance': [], 'undelivered': 0,
+               'checkpoint': None}
+    if container.shutdown_complete:
+        return summary
+    container.shutdown_complete = True
+
+    if container.scheduler is not None:
+        if not getattr(container.scheduler, 'running', True):
+            # Never started, or already stopped. Not a fault, and saying so at
+            # WARNING on every clean exit is how a real warning gets ignored.
+            summary['scheduler'] = 'not running'
+        else:
+            try:
+                # wait=False: a renewal sweep runs for minutes, and holding
+                # exit open for it only means the container runtime kills us
+                # instead.
+                container.scheduler.shutdown(wait=False)
+                summary['scheduler'] = 'stopped'
+            except Exception as e:
+                # Refusing to stop. The process is going away and this must
+                # not become a traceback — but it is worth a line, because
+                # "stopped" happening and "stopped" being reported were
+                # previously indistinguishable.
+                summary['scheduler'] = f'not stopped cleanly: {e}'
+                logger.warning(f"Scheduler did not stop cleanly: {e}")
+
+    managers = container.managers or {}
+
+    executor = managers.get('cert_executor')
+    if executor is not None:
+        try:
+            summary['issuance'] = executor.shutdown() or []
+        except Exception as e:
+            logger.warning(f"Issuance executor did not stop cleanly: {e}")
+
+    watchdog = container.request_watchdog or {}
+    stop_event = watchdog.get('stop_event')
+    if stop_event is not None:
+        # It is a daemon thread, so this changes nothing about whether the
+        # process exits. It changes whether the thread is torn down in the
+        # middle of formatting another thread's stack.
+        stop_event.set()
+
+    bus = managers.get('events')
+    if bus is not None:
+        try:
+            summary['undelivered'] = bus.stop() or 0
+        except Exception as e:
+            logger.warning(f"Event bus did not stop cleanly: {e}")
+
+    # Seal the tail, last of all. A signed checkpoint is written every
+    # `checkpoint_interval` entries, and nothing called it on the way out — so
+    # the entries since the last one stayed unsealed, and anyone who could
+    # write the file could drop them without the verification noticing.
+    # `docs/compliance.md` lists that as a known limit.
+    #
+    # After the bus, deliberately: draining it dispatches handlers, and some of
+    # them append audit entries. Sealing before that would sign a head that is
+    # about to move and leave the newest entries — the ones written while
+    # shutting down — outside the checkpoint this exists to create.
+    #
+    # It narrows the window rather than closing it. A crash or a SIGKILL still
+    # leaves a tail, and an operator who holds the signing key can still
+    # re-sign over a rewritten chain. Clean stops are the common case, and this
+    # is what makes them prove something.
+    audit = managers.get('audit')
+    if audit is not None:
+        try:
+            checkpoint = audit.write_checkpoint()
+            # None is a legitimate answer: no signer, or an empty chain. Told
+            # apart from a failure, which logs.
+            summary['checkpoint'] = checkpoint.get('seq') if checkpoint else None
+        except Exception as e:
+            summary['checkpoint'] = None
+            logger.warning(f"Audit chain was not sealed on shutdown: {e}")
+
+    return summary
+
+
+def _stop_background_work_at_exit(container: AppContainer):
+    """Register the shutdown above on the one hook both entry points have.
+
+    There is no shutdown hook to hang this on otherwise: the image runs
+    gunicorn from a plain command line, so there is no gunicorn config file
+    with on_exit, and app.py's KeyboardInterrupt handler only covers
+    `python app.py`. atexit runs when a gunicorn worker exits on SIGTERM, and
+    does not run on SIGKILL — which is the correct behaviour for work that
+    must never delay a kill.
+
+    Registered here rather than in each component's constructor so that
+    building one in a test does not leave a handler behind holding a reference
+    to it.
+    """
+    atexit.register(stop_background_work, container)
+
+
+def check_issuance_readiness(container: AppContainer):
+    """Find out at startup whether certbot can run, not at the first renewal.
+
+    certbot is the one dependency without which nothing works, and it was the
+    one dependency nothing checked: a broken certbot produced an instance that
+    started, reported ready, scheduled renewals and failed at the first one.
+    The probe records its answer in `managers['issuance_status']`, which
+    /health reports and /health/ready gates on — so a certbot that cannot run
+    flips the pod out of rotation for the same reason a dead scheduler does.
+
+    See modules.core.issuance_readiness for why this runs the command rather
+    than checking that the file exists.
+    """
+    from . import issuance_readiness
+    try:
+        status = issuance_readiness.probe(
+            container.managers.get('shell_executor'))
+    except Exception as e:
+        logger.error(f"certbot readiness probe itself failed: {e}")
+        status = issuance_readiness.get_status()
+    container.managers['issuance_status'] = status
+    return status
+
+
+def reconcile_served_copies(container: AppContainer):
+    """Repair any served certificate copy that a crash left half-published.
+
+    Promoting a renewed certificate is four renames, so a process killed
+    between the second and the third leaves a mixed generation on disk — a new
+    certificate beside the previous private key, which is served and deployed
+    exactly as if it were valid. The renewal sweep already reconciles this, but
+    only when it next visits the domain. A torn promote is caused by a process
+    dying, and a process that dies gets restarted: startup is the first moment
+    anyone can notice, so it is where the repair belongs.
+
+    Never raises and never blocks startup. The manager logs each repair; this
+    wrapper exists so that a certificate manager which failed to build, or a
+    filesystem that cannot be walked, does not stop the app from serving.
+    """
+    certificates = container.managers.get('certificates')
+    if certificates is None or not hasattr(certificates,
+                                           'reconcile_served_copies'):
+        return
+    try:
+        certificates.reconcile_served_copies()
+    except Exception as e:
+        logger.error(
+            f"Could not reconcile served certificate copies at startup: {e}. "
+            f"A certificate interrupted mid-publish may still be serving a "
+            f"key that does not match it.")

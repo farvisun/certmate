@@ -23,7 +23,7 @@ distinguish them only where it actually matters.
 import logging
 from urllib.parse import urlparse
 
-from flask import jsonify, redirect, request, url_for
+from flask import jsonify, redirect, request
 
 from modules.core.oidc import SECRET_MASK_SENTINEL
 
@@ -170,13 +170,14 @@ def register_oidc_routes(app, managers, auth_manager, oidc_manager,
 
         next_url = oidc_manager.consume_next_url()
         response = redirect(next_url)
-        # Match local-login cookie attributes verbatim
-        # (auth_routes.py:64-68): HttpOnly, Secure when over HTTPS,
-        # SameSite=Strict, path=/, 8h max_age.
+        # Match local-login cookie attributes: HttpOnly, Secure when over
+        # HTTPS, SameSite=Strict, path=/, and the same lifetime. "Verbatim"
+        # used to mean a copied `8 * 60 * 60`, which is how one hardcoded
+        # duration became two (#590); both now ask the AuthManager.
         response.set_cookie(
             'certmate_session', session_id, httponly=True,
             secure=request.is_secure, samesite='Strict', path='/',
-            max_age=8 * 60 * 60,
+            max_age=auth_manager.session_timeout_seconds,
         )
 
         if audit_logger:
@@ -220,6 +221,37 @@ def register_oidc_routes(app, managers, auth_manager, oidc_manager,
         prior_secret_plain = (
             settings_manager.load_settings().get('oidc', {}).get('client_secret', '')
         )
+
+        # An SSO-only deployment is held out of setup mode by this config
+        # alone. Disabling it — or clearing issuer_url/client_id, which
+        # un-configures it just as effectively — hands the whole instance to
+        # any anonymous caller on the network as admin. The admin's intent was
+        # "turn SSO off"; nothing told them it also turns authentication off.
+        current = settings_manager.load_settings()
+        candidate = dict(current)
+        candidate['oidc'] = {
+            **(current.get('oidc') or {}),
+            **{key: value for key, value in payload.items()
+               if key in ('enabled', 'issuer_url', 'client_id')},
+        }
+        # Only the deliberate turn-off. A payload that CLEARS issuer_url or
+        # client_id while `enabled` stays true is rejected by
+        # _validate_config with a 400 and never written, so the door does not
+        # open and the specific "client_id is required" message is the more
+        # useful answer. Firing here first would have replaced it with a
+        # security refusal that does not describe what the admin got wrong.
+        turning_off = not candidate['oidc'].get('enabled')
+        if turning_off and auth_manager.would_open_setup_mode(candidate):
+            return jsonify({
+                'error': 'Refusing to disable the last way in',
+                'hint': 'SSO is the only credential configured on this '
+                        'instance, so turning it off would put it back into '
+                        'setup mode, where every endpoint answers an anonymous '
+                        'caller as admin — including the private-key download. '
+                        'Enable local authentication with an admin user, or '
+                        'set API_BEARER_TOKEN, before disabling SSO.',
+            }), 409
+
         ok, err = oidc_manager.update_config(payload)
         if not ok:
             return jsonify({'error': err or 'invalid OIDC settings'}), 400

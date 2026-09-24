@@ -3,12 +3,13 @@ Unit tests for the DeployManager module.
 These run without Docker — they mock the managers.
 """
 
-import json
 import pytest
 from unittest.mock import MagicMock
-from pathlib import Path
 from modules.core.deployer import DeployManager
 from modules.core.shell import MockShellExecutor
+
+
+pytestmark = [pytest.mark.unit]
 
 
 @pytest.fixture
@@ -121,7 +122,15 @@ class TestHookExecution:
             'id': 'h4', 'name': 'Env', 'command': 'env',
             'enabled': True, 'timeout': 10, 'on_events': ['created'],
         }
-        result = deploy_manager._run_hook(hook, 'mysite.com', 'renewed')
+        # An ordinary, key-managed certificate — which is what this asserts
+        # about. CERTMATE_KEY_PATH is set only when a key is actually there
+        # (#599: a CSR-only certificate has none, and pointing the variable at
+        # a file that does not exist would be a statement that is not true).
+        certs_dir = tmp_path / 'certs' / 'mysite.com'
+        certs_dir.mkdir(parents=True, exist_ok=True)
+        (certs_dir / 'privkey.pem').write_bytes(b'key')
+
+        deploy_manager._run_hook(hook, 'mysite.com', 'renewed')
         # Check shell_executor received env kwarg with our vars
         assert len(shell_executor.commands_executed) == 1
         assert 'sh -c env' in shell_executor.commands_executed[0]
@@ -470,3 +479,35 @@ class TestEventListener:
     def test_ignores_missing_domain(self, deploy_manager, shell_executor):
         deploy_manager.on_certificate_event('certificate_created', {})
         assert shell_executor.call_count == 0
+
+
+class TestHookOutputSanitization:
+    """Hook stdout/stderr is persisted verbatim into the history file, the
+    audit log and the immutable hash chain, so secrets a hook echoes must be
+    redacted at the single choke point where the result dict is built."""
+
+    HOOK = {
+        'id': 'h9', 'name': 'Leaky', 'command': 'echo leak',
+        'enabled': True, 'timeout': 10, 'on_events': ['created'],
+    }
+
+    def test_stdout_secret_assignment_redacted(self, deploy_manager, shell_executor):
+        shell_executor.set_next_result(
+            returncode=0, stdout='deploying with api_token = hunter2-secret\n')
+        result = deploy_manager._run_hook(self.HOOK, 'example.com', 'created')
+        assert 'hunter2-secret' not in result['stdout']
+        assert '[REDACTED]' in result['stdout']
+
+    def test_stderr_pem_block_redacted(self, deploy_manager, shell_executor):
+        pem = '-----BEGIN PRIVATE KEY-----\nMIIabc\n-----END PRIVATE KEY-----'
+        shell_executor.set_next_result(returncode=1, stderr=pem)
+        result = deploy_manager._run_hook(self.HOOK, 'example.com', 'created')
+        assert 'MIIabc' not in result['stderr']
+        assert '[PEM REDACTED]' in result['stderr']
+        # The error snippet is derived from the SANITIZED stderr.
+        assert 'MIIabc' not in (result['error'] or '')
+
+    def test_plain_output_untouched(self, deploy_manager, shell_executor):
+        shell_executor.set_next_result(returncode=0, stdout='reloaded nginx\n')
+        result = deploy_manager._run_hook(self.HOOK, 'example.com', 'created')
+        assert result['stdout'] == 'reloaded nginx\n'

@@ -24,22 +24,78 @@ class RateLimitConfig:
         'certificate_list': 60,  # Listing is cheaper
         'certificate_revoke': 60,
         'certificate_renew': 30,
+        # Each probe opens a TLS connection to a third party and, with
+        # revocation on, fetches that CA's OCSP or CRL. Cheap for CertMate,
+        # not free for them.
+        'probe': 30,
         'ocsp_status': 200,  # OCSP should be high
         'crl_download': 60,
+        # Per-IP ceiling applied to EVERY /api/ request regardless of the
+        # bearer token presented (#420). Deliberately far above the
+        # per-endpoint limits: it is not the working limit, it is the backstop
+        # that makes the per-key buckets un-bypassable. A caller that varies
+        # the Authorization header on each request used to mint a fresh bucket
+        # every time and was therefore never limited at all.
+        'ip_ceiling': 600,
     }
 
-    def __init__(self, custom_limits: Optional[Dict[str, int]] = None):
+    def __init__(self, custom_limits: Optional[Dict[str, int]] = None,
+                 settings_manager=None):
         """
         Initialize Rate Limit Config.
 
         Args:
-            custom_limits: Custom rate limit overrides
+            custom_limits: Static rate limit overrides (applied over the defaults).
+            settings_manager: Optional SettingsManager. When wired, per-endpoint
+                overrides and the on/off toggle are read LIVE from
+                ``settings['rate_limits']`` on each lookup, so an admin can retune
+                the limits from the UI/API without a restart (#319). Reads are
+                request-scope-cached and never raise.
         """
         self.limits = dict(self.DEFAULT_LIMITS)
         if custom_limits:
             self.limits.update(custom_limits)
+        self.settings_manager = settings_manager
 
         logger.info(f"Rate limiting configured with {len(self.limits)} endpoint limits")
+
+    def _settings_block(self) -> dict:
+        """Read the ``rate_limits`` settings block, defensively. Never raises."""
+        if self.settings_manager is None:
+            return {}
+        try:
+            settings = self.settings_manager.load_settings() or {}
+            block = settings.get('rate_limits')
+            return block if isinstance(block, dict) else {}
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("Failed to read rate_limits settings; using defaults",
+                         exc_info=True)
+            return {}
+
+    def is_enabled(self) -> bool:
+        """Whether API rate limiting is active. Defaults to True when unset."""
+        return bool(self._settings_block().get('enabled', True))
+
+    def effective_limits(self) -> Dict[str, int]:
+        """Static limits overlaid with the live, sanitised settings overrides.
+
+        Only known endpoint keys with a positive integer value are honoured, so
+        a malformed settings entry can never disable a limit or crash a lookup.
+        """
+        merged = dict(self.limits)
+        overrides = self._settings_block().get('limits')
+        if isinstance(overrides, dict):
+            for key, value in overrides.items():
+                if key not in self.DEFAULT_LIMITS:
+                    continue
+                # Only a positive int is a valid limit. bool is an int subclass,
+                # so exclude it; floats/strings are treated as malformed and the
+                # default is kept rather than silently truncated.
+                if isinstance(value, bool) or not isinstance(value, int):
+                    continue
+                if value > 0:
+                    merged[key] = value
+        return merged
 
     def get_limit(self, endpoint: str) -> int:
         """
@@ -51,17 +107,19 @@ class RateLimitConfig:
         Returns:
             Rate limit (requests per minute)
         """
+        limits = self.effective_limits()
+
         # Try exact match first
-        if endpoint in self.limits:
-            return self.limits[endpoint]
+        if endpoint in limits:
+            return limits[endpoint]
 
         # Try prefix match
-        for limit_key in self.limits:
+        for limit_key in limits:
             if endpoint.startswith(limit_key):
-                return self.limits[limit_key]
+                return limits[limit_key]
 
         # Return default
-        return self.limits.get('default', 100)
+        return limits.get('default', 100)
 
 
 class SimpleRateLimiter:
@@ -69,6 +127,15 @@ class SimpleRateLimiter:
 
     # Maximum number of unique keys to track (prevents memory exhaustion under attack)
     MAX_KEYS = 10000
+
+    # Decisions look at a 60s window, so anything older cannot influence one.
+    # Retention used to be an hour, which meant a caller varying its bearer
+    # token could leave ~ip_ceiling * 60 dead buckets per hour lying around and
+    # push the table to MAX_KEYS, whose eviction then discards *live* buckets
+    # (#420 review). The grace factor keeps a little history for debugging
+    # without letting dead keys accumulate.
+    WINDOW_SECONDS = 60
+    RETENTION_SECONDS = WINDOW_SECONDS * 2
 
     def __init__(self, config: RateLimitConfig):
         """
@@ -94,7 +161,7 @@ class SimpleRateLimiter:
         """
         limit = self.config.get_limit(endpoint)
         current_time = time()
-        window_start = current_time - 60  # 1 minute window
+        window_start = current_time - self.WINDOW_SECONDS
 
         # Periodic cleanup (every 5 minutes)
         if current_time - self._last_cleanup > 300:
@@ -130,7 +197,7 @@ class SimpleRateLimiter:
         """Clean up old request records (call periodically)."""
         try:
             current_time = time()
-            window_start = current_time - 3600  # Keep 1 hour of data
+            window_start = current_time - self.RETENTION_SECONDS
 
             for key in list(self.requests.keys()):
                 self.requests[key] = [

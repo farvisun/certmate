@@ -160,6 +160,11 @@
 
         addDebugLog('Saving main settings...', 'info');
 
+        // Set when the selected CA has no email but the save is allowed
+        // through anyway (#491); surfaced after the save succeeds so it does
+        // not read as a failure.
+        var missingCaEmailWarning = null;
+
         try {
             var formData = new FormData(form);
             var caProviders = collectCAProviderSettings();
@@ -184,6 +189,11 @@
                 email = (caProviders.sslcom && caProviders.sslcom.email) || '';
             } else if (defaultCA === 'digicert') {
                 email = (caProviders.digicert && caProviders.digicert.email) || '';
+            } else if (defaultCA === 'sectigo') {
+                var sectigoSettings = caProviders.sectigo || {};
+                var sectigoAccounts = sectigoSettings.accounts || {};
+                var sectigoDefault = (currentSettings.default_ca_accounts || {}).sectigo || Object.keys(sectigoAccounts)[0];
+                email = sectigoSettings.email || (sectigoAccounts[sectigoDefault] || {}).email || '';
             } else if (defaultCA === 'private_ca') {
                 email = (caProviders.private_ca && caProviders.private_ca.email) || '';
             }
@@ -229,7 +239,21 @@
                 settings.pfx_password = pfxPasswordField.value;
             }
 
-            // Validate required fields - email comes from the selected CA provider
+            // The email belongs to the selected CA provider. It is needed to
+            // register an ACME account when a certificate is issued — NOT to
+            // save settings: validate_settings_post never looks at it, so this
+            // was a client-side block on a value the backend does not require.
+            //
+            // Blocking here made every unrelated change unsaveable — a DNS
+            // provider, a storage backend, a regenerated bearer token — for
+            // anyone whose selected CA had no email yet, including right after
+            // switching the default CA. See issue #491.
+            //
+            // It is still enforced to finish initial setup, mirroring how the
+            // API bearer token check below is scoped to setup_completed. After
+            // that it degrades to a warning shown once the save succeeds:
+            // create_certificate still raises "Domain and email are required"
+            // if it is genuinely missing at issuance time.
             if (!settings.email) {
                 var caDisplayName = defaultCA === 'letsencrypt' ? "Let's Encrypt" :
                     defaultCA === 'letsencrypt_staging' ? "Let's Encrypt (Staging)" :
@@ -238,8 +262,12 @@
                     defaultCA === 'actalis' ? 'Actalis' :
                     defaultCA === 'sslcom' ? 'SSL.com' :
                     defaultCA === 'digicert' ? 'DigiCert' :
+                    defaultCA === 'sectigo' ? 'Sectigo' :
                     defaultCA === 'private_ca' ? 'Private CA' : defaultCA;
-                throw new Error('آدرس ایمیل در بخش پیکربندی ' + caDisplayName + ' الزامی است');
+                if (!currentSettings.setup_completed) {
+                    throw new Error('آدرس ایمیل در بخش پیکربندی ' + caDisplayName + ' الزامی است');
+                }
+                missingCaEmailWarning = caDisplayName + ' آدرس ایمیل ندارد، بنابراین صدور گواهی با آن تا زمانی که ایمیلی اضافه نکنید ناموفق خواهد بود';
             }
 
             if (settings.challenge_type !== 'http-01' && !settings.dns_provider) {
@@ -323,6 +351,9 @@
                 .then(function (result) {
                     addDebugLog('تنظیمات با موفقیت ذخیره شد', 'info');
                     showMessage('تنظیمات با موفقیت ذخیره شد', 'success');
+                    if (missingCaEmailWarning) {
+                        showMessage(missingCaEmailWarning, 'warning');
+                    }
 
                     // Reload settings to refresh the UI
                     return loadSettings();
@@ -390,6 +421,7 @@
             'hetzner-cloud': ['hetzner-cloud_api_token'],
             'desec': ['desec_api_token'],
             'scaleway': ['scaleway_application_token'],
+            'solidserver': ['solidserver_host', 'solidserver_username', 'solidserver_password', 'solidserver_dns_name', 'solidserver_dnsview_name', 'solidserver_propagation_seconds'],
             'custom-script': ['custom-script_auth_hook', 'custom-script_cleanup_hook']
         };
 
@@ -594,7 +626,7 @@
         var providers = [
             'cloudflare', 'route53', 'azure', 'google', 'powerdns',
             'digitalocean', 'linode', 'edgedns', 'gandi', 'ovh', 'namecheap',
-            'vultr', 'dnsmadeeasy', 'nsone', 'rfc2136', 'hetzner',
+            'vultr', 'solidserver', 'dnsmadeeasy', 'nsone', 'rfc2136', 'hetzner',
             'porkbun', 'godaddy', 'he-ddns', 'dynudns', 'duckdns',
             'arvancloud', 'infomaniak', 'acme-dns', 'hetzner-cloud',
             'desec', 'scaleway',
@@ -674,6 +706,60 @@
                 if (autoRenewField) {
                     autoRenewField.checked = data.auto_renew !== false;
                     addDebugLog('تمدید خودکار تنظیم شد: ' + autoRenewField.checked, 'info');
+                }
+            }
+
+            // The update check has its own endpoint rather than riding in the
+            // settings payload: it decides whether this instance reaches the
+            // internet at all, it is admin-only for that reason, and it is
+            // audited on change. Read here so the box shows the real state
+            // instead of defaulting to unticked on every load.
+            // The update check has its own endpoint rather than riding in the
+            // settings payload: it decides whether this instance reaches the
+            // internet at all, it is admin-only for that reason, and it is
+            // audited on change.
+            //
+            // It also saves on CHANGE rather than with the form. Riding on
+            // "Save Settings" coupled it to validation that has nothing to do
+            // with it — measured in a browser: on an instance without an email
+            // yet, saveSettings returns at "Email address is required" before
+            // any request, so ticking the box and pressing Save did nothing
+            // and said nothing about why.
+            {
+                var updateField = document.getElementById('update_check_enabled');
+                if (updateField) {
+                    fetch('/api/web/update-check', { credentials: 'same-origin' })
+                        .then(function (r) { return r.ok ? r.json() : null; })
+                        .then(function (d) { if (d) { updateField.checked = d.enabled === true; } })
+                        .catch(function () { /* leave it unticked; the server is the source of truth */ });
+
+                    if (!updateField.dataset.wired) {
+                        updateField.dataset.wired = '1';
+                        updateField.addEventListener('change', function () {
+                            var wanted = updateField.checked;
+                            fetch('/api/web/update-check', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                credentials: 'same-origin',
+                                body: JSON.stringify({ enabled: wanted })
+                            }).then(function (r) {
+                                if (r.ok) {
+                                    showMessage(wanted
+                                        ? 'Update check enabled'
+                                        : 'Update check disabled', 'success');
+                                    return;
+                                }
+                                // Put the box back: a control that stays where
+                                // it was clicked while the server disagrees is
+                                // the worst of both.
+                                updateField.checked = !wanted;
+                                showMessage('Could not change the update check', 'error');
+                            }).catch(function () {
+                                updateField.checked = !wanted;
+                                showMessage('Could not change the update check', 'error');
+                            });
+                        });
+                    }
                 }
             }
 
@@ -1149,6 +1235,14 @@
             'vultr': [
                 { name: 'api_key', label: 'API Key', type: 'password', placeholder: 'Your Vultr API key', required: true }
             ],
+            'solidserver': [
+                { name: 'host', label: 'Host', type: 'text', placeholder: 'IP or hostname', required: true },
+                { name: 'username', label: 'Username', type: 'text', placeholder: 'API user', required: true },
+                { name: 'password', label: 'Password', type: 'password', placeholder: 'API password', required: true },
+                { name: 'dns_name', label: 'DNS Server Name', type: 'text', placeholder: 'SOLIDserver smart architecture DNS name', required: true },
+                { name: 'dnsview_name', label: 'DNS View Name', type: 'text', placeholder: 'External (optional)', required: false },
+                { name: 'propagation_seconds', label: 'Propagation Delay (s)', type: 'number', placeholder: '120', required: false }
+            ],
             'duckdns': [
                 { name: 'api_token', label: 'Account Token', type: 'password', placeholder: 'UUID-format token from your DuckDNS account page', required: true }
             ],
@@ -1171,7 +1265,7 @@
             html += '</label>';
 
             if (field.type === 'select') {
-                html += '<select id="' + fieldId + '" name="' + field.name + '" class="mt-1 block w-full border border-border dark:bg-gray-700 dark:text-white rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary" ' + (field.required ? 'required' : '') + '>';
+                html += '<select id="' + fieldId + '" name="' + field.name + '" class="mt-1 block w-full border border-border bg-input text-foreground rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary" ' + (field.required ? 'required' : '') + '>';
                 if (!field.required) {
                     html += '<option value="">Select ' + field.label.toLowerCase() + '</option>';
                 }
@@ -1181,9 +1275,9 @@
                 });
                 html += '</select>';
             } else if (field.type === 'textarea') {
-                html += '<textarea id="' + fieldId + '" name="' + field.name + '" rows="4" class="mt-1 block w-full border border-border dark:bg-gray-700 dark:text-white rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary" placeholder="' + field.placeholder + '" ' + (field.required ? 'required' : '') + '>' + value + '</textarea>';
+                html += '<textarea id="' + fieldId + '" name="' + field.name + '" rows="4" class="mt-1 block w-full border border-border bg-input text-foreground rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary" placeholder="' + field.placeholder + '" ' + (field.required ? 'required' : '') + '>' + value + '</textarea>';
             } else {
-                html += '<input type="' + field.type + '" id="' + fieldId + '" name="' + field.name + '" class="mt-1 block w-full border border-border dark:bg-gray-700 dark:text-white rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary" placeholder="' + field.placeholder + '" value="' + value + '" ' + (field.required ? 'required' : '') + '>';
+                html += '<input type="' + field.type + '" id="' + fieldId + '" name="' + field.name + '" class="mt-1 block w-full border border-border bg-input text-foreground rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-primary focus:border-primary" placeholder="' + field.placeholder + '" value="' + value + '" ' + (field.required ? 'required' : '') + '>';
             }
 
             html += '</div>';
@@ -1563,6 +1657,63 @@
     // Refresh backup list
     // =============================================
 
+    // Bring in an archive kept off this machine. Without it, recovering a lost
+    // volume needed filesystem access to a filesystem that no longer existed:
+    // restore only ever reads files already in backups/unified (#655).
+    //
+    // Uploading stores; it does not restore. That stays a separate, explicit
+    // action, so an upload can never be destructive by itself.
+    function uploadBackup(buttonElement) {
+        var input = document.getElementById('backup-upload-input');
+        var file = input && input.files && input.files[0];
+        if (!file) {
+            showMessage('Choose a backup file to upload first.', 'warning');
+            return;
+        }
+
+        var button = buttonElement || (window.event && window.event.target);
+        var originalText = button ? button.innerHTML : '';
+        if (button) {
+            button.disabled = true;
+            button.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Uploading...';
+        }
+
+        var payload = new FormData();
+        payload.append('file', file);
+
+        // No Content-Type header on purpose: the browser sets it along with the
+        // multipart boundary, and setting it by hand produces a body the server
+        // cannot parse.
+        fetch('/api/backups/upload', { method: 'POST', body: payload })
+            .then(function (response) {
+                return response.json().then(function (result) {
+                    if (!response.ok) {
+                        var err = new Error(result.error || ('HTTP ' + response.status));
+                        err.responseStatus = response.status;
+                        throw err;
+                    }
+                    return result;
+                });
+            })
+            .then(function (result) {
+                addDebugLog('Backup uploaded and stored as ' + result.filename, 'info');
+                showMessage('Backup uploaded. It is stored, not restored — check it in the ' +
+                    'list below, then restore it explicitly.', 'success');
+                if (input) { input.value = ''; }
+                return refreshBackupList();
+            })
+            .catch(function (error) {
+                addDebugLog('Backup upload failed: ' + error.message, 'error');
+                showMessage('Upload failed: ' + error.message, 'error');
+            })
+            .finally(function () {
+                if (button) {
+                    button.disabled = false;
+                    button.innerHTML = originalText;
+                }
+            });
+    }
+
     function refreshBackupList() {
         addDebugLog('بروزرسانی لیست پشتیبان‌ها...', 'info');
 
@@ -1616,69 +1767,110 @@
                 '<div class="text-xs mt-1">اولین پشتیبان خود را بالا ایجاد کنید!</div>' +
                 '</div>';
         } else if (backups.unified) {
-            var unifiedHtml = '';
-            backups.unified.slice(0, 10).forEach(function (backup) {
+            // Compact single-row layout on a neutral surface (the old per-row
+            // green fill made the list hard to scan). The whole list grows the
+            // page instead of scrolling inside a 256px box; a working "Show
+            // more" reveals the rest in batches rather than the old dead-end
+            // "N more backups available" label.
+            var all = backups.unified;
+            var visible = 8;
+
+            function backupRow(backup) {
                 var metadata = backup.metadata || {};
                 var createdDate = new Date(metadata.created || metadata.timestamp).toLocaleString();
                 var sizeMB = Math.round((metadata.size || 0) / (1024 * 1024) * 10) / 10;
                 var reason = metadata.backup_reason || metadata.reason || 'manual';
                 var domains = metadata.total_domains || (metadata.domains && metadata.domains.length) || 0;
-
                 var safeFilename = escapeHtml(backup.filename);
                 var safeReason = escapeHtml(reason);
-                unifiedHtml +=
-                    '<div class="flex items-center justify-between p-3 bg-success-surface rounded-lg border border-success-line">' +
+                var iconBtn = 'p-1.5 rounded transition-colors';
+                // Whether this archive can actually bring the instance back.
+                // Automatic backups are taken with secrets masked and cannot:
+                // the credentials are not in the archive. Offering an identical
+                // Restore button on every row made the newest entry a decoy
+                // restore point (#655). Treated as false unless the API
+                // explicitly says true: an older server that does not send the
+                // field must not be read as a promise that it can.
+                //
+                // It is not a claim that the endpoint rejects such archives,
+                // which is what this comment used to say. The endpoint refuses a masked
+                // archive over an instance that already holds certificates,
+                // and accepts one onto an empty instance as a configuration
+                // snapshot. `can_restore` answers "can this recover the
+                // instance", not "would the endpoint take the file"; the
+                // blocked reason below says what it can still do.
+                var canRestore = backup.can_restore === true;
+                var blockedReason = escapeHtml(backup.restore_blocked_reason ||
+                    'این آرشیو نمی‌تواند نمونه را بازیابی کند');
+                // Archives written before v2.26.0 carry every private key while
+                // their manifest claims to be share-safe, so this is read from
+                // the archive rather than from that claim (#595). Only a
+                // definite true warns: null means it could not be inspected,
+                // and crying wolf on those would train people to ignore it.
+                var carriesKeys = backup.contains_key_material === true;
+                var keyCount = backup.key_file_count;
+                var keyBadge = !carriesKeys ? '' :
+                    '<span aria-hidden="true">·</span>' +
+                    '<span class="px-1.5 py-0.5 rounded bg-danger-surface border border-danger-line text-danger-strong text-[11px]" ' +
+                    'title="این آرشیو شامل ' + (keyCount || 'چند') + ' فایل کلید خصوصی است. اگر تاکنون به اشتراک گذاشته شده یا از این میزبان کپی شده، آن کلیدها را افشاشده در نظر بگیرید و دوباره صادر کنید.">شامل کلیدهای خصوصی</span>';
+                var restoreBadge = canRestore ? '' :
+                    '<span aria-hidden="true">·</span>' +
+                    '<span class="px-1.5 py-0.5 rounded bg-warning-surface border border-warning-line text-warning-strong text-[11px]" title="' + blockedReason + '">غیرقابل بازیابی</span>';
+                return '<div class="flex items-center gap-3 px-3 py-2 rounded-lg border border-border hover:bg-hover transition-colors">' +
+                    '<i class="fas fa-file-zipper text-success-fg text-sm shrink-0" aria-hidden="true"></i>' +
                     '<div class="flex-1 min-w-0">' +
-                    '<div class="text-sm font-medium text-foreground truncate">' + safeFilename + '</div>' +
-                    '<div class="text-xs text-muted mt-1">' + createdDate + '</div>' +
-                    '<div class="flex items-center space-x-3 text-xs text-gray-400 dark:text-gray-500 mt-1">' +
-                    '<span><i class="fas fa-weight mr-1"></i>' + sizeMB + 'MB</span>' +
-                    '<span><i class="fas fa-archive mr-1"></i>' + domains + ' domains</span>' +
-                    '<span><i class="fas fa-tag mr-1"></i>' + safeReason + '</span>' +
+                        '<div class="text-sm font-medium text-foreground truncate">' + safeFilename + '</div>' +
+                        '<div class="flex items-center flex-wrap gap-x-2 gap-y-0.5 text-xs text-muted mt-0.5">' +
+                            '<span>' + escapeHtml(createdDate) + '</span>' +
+                            '<span aria-hidden="true">·</span>' +
+                            '<span>' + sizeMB + ' MB</span>' +
+                            '<span aria-hidden="true">·</span>' +
+                            '<span>' + domains + ' دامنه</span>' +
+                            '<span aria-hidden="true">·</span>' +
+                            '<span class="px-1.5 py-0.5 rounded bg-surface-2 text-[11px]">' + safeReason + '</span>' +
+                            restoreBadge +
+                            keyBadge +
+                        '</div>' +
                     '</div>' +
+                    '<div class="flex items-center gap-0.5 shrink-0">' +
+                        '<button data-action="download-backup" data-backup-type="unified" data-filename="' + safeFilename + '" class="' + iconBtn + ' text-info-fg hover:bg-blue-50 dark:hover:bg-blue-900/30" title="دانلود پشتیبان" aria-label="دانلود ' + safeFilename + '"><i class="fas fa-download text-sm"></i></button>' +
+                        (canRestore
+                            ? '<button data-action="restore-backup" data-backup-type="unified" data-filename="' + safeFilename + '" class="' + iconBtn + ' text-success-fg hover:bg-green-50 dark:hover:bg-green-900/30" title="بازیابی پشتیبان" aria-label="بازیابی ' + safeFilename + '"><i class="fas fa-rotate-left text-sm"></i></button>'
+                            : '<button disabled data-backup-type="unified" data-filename="' + safeFilename + '" class="' + iconBtn + ' text-muted opacity-40 cursor-not-allowed" title="غیرقابل بازیابی: ' + blockedReason + '" aria-label="غیرقابل بازیابی ' + safeFilename + ': ' + blockedReason + '"><i class="fas fa-rotate-left text-sm"></i></button>') +
+                        '<button data-action="delete-backup" data-backup-type="unified" data-filename="' + safeFilename + '" class="' + iconBtn + ' text-danger-fg hover:bg-red-50 dark:hover:bg-red-900/30" title="حذف پشتیبان" aria-label="حذف ' + safeFilename + '"><i class="fas fa-trash text-sm"></i></button>' +
                     '</div>' +
-                    '<div class="flex space-x-1 ml-2">' +
-                    '<button data-action="download-backup" data-backup-type="unified" data-filename="' + safeFilename + '"' +
-                    ' class="p-2 text-info-fg hover:text-blue-800 dark:hover:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-900/30 rounded transition-colors"' +
-                    ' title="دانلود پشتیبان">' +
-                    '<i class="fas fa-download text-sm"></i>' +
-                    '</button>' +
-                    '<button data-action="restore-backup" data-backup-type="unified" data-filename="' + safeFilename + '"' +
-                    ' class="p-2 text-success-fg hover:text-green-800 dark:hover:text-green-300 hover:bg-green-50 dark:hover:bg-green-900/30 rounded transition-colors"' +
-                    ' title="بازیابی پشتیبان">' +
-                    '<i class="fas fa-undo text-sm"></i>' +
-                    '</button>' +
-                    '<button data-action="delete-backup" data-backup-type="unified" data-filename="' + safeFilename + '"' +
-                    ' class="p-2 text-danger-fg hover:text-red-800 dark:hover:text-red-300 hover:bg-red-50 dark:hover:bg-red-900/30 rounded transition-colors"' +
-                    ' title="حذف پشتیبان">' +
-                    '<i class="fas fa-trash text-sm"></i>' +
-                    '</button>' +
-                    '</div>' +
-                    '</div>';
-            });
-
-            if (backups.unified.length > 10) {
-                unifiedHtml +=
-                    '<div class="text-xs text-muted text-center p-3 bg-sunken rounded-lg">' +
-                    '<i class="fas fa-ellipsis-h mr-1"></i>' +
-                    (backups.unified.length - 10) + ' پشتیبان دیگر موجود است' +
-                    '</div>';
+                '</div>';
             }
 
-            unifiedBackupList.innerHTML = unifiedHtml;
-
-            // Bind backup action buttons via event delegation
-            unifiedBackupList.querySelectorAll('button[data-action]').forEach(function (btn) {
-                btn.addEventListener('click', function () {
-                    var bType = btn.dataset.backupType;
-                    var filename = btn.dataset.filename;
-                    switch (btn.dataset.action) {
-                        case 'download-backup': downloadBackup(bType, filename); break;
-                        case 'restore-backup': restoreBackup(bType, filename); break;
-                        case 'delete-backup': deleteBackup(bType, filename); break;
-                    }
+            function bindActions() {
+                unifiedBackupList.querySelectorAll('button[data-action]').forEach(function (btn) {
+                    btn.addEventListener('click', function () {
+                        var bType = btn.dataset.backupType;
+                        var filename = btn.dataset.filename;
+                        switch (btn.dataset.action) {
+                            case 'download-backup': downloadBackup(bType, filename); break;
+                            case 'restore-backup': restoreBackup(bType, filename); break;
+                            case 'delete-backup': deleteBackup(bType, filename); break;
+                        }
+                    });
                 });
-            });
+            }
+
+            function renderUnified() {
+                var html = all.slice(0, visible).map(backupRow).join('');
+                var remaining = all.length - visible;
+                if (remaining > 0) {
+                    html += '<button type="button" id="backup-show-more" class="w-full mt-1 px-3 py-2 text-xs font-medium text-info-fg border border-border rounded-lg hover:bg-hover transition-colors">' +
+                        '<i class="fas fa-chevron-down mr-1.5"></i>نمایش ' + Math.min(8, remaining) + ' مورد دیگر (' + remaining + ' مورد پنهان)' +
+                    '</button>';
+                }
+                unifiedBackupList.innerHTML = html;
+                bindActions();
+                var more = document.getElementById('backup-show-more');
+                if (more) more.addEventListener('click', function () { visible += 8; renderUnified(); });
+            }
+
+            renderUnified();
         }
     }
 
@@ -1916,12 +2108,13 @@
             'google': 'google-ca-config',
             'actalis': 'actalis-config',
             'digicert': 'digicert-config',
+            'sectigo': 'sectigo-config',
             'sslcom': 'sslcom-config',
             'private_ca': 'private-ca-config'
         };
 
         // Hide all CA configuration panels and disable their required fields
-        var caConfigs = ['letsencrypt-config', 'letsencrypt-staging-config', 'zerossl-config', 'google-ca-config', 'actalis-config', 'digicert-config', 'sslcom-config', 'private-ca-config'];
+        var caConfigs = ['letsencrypt-config', 'letsencrypt-staging-config', 'zerossl-config', 'google-ca-config', 'actalis-config', 'digicert-config', 'sectigo-config', 'sslcom-config', 'private-ca-config'];
         caConfigs.forEach(function (configId) {
             var element = document.getElementById(configId);
             if (element) {
@@ -1968,6 +2161,9 @@
                     break;
                 case 'digicert':
                     hintElement.textContent = 'آدرس ACME، اعتبارنامه‌های EAB و ایمیل را وارد کنید، سپس اتصال DigiCert را آزمایش کنید';
+                    break;
+                case 'sectigo':
+                    hintElement.textContent = 'Copy the ACME directory URL and EAB credentials from your Sectigo SCM ACME account';
                     break;
                 case 'sslcom':
                     hintElement.textContent = ' اعتبارنامه‌های EAB و ایمیل را وارد کنید، سپس اتصال SSL.com را آزمایش کنید';
@@ -2058,6 +2254,18 @@
                 eab_hmac: dcEabHmac,
                 email: dcEmail
             };
+        } else if (caProvider === 'sectigo') {
+            config = {
+                acme_url: document.getElementById('sectigo-acme-url').value,
+                eab_kid: document.getElementById('sectigo-eab-kid').value,
+                eab_hmac: document.getElementById('sectigo-eab-hmac').value,
+                email: document.getElementById('sectigo-email').value
+            };
+            if (!config.acme_url.trim()) missingFields.push('ACME Directory URL');
+            if (!config.eab_kid.trim()) missingFields.push('EAB Key ID');
+            if (!config.eab_hmac.trim()) config.eab_hmac = sectigoAccountConfig().eab_hmac || '';
+            if (!config.eab_hmac.trim()) missingFields.push('EAB HMAC Key');
+            if (!config.email.trim()) missingFields.push('Email');
         } else if (caProvider === 'private_ca') {
             var pcAcmeUrl = document.getElementById('private-ca-acme-url').value;
             var pcEmail = document.getElementById('private-ca-email').value;
@@ -2449,6 +2657,20 @@
             document.getElementById('digicert-email').value = digicertConfig.email;
         }
 
+        var sectigoConfig = caProviders.sectigo || {};
+        var select = document.getElementById('sectigo-account-select');
+        select.replaceChildren();
+        var accounts = sectigoConfig.accounts || {};
+        if (!Object.keys(accounts).length && sectigoConfig.acme_url) {
+            select.add(new Option('Existing account', 'legacy'));
+        }
+        Object.keys(accounts).forEach(function (id) { select.add(new Option(id, id)); });
+        select.add(new Option('Add account...', 'new'));
+        select.value = (settings.default_ca_accounts || {}).sectigo || Object.keys(accounts)[0] ||
+            (sectigoConfig.acme_url ? 'legacy' : 'new');
+        select.onchange = loadSectigoAccount;
+        loadSectigoAccount();
+
         // Load Private CA settings
         var privateCaConfig = caProviders.private_ca || {};
         if (privateCaConfig.acme_url) {
@@ -2465,6 +2687,25 @@
         if (privateCaConfig.email) {
             document.getElementById('private-ca-email').value = privateCaConfig.email;
         }
+    }
+
+    function sectigoAccountConfig() {
+        var config = ((currentSettings.ca_providers || {}).sectigo || {});
+        var id = document.getElementById('sectigo-account-select').value;
+        return id === 'legacy' ? config : (config.accounts || {})[id] || {};
+    }
+
+    function loadSectigoAccount() {
+        var id = document.getElementById('sectigo-account-select').value;
+        var config = sectigoAccountConfig();
+        document.getElementById('sectigo-name').value = id === 'new' ?
+            (Object.keys((((currentSettings.ca_providers || {}).sectigo || {}).accounts || {})).length ? '' : 'default') :
+            (id === 'legacy' ? config.name || '' : id);
+        document.getElementById('sectigo-name').readOnly = id !== 'new' && id !== 'legacy';
+        document.getElementById('sectigo-acme-url').value = config.acme_url || '';
+        document.getElementById('sectigo-eab-kid').value = config.eab_kid || '';
+        document.getElementById('sectigo-eab-hmac').value = '';
+        document.getElementById('sectigo-email').value = config.email || '';
     }
 
     function loadStorageBackendSettings(settings) {
@@ -2573,11 +2814,43 @@
 
         // DigiCert configuration
         caProviders.digicert = {
-            acme_url: document.getElementById('digicert-acme-url').value || 'https://acme.digicert.com/v2/acme/directory',
+            acme_url: document.getElementById('digicert-acme-url').value || 'https://one.digicert.com/mpki/api/v1/acme/v2/directory',
             eab_kid: document.getElementById('digicert-eab-kid').value || '',
             eab_hmac: document.getElementById('digicert-eab-hmac').value || '',
             email: document.getElementById('digicert-email').value || ''
         };
+
+        var sectigoAccount = {
+            name: document.getElementById('sectigo-name').value || '',
+            acme_url: document.getElementById('sectigo-acme-url').value || '',
+            eab_kid: document.getElementById('sectigo-eab-kid').value || '',
+            eab_hmac: document.getElementById('sectigo-eab-hmac').value || '',
+            email: document.getElementById('sectigo-email').value || ''
+        };
+        var sectigoExisting = (currentSettings.ca_providers || {}).sectigo || {};
+        var selectedSectigo = document.getElementById('sectigo-account-select').value;
+        if (!sectigoExisting.acme_url && !sectigoExisting.accounts && !sectigoAccount.acme_url &&
+            document.getElementById('default-ca').value !== 'sectigo') {
+            caProviders.sectigo = {};
+        } else if (selectedSectigo === 'legacy') {
+            caProviders.sectigo = sectigoAccount;
+        } else {
+            var sectigoAccounts = Object.assign({}, sectigoExisting.accounts || {});
+            if (selectedSectigo === 'new' && sectigoExisting.acme_url && !Object.keys(sectigoAccounts).length) {
+                throw new Error('Existing single-account Sectigo settings cannot be converted without re-entering the saved HMAC key');
+            }
+            var sectigoId = selectedSectigo === 'new' ? sectigoAccount.name.trim() : selectedSectigo;
+            if (!sectigoId || sectigoId === '__proto__' || sectigoId === 'constructor') {
+                throw new Error('Enter a valid Sectigo account name');
+            }
+            if (document.getElementById('default-ca').value === 'sectigo' &&
+                (!sectigoAccount.acme_url || !sectigoAccount.eab_kid ||
+                 !(sectigoAccount.eab_hmac || sectigoAccountConfig().eab_hmac))) {
+                throw new Error('Sectigo requires an ACME Directory URL and EAB Key ID and HMAC Key');
+            }
+            sectigoAccounts[sectigoId] = sectigoAccount;
+            caProviders.sectigo = { accounts: sectigoAccounts };
+        }
 
         // SSL.com configuration
         caProviders.sslcom = {
@@ -2636,7 +2909,7 @@
         // Create migration modal dynamically
         var modal = document.createElement('div');
         modal.id = 'storageMigrationModal';
-        modal.className = 'fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50';
+        modal.className = 'fixed inset-0 bg-black/50 overflow-y-auto h-full w-full z-50';
         modal.setAttribute('role', 'dialog');
         modal.setAttribute('aria-modal', 'true');
         modal.setAttribute('aria-labelledby', 'storageMigrationModal-title');
@@ -2788,16 +3061,18 @@
             });
     }
 
-    function toggleLocalAuth() {
+    function toggleLocalAuth(confirmUnauthenticated) {
         var toggle = document.getElementById('localAuthToggle');
         var enabled = toggle.checked;
+        var body = { local_auth_enabled: enabled };
+        if (confirmUnauthenticated) body.confirm_unauthenticated = true;
 
         fetch('/api/auth/config', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({ local_auth_enabled: enabled })
+            body: JSON.stringify(body)
         })
             .then(function (response) {
                 return response.json().then(function (data) {
@@ -2805,6 +3080,24 @@
                         showMessage(data.message, 'success');
                         var banner = document.getElementById('authSecurityBanner');
                         if (banner) banner.style.display = enabled ? 'none' : 'block';
+                    } else if (response.status === 409 && data.confirm_unauthenticated_required && !confirmUnauthenticated) {
+                        // The one-way-door guard (#581): this is the last
+                        // credential. Running without authentication is a
+                        // deliberate, audited choice — ask, then repeat with
+                        // the flag (#587).
+                        toggle.checked = !enabled; // hold the toggle until confirmed
+                        CertMate.confirm(
+                            'Local authentication is the only credential configured. ' +
+                            'Turning it off puts this instance in setup mode: every endpoint, ' +
+                            'including private-key download, answers any caller on the network as admin. ' +
+                            'Only do this if something in front of CertMate authenticates for you. ' +
+                            'The choice is recorded in the audit log with your name.',
+                            'Run without authentication?'
+                        ).then(function (confirmed) {
+                            if (!confirmed) return;
+                            toggle.checked = enabled;
+                            toggleLocalAuth(true);
+                        });
                     } else {
                         showMessage(data.error || 'به‌روزرسانی پیکربندی احراز هویت ناموفق بود', 'error');
                         toggle.checked = !enabled; // Revert toggle
@@ -3243,6 +3536,7 @@
     window.createUser = createUser;
     window.refreshUserList = refreshUserList;
     window.createBackup = createBackup;
+    window.uploadBackup = uploadBackup;
     window.refreshBackupList = refreshBackupList;
     window.downloadBackup = downloadBackup;
     window.restoreBackup = restoreBackup;
@@ -3255,5 +3549,28 @@
     window.deleteUser = deleteUser;
     window.clearDeploymentCache = clearDeploymentCache;
     window.refreshCacheStats = refreshCacheStats;
+
+    // WAI-ARIA tabs: Left/Right/Home/End move between the settings tabs and
+    // activate the focused one (automatic activation). Wired from settings.html
+    // via @keydown on the [role=tablist]. Clicking the target button triggers
+    // Alpine's `tab = t.id`, which also updates the roving tabindex reactively.
+    function onSettingsTabKeydown(event) {
+        var keys = ['ArrowRight', 'ArrowLeft', 'Home', 'End'];
+        if (keys.indexOf(event.key) === -1) return;
+        var tablist = event.currentTarget;
+        var tabs = Array.prototype.slice.call(tablist.querySelectorAll('[role="tab"]'));
+        if (!tabs.length) return;
+        var current = tabs.indexOf(document.activeElement);
+        if (current === -1) current = 0;
+        var next = current;
+        if (event.key === 'ArrowRight') next = (current + 1) % tabs.length;
+        else if (event.key === 'ArrowLeft') next = (current - 1 + tabs.length) % tabs.length;
+        else if (event.key === 'Home') next = 0;
+        else if (event.key === 'End') next = tabs.length - 1;
+        event.preventDefault();
+        tabs[next].focus();
+        tabs[next].click();
+    }
+    window.onSettingsTabKeydown = onSettingsTabKeydown;
 
 })();

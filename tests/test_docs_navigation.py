@@ -1,0 +1,548 @@
+"""Guard: every documentation page must be reachable, in every language.
+
+A page nobody links to is a page nobody reads. `docs/mcp.md` had existed in
+all five languages for months — a full reference for the MCP server, sixteen
+tools, the agent-attribution model — and no `index.md` in any language linked
+to it, so the only way to find it was to already know it was there. The same
+was true of `compliance.md`, `deploy-hooks.md` and `probes*.md`.
+
+The README's own "Complete Documentation Set" table was missing six of the
+thirteen pages, which is a specific kind of wrong: a table that claims to be
+complete and is not.
+
+These tests are pure file reads — no network, no build.
+"""
+import pathlib
+import re
+
+import pytest
+
+from tests.historical_documents import is_historical
+
+
+pytestmark = [pytest.mark.unit]
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+DOCS = REPO_ROOT / "docs"
+
+LANGUAGES = ["en", "it", "de", "es", "fr"]
+
+# README.md is the index — it is what GitHub renders when you browse to a
+# directory, and the only entry point anyone actually reaches, since nothing
+# builds this folder into a site. index.md is a stub kept so that deep links
+# from before the rename do not 404; the theme note is a one-off record.
+INDEX = "README.md"
+NOT_LINKABLE = {"README.md", "index.md", "THEME_MIGRATION.md"}
+
+
+def _lang_dir(lang):
+    return DOCS if lang == "en" else DOCS / lang
+
+
+def _pages(lang):
+    return {p.name for p in _lang_dir(lang).glob("*.md")} - NOT_LINKABLE
+
+
+def _links(path):
+    """Markdown link targets pointing at a .md file, relative or parent."""
+    return set(re.findall(r"\]\((?:\./|\.\./)?([a-z0-9._-]+\.md)", path.read_text(
+        encoding="utf-8")))
+
+
+@pytest.mark.parametrize("lang", LANGUAGES)
+def test_every_page_is_linked_from_its_index(lang):
+    index = _lang_dir(lang) / INDEX
+    assert index.exists(), f"docs/{lang}: no {INDEX}"
+    unreachable = sorted(_pages(lang) - _links(index))
+    assert not unreachable, (
+        f"docs/{lang}/{INDEX} links to none of {unreachable} — those pages "
+        f"exist but nothing points at them."
+    )
+
+
+@pytest.mark.parametrize("lang", LANGUAGES)
+def test_the_index_stub_still_points_somewhere_real(lang):
+    """`index.md` is a redirect note for old deep links, nothing more.
+
+    It must stay short — if it grows content again it becomes a second index,
+    which is the whole problem it was created to end — and it must point at
+    both the guide that absorbed it and the real index.
+    """
+    stub = _lang_dir(lang) / "index.md"
+    assert stub.exists(), f"docs/{lang}/index.md is gone — old deep links 404"
+    text = stub.read_text(encoding="utf-8")
+    assert len(text) < 800, (
+        f"docs/{lang}/index.md is {len(text)} chars — it is turning back into a "
+        f"page. It is a redirect note."
+    )
+    assert "./guide.md" in text and f"./{INDEX}" in text
+
+
+@pytest.mark.parametrize("lang", LANGUAGES)
+def test_index_links_resolve(lang):
+    """No entry may point at a file that is not there."""
+    directory = _lang_dir(lang)
+    index = directory / INDEX
+    text = index.read_text(encoding="utf-8")
+    broken = []
+    for prefix, target in re.findall(r"\]\((\./|\.\./)([a-z0-9._-]+\.md)", text):
+        base = directory if prefix == "./" else directory.parent
+        if not (base / target).exists():
+            broken.append(prefix + target)
+    assert not broken, f"docs/{lang}/index.md points at missing files: {broken}"
+
+
+def test_readme_documentation_table_is_actually_complete():
+    """The README table says "Complete Documentation Set". Hold it to that."""
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    linked = set(re.findall(r"\]\(docs/([a-z0-9._-]+\.md)\)", readme))
+    missing = sorted(_pages("en") - linked)
+    assert not missing, (
+        f"README's documentation table omits {missing}. Either list them or "
+        f"stop calling the table complete."
+    )
+
+
+def test_readme_documents_the_mcp_server():
+    """CertMate ships an MCP server in `mcp/`; the README has to say so.
+
+    It used to mention it once, inside a feature bullet, with no setup, no
+    tool list and no link to docs/mcp.md.
+    """
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    assert "docs/mcp.md" in readme, "README never links the MCP guide"
+    assert re.search(r"^##\s+.*MCP", readme, re.M | re.I), (
+        "README has no MCP section heading"
+    )
+
+
+def test_mcp_readme_tool_count_matches_the_server():
+    """The README states how many tools the server exposes. Keep it true."""
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    server = (REPO_ROOT / "mcp" / "index.js").read_text(encoding="utf-8")
+    actual = len(set(re.findall(r"\bcertmate_[a-z_]+", server)))
+    claimed = re.search(r"exposes \*\*(\d+) tools\*\*", readme)
+    assert claimed, "README no longer states an MCP tool count"
+    assert int(claimed.group(1)) == actual, (
+        f"README claims {claimed.group(1)} MCP tools, mcp/index.js defines "
+        f"{actual}."
+    )
+
+
+# --- claims that go stale --------------------------------------------------- #
+
+ALL_MARKDOWN = [
+    p for p in REPO_ROOT.rglob("*.md")
+    if not any(part in p.parts for part in
+               (".venv", "node_modules", ".git", "scratch", ".claude", "backups"))
+]
+
+
+# Ports documented on a localhost URL that belong to something other than the
+# CertMate application. Value = the non-markdown file that declares the port, so
+# the exception stands or falls with the thing it describes.
+OTHER_SERVICE_PORTS = {
+    "18899": "demo/certmate-cli.tape",   # the demo container, deliberately off 8000
+}
+
+
+def test_every_port_exception_is_backed_by_the_file_that_declares_it():
+    """An allow-list is only as honest as its evidence.
+
+    Without this, silencing the port gate for a genuinely wrong number costs
+    one line in a dict — which is how a gate stops describing reality.
+    """
+    for port, source in OTHER_SERVICE_PORTS.items():
+        path = REPO_ROOT / source
+        assert path.exists(), (
+            f"port {port} is excused by {source}, which does not exist. Remove "
+            f"the exception or fix the reference."
+        )
+        assert port in path.read_text(encoding="utf-8", errors="replace"), (
+            f"port {port} is excused by {source}, but that file does not "
+            f"mention it. The exception no longer describes anything."
+        )
+
+
+def test_no_markdown_file_documents_the_broken_test_command():
+    """`pytest tests/ -v` produces four failures on a clean checkout.
+
+    It ran the Playwright `ui` suite in the same process as everything else.
+    Eleven files told contributors to run it — CONTRIBUTING.md and every
+    index/README in all five languages — so the documented way to check your
+    work was the one way that reliably went red.
+    """
+    offenders = [
+        str(p.relative_to(REPO_ROOT)) for p in ALL_MARKDOWN
+        if re.search(r"pytest\s+tests/\s+-v", p.read_text(encoding="utf-8", errors="replace"))
+    ]
+    assert not offenders, (
+        f"{offenders} document `pytest tests/ -v`, which fails on a clean "
+        f'checkout. Use `-m "not ui and not e2e"`.'
+    )
+
+
+@pytest.mark.parametrize("lang", LANGUAGES)
+def test_file_structure_listing_matches_disk(lang):
+    """The docs README draws its own directory tree. Keep it true.
+
+    It listed eleven files while seventeen existed, so six pages — including
+    the whole MCP guide — were invisible to anyone reading the map.
+    """
+    directory = _lang_dir(lang)
+    readme = (directory / "README.md").read_text(encoding="utf-8")
+    block = re.search(r"```\n(docs/[^\n]*\n(?:  [^\n]*\n)+)```", readme)
+    assert block, f"docs/{lang}/README.md has no file-structure block"
+    listed = set(re.findall(r"^  ([A-Za-z0-9._-]+\.md)", block.group(1), re.M))
+    on_disk = {p.name for p in directory.glob("*.md")}
+    assert listed == on_disk, (
+        f"docs/{lang}/README.md file listing is out of date — "
+        f"missing {sorted(on_disk - listed)}, phantom {sorted(listed - on_disk)}"
+    )
+
+
+def test_contributing_names_the_gates_that_actually_run():
+    """CONTRIBUTING must describe the CI that exists, not one that used to.
+
+    It advertised flake8/black/isort/bandit as coming from
+    requirements-test.txt, which contains none of them, and never mentioned
+    the theme, CSS-freshness, coverage-floor or real-cert gates at all.
+    """
+    contributing = (REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    for gate in ("bandit", "theme_codemod", "css:build", "cov-fail-under",
+                 "not ui and not e2e"):
+        assert gate in contributing, f"CONTRIBUTING.md never mentions {gate!r}"
+
+
+def test_contributing_does_not_promise_tools_that_are_not_installed():
+    """Anything CONTRIBUTING says requirements-test.txt provides must be in it."""
+    contributing = (REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    declared = (REPO_ROOT / "requirements-test.txt").read_text(encoding="utf-8").lower()
+    claim = re.search(r"requirements-test\.txt\s*#\s*([^\n]*)", contributing)
+    if not claim:
+        return
+    for tool in re.findall(r"[a-z0-9_-]{3,}", claim.group(1).lower()):
+        if tool in {"and", "the", "in", "repo", "editable", "sdk", "cli", "test",
+                    "dev", "tooling", "clients"}:
+            continue
+        assert tool in declared, (
+            f"CONTRIBUTING.md says requirements-test.txt installs {tool!r}, "
+            f"but it does not."
+        )
+
+
+def test_a_pull_request_template_exists():
+    """Branch protection requires resolved review threads and green CI; the
+    template is where a contributor finds that out before pushing."""
+    template = REPO_ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md"
+    assert template.exists(), "no PR template"
+    text = template.read_text(encoding="utf-8")
+    assert "not ui and not e2e" in text
+    assert "conversation" in text.lower()
+
+
+def test_docs_use_the_port_the_app_actually_listens_on():
+    """Every documented URL must hit the port CertMate binds by default.
+
+    210 examples across api.md and guide.md, in all five languages, used
+    `localhost:5000` — Flask's dev-server default, never CertMate's. `app.py`
+    parses `--port` with `default=8000` and the Dockerfile sets `ENV PORT=8000`.
+    So the single most copy-pasted thing in the documentation, the curl
+    example, produced connection refused.
+
+    The first version of this test scanned `docs/` alone — it covered exactly
+    the files it had been written for and nothing else. Proven, not assumed:
+    injecting 21 `localhost:5000` URLs into README.md, the file people read
+    first, left the suite green. It now reads every markdown file in the tree.
+    """
+    app_py = (REPO_ROOT / "app.py").read_text(encoding="utf-8")
+    declared = re.search(r"--port['\"].*?default=(\d+)", app_py)
+    assert declared, "app.py no longer declares a default port"
+    port = declared.group(1)
+
+    # The test harness binds its own container elsewhere on purpose, so it can
+    # run beside a real instance; conftest.py owns that number.
+    conftest = (REPO_ROOT / "tests" / "conftest.py").read_text(encoding="utf-8")
+    test_port = re.search(r'CERTMATE_TEST_PORT", "(\d+)"', conftest)
+    allowed = {port} | ({test_port.group(1)} if test_port else set())
+
+    # Ports belonging to something that is not CertMate. Each needs a reason,
+    # and each is checked below against the file that actually declares it —
+    # an allow-list nobody can verify is just a way to silence the gate.
+    allowed |= set(OTHER_SERVICE_PORTS)
+
+    wrong = []
+    for path in ALL_MARKDOWN:
+        if is_historical(path):
+            continue  # a changelog quotes the wrong port while announcing its fix
+        for number, line in enumerate(
+                path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            # Only URLs: the defect is the copy-pasteable example. A docker
+            # log-driver address or a port mapping is not one, and flagging it
+            # would push someone to add exceptions until the gate means nothing.
+            for match in re.finditer(r"https?://(?:localhost|127\.0\.0\.1):(\d{2,5})",
+                                     line):
+                if match.group(1) not in allowed:
+                    wrong.append(
+                        f"{path.relative_to(REPO_ROOT)}:{number}: "
+                        f"{match.group(0)}")
+    assert not wrong, (
+        f"docs point at a port the app does not listen on (default is {port}):"
+        f"\n  " + "\n  ".join(wrong[:20])
+        + (f"\n  ... and {len(wrong) - 20} more" if len(wrong) > 20 else "")
+    )
+
+
+def test_no_markdown_carries_shell_quoting_artifacts():
+    """`'"'"'` is how you escape a quote inside a single-quoted shell string.
+
+    It has no business in prose. Seven of them shipped into the v2.25.2 release
+    notes because the notes were written through a heredoc and the escaping
+    leaked verbatim — `pip'"'"'s`, `Flask'"'"'s`, and three inside a quoted
+    Python attribute error. GitHub renders them literally, in the first thing
+    an operator reads about a release.
+    """
+    artifact = "'" + '"' + "'" + '"' + "'"
+    offenders = []
+    for path in ALL_MARKDOWN:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if artifact in text:
+            count = text.count(artifact)
+            offenders.append(f"{path.relative_to(REPO_ROOT)} ({count})")
+    assert not offenders, (
+        f"shell-escape artifacts leaked into prose: {offenders}. "
+        f"They render literally."
+    )
+
+
+def test_docs_mcp_documents_every_tool_the_server_ships():
+    """`docs/mcp.md` enumerated 13 tools while `mcp/index.js` registered 16.
+
+    The three it omitted were `certmate_update_certificate`,
+    `certmate_get_certificate_file` and `certmate_delete_certificate` — the last
+    of which deletes certificate files from disk and is not reversible. An
+    operator reading the documented surface would not have known the agent could
+    do it.
+
+    The tool-count assertion in the README was already gated; the enumeration
+    here was not, which is how a list can be exhaustive-looking and short.
+    """
+    server = (REPO_ROOT / "mcp" / "index.js").read_text(encoding="utf-8")
+    shipped = set(re.findall(r'name:\s*"(certmate_[a-z_]+)"', server))
+    assert shipped, "no tools found in mcp/index.js — has the shape changed?"
+
+    doc = (REPO_ROOT / "docs" / "mcp.md").read_text(encoding="utf-8")
+    documented = set(re.findall(r"certmate_[a-z_]+", doc))
+
+    missing = sorted(shipped - documented)
+    assert not missing, f"docs/mcp.md does not mention {missing}"
+
+    phantom = sorted(documented - shipped)
+    assert not phantom, f"docs/mcp.md documents tools the server does not ship: {phantom}"
+
+
+def test_mcp_tools_request_async_issuance():
+    """create / renew / reissue must opt into the background job.
+
+    The server only takes the async branch when the caller sends `async`
+    (`_wants_async`, modules/api/resources.py). Without it the request blocks
+    for the whole ACME exchange, the MCP client's timeout aborts the tool call
+    while certbot keeps running, and no `job_id` is ever produced — so the
+    `certmate_get_job` loop that docs/mcp.md tells an agent to follow could not
+    execute at all.
+
+    mcp/test-tools.js asserts this against a recording mock; this is the cheap
+    check that runs in the Python suite too, because the MCP suite is a separate
+    CI job and a reviewer reading only this one should still see the contract.
+    """
+    server = (REPO_ROOT / "mcp" / "index.js").read_text(encoding="utf-8")
+    # Check the whole handler for each tool, not a fixed window around the
+    # call: reissue builds its body several lines ABOVE the makeRequest, and a
+    # forward-only window missed it. Anchoring on the first mention of the path
+    # was worse still — for create that is a comment, so the check would have
+    # been satisfied by prose.
+    #
+    # The handler ends at the next `case`/`default`, or at end of file. The
+    # first version required a literal `\n      case "`, which tied the test to
+    # one indentation and would have failed outright on the last case in the
+    # switch — a red build with nothing broken (Copilot, #531).
+    boundary = r'(?=\n\s*(?:case\s+["\']|default\s*:)|\Z)'
+    for tool in ("certmate_create_certificate",
+                 "certmate_renew_certificate",
+                 "certmate_update_certificate"):
+        m = re.search(rf'case "{tool}":(.*?)' + boundary, server, re.S)
+        assert m, f"could not isolate the {tool} handler in mcp/index.js"
+        # Over-capturing would let one tool's `async: true` vouch for another.
+        assert m.group(1).count('makeRequest') <= 2, (
+            f"the {tool} handler capture spilled into the next case "
+            f"({m.group(1).count('makeRequest')} makeRequest calls) — the "
+            f"boundary pattern is matching too late to isolate anything"
+        )
+        assert "async: true" in m.group(1), (
+            f"{tool} does not request async issuance — the server would run it "
+            f"inline and never produce a job_id for certmate_get_job to poll"
+        )
+
+
+def test_the_mcp_suites_are_run_by_ci():
+    """A test suite nothing executes is not a test suite.
+
+    `mcp/test-smoke.js` and `mcp/test-tools.js` were referenced by no workflow,
+    no Makefile target, not run-tests.sh and not release.sh — while Dependabot
+    updated `mcp/` dependencies, so those bumps shipped with a suite that never
+    ran.
+    """
+    ci = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert "working-directory: mcp" in ci, "no CI job runs anything inside mcp/"
+    assert "npm test" in ci, "the mcp job does not run its test suite"
+
+
+# ---------------------------------------------------------------------------
+# Every language must know the whole documentation set exists
+# ---------------------------------------------------------------------------
+#
+# The four translated trees carry sixteen pages where English carries nineteen.
+# Nothing compared them, so a reader in those languages was not told that pages
+# exist which they cannot see — the gap was invisible from inside the tree they
+# were reading.
+#
+# The project already had an answer for one of the three: `discovery-inventory`
+# is linked from every translated index as `../discovery-inventory.md`, marked
+# as being in English. `csr-only-certificates` and `webhooks` had no such link
+# in any language, so those two topics were simply absent.
+#
+# Linking to the original, marked, rather than writing a stub page per topic
+# per language: a stub says the same thing with a file attached, and four more
+# files that also go stale. What matters is that the reader is told the topic
+# exists and where to read it.
+
+# probes.md is probes.en.md under a shorter name in the translated trees.
+TRANSLATED_NAME = {"probes.en.md": "probes.md"}
+
+# Pages that are not part of the documentation set a reader browses.
+NOT_PART_OF_THE_SET = {"THEME_MIGRATION.md", "index.md"}
+
+
+def _english_pages():
+    return {p.name for p in DOCS.glob("*.md")} - NOT_PART_OF_THE_SET - {INDEX}
+
+
+@pytest.mark.parametrize("lang", [lang for lang in LANGUAGES if lang != "en"])
+def test_a_missing_translation_is_linked_to_the_original(lang):
+    """A topic that has no page in this language must at least be reachable.
+
+    Otherwise the reader is not told it exists: they see sixteen pages and
+    have no way to know there are nineteen.
+    """
+    present = {p.name for p in _lang_dir(lang).glob("*.md")}
+    index = (_lang_dir(lang) / INDEX).read_text(encoding="utf-8")
+
+    unreachable = []
+    for page in sorted(_english_pages()):
+        if TRANSLATED_NAME.get(page, page) in present:
+            continue
+        if f"../{page}" not in index:
+            unreachable.append(page)
+
+    assert not unreachable, (
+        f"docs/{lang}/ has no page for these topics and its {INDEX} does not "
+        f"link to the English original either, so a reader in {lang} is never "
+        f"told they exist: {', '.join(unreachable)}.\n\n"
+        f"Translate the page, or add a line to docs/{lang}/{INDEX} pointing "
+        f"at ../<page>.md and marked as being in English — the convention "
+        f"discovery-inventory.md already follows."
+    )
+
+
+@pytest.mark.parametrize("lang", [lang for lang in LANGUAGES if lang != "en"])
+def test_a_link_to_an_untranslated_page_says_it_is_in_english(lang):
+    """CONTROL for the fix above: a link that looks like every other entry
+    sends the reader to a page in a language they may not read, with no
+    warning. The marker is the whole difference between the two."""
+    index = (_lang_dir(lang) / INDEX).read_text(encoding="utf-8")
+    unmarked = []
+    for line in index.splitlines():
+        if "](../" in line and line.strip().startswith("-"):
+            if not re.search(r"\*\((in inglese|auf Englisch|en inglés|en anglais)\)\*",
+                             line):
+                unmarked.append(line.strip()[:80])
+    assert not unmarked, (
+        f"docs/{lang}/{INDEX} links out to the English tree without saying so:"
+        f"\n  " + "\n  ".join(unmarked))
+
+
+@pytest.mark.parametrize("lang", [lang for lang in LANGUAGES if lang != "en"])
+def test_every_page_a_translated_index_points_at_exists(lang):
+    """CONTROL: a link to ../something.md that is not there is worse than no
+    link — it is a 404 presented as the answer."""
+    index = (_lang_dir(lang) / INDEX).read_text(encoding="utf-8")
+    missing = [target for target in re.findall(r"\]\(\.\./([a-z0-9._-]+\.md)\)",
+                                               index)
+               if not (DOCS / target).exists()]
+    assert not missing, (
+        f"docs/{lang}/{INDEX} links to English pages that do not exist: "
+        + ", ".join(missing))
+
+
+def test_the_english_set_is_what_this_compares_against():
+    """CONTROL for the census: if _english_pages() returned nothing, every
+    language would trivially pass."""
+    pages = _english_pages()
+    assert len(pages) > 15, f"only {len(pages)} English pages found"
+    for expected in ("csr-only-certificates.md", "webhooks.md",
+                     "discovery-inventory.md"):
+        assert expected in pages
+
+
+# ---------------------------------------------------------------------------
+# The architecture diagram must draw the one edge that breaks its own rule
+# ---------------------------------------------------------------------------
+
+def test_the_composition_root_is_the_only_upward_import():
+    """The claim the diagram now makes, checked rather than asserted in prose.
+
+    Every arrow in the high-level diagram points down: web and API call into
+    the managers, the managers into execution and storage. One import goes the
+    other way — `modules/core/factory.py` imports `modules.api` and
+    `modules.web` in order to register them, which is `core/` reaching upward.
+
+    That is what a composition root is for, and the diagram says so. If a
+    SECOND file starts doing it, the diagram has stopped being true and this
+    fails with the file that did it.
+    """
+    import ast
+
+    upward = {}
+    for path in sorted((REPO_ROOT / "modules" / "core").glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            modules = []
+            if isinstance(node, ast.ImportFrom) and node.module:
+                modules.append("." * node.level + node.module)
+            elif isinstance(node, ast.Import):
+                modules += [alias.name for alias in node.names]
+            for module in modules:
+                if (module.startswith(("modules.api", "modules.web"))
+                        or module.startswith(("..api", "..web"))):
+                    upward.setdefault(path.name, []).append(
+                        f"{module} (line {node.lineno})")
+
+    assert set(upward) == {"factory.py"}, (
+        "modules/core/ imports upward into api/ or web/ from somewhere other "
+        "than the composition root, so the architecture diagram is no longer "
+        f"true: {upward}"
+    )
+
+
+def test_the_diagram_draws_the_composition_root():
+    """A single documented exception is a design; an undocumented one is
+    something the next reader finds by tracing an import and then wonders
+    whether the rest of the diagram is true."""
+    architecture = (DOCS / "architecture.md").read_text(encoding="utf-8")
+    diagram = architecture.split("## High-Level Diagram")[1].split("---")[0]
+    assert "Composition root" in diagram, (
+        "the high-level diagram has lost the composition root, so the only "
+        "upward edge in the system is again the one thing it does not draw"
+    )
+    assert "factory.py" in diagram
+    assert "UPWARD" in diagram or "upward" in diagram

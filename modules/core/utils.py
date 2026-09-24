@@ -7,6 +7,8 @@ depend on the Flask application context or global configuration variables.
 """
 import dataclasses
 import json
+import logging
+import os
 import re
 import secrets
 import string
@@ -16,6 +18,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import urlparse
+
+# stdlib only, like every other import in this file: the module deliberately
+# has no intra-package imports, which is what lets everything else import it
+# without thinking about order.
+logger = logging.getLogger(__name__)
 
 
 def utc_now() -> datetime:
@@ -37,10 +44,23 @@ def utc_now_iso() -> str:
 _MIN_TOKEN_LENGTH = 32  # Increased minimum for better security
 _MAX_TOKEN_LENGTH = 512
 _MIN_UNIQUE_CHARS = 12  # Increased for better entropy
+# Placeholder and classic-weak values, matched as substrings anywhere in the
+# token. Deliberately NOT generic nouns: 'api', 'key', 'token', 'secret',
+# 'admin', 'test', 'demo', 'default' and 'example' used to be in this set, and
+# any of them appearing ANYWHERE rejected the token — so
+# `certmate-api-token-<32 random chars>` was refused while being perfectly
+# strong. That refusal was not a warning the operator could act on: the token
+# was dropped, a random one generated in its place, and the instance came up
+# with no operator credential at all (see _bearer_token_from_env_or_generate).
+# What actually protects against a guessable token is the length floor and the
+# character-variety floor below. This set exists only to catch a value copied
+# out of the documentation without editing it; note that the value we ship in
+# .env.example ('your_secure_api_token_here') is 26 characters and is already
+# refused by _MIN_TOKEN_LENGTH, so it does not depend on this list.
 _WEAK_TOKEN_PATTERNS = {
-    'password', '12345', 'admin', 'test', 'demo', 'change-this',
-    'default', 'secret', 'token', 'key', 'api', 'qwerty', 'example',
-    'your_token_here', 'your_super_secure_api_token_here_change_this'
+    'password', '12345', 'qwerty', 'letmein', 'change-this', 'change_this',
+    'changeme', 'your_token_here', 'your_secure_api_token_here',
+    'your_super_secure_api_token_here_change_this',
 }
 
 # A mapping of DNS providers to their required credential fields for validation.
@@ -72,6 +92,7 @@ _DNS_PROVIDER_CREDENTIALS = {
     'edgedns': ['client_token', 'client_secret', 'access_token', 'host'],
     'desec': ['api_token'],
     'scaleway': ['application_token'],
+    'solidserver': ['host', 'username', 'password', 'dns_name'],
     # Admin-supplied hook scripts (#286): the auth hook is the only hard
     # requirement; the cleanup hook is optional.
     'custom-script': ['auth_hook']
@@ -88,8 +109,12 @@ _MULTI_PROVIDER_PLUGIN_FILES = {
 # A data-driven template for building multi-provider config files.
 # Maps the final .ini key to the key from the input config_data dictionary.
 # A tuple value indicates an optional key: (input_key, default_value)
+# The ini key MUST be <entry_point_name with '-'->'_'>_<credential var> as
+# derived by certbot's dns_common (see Authenticator.dest); each mapping is
+# pinned against the plugin source by
+# tests/test_provider_credential_key_contract.py.
 _MULTI_PROVIDER_TEMPLATE_MAP = {
-    'vultr': {'dns_vultr_api_key': 'api_key'},
+    'vultr': {'dns_vultr_key': 'api_key'},
     'dnsmadeeasy': {'dns_dnsmadeeasy_api_key': 'api_key', 'dns_dnsmadeeasy_secret_key': 'secret_key'},
     'nsone': {'dns_nsone_api_key': 'api_key'},
     'rfc2136': {
@@ -100,10 +125,13 @@ _MULTI_PROVIDER_TEMPLATE_MAP = {
     },
     'hetzner': {'dns_hetzner_api_token': 'api_token'},
     'hetzner-cloud': {'dns_hetzner_cloud_api_token': 'api_token'},
-    'porkbun': {'dns_porkbun_api_key': 'api_key', 'dns_porkbun_secret_key': 'secret_key'},
+    'porkbun': {'dns_porkbun_key': 'api_key', 'dns_porkbun_secret': 'secret_key'},
     'godaddy': {'dns_godaddy_key': 'api_key', 'dns_godaddy_secret': 'secret'},
     'he-ddns': {'dns_he_ddns_username': 'username', 'dns_he_ddns_password': 'password'},
-    'dynudns': {'dns_dynudns_token': 'token'},
+    # certbot-dns-dynudns registers its entry point as 'dns-dynu' with the
+    # credential var 'auth-token', so the ini key prefix is dns_dynu_, not
+    # dns_dynudns_ (see the plugin-name override in GenericMultiProviderStrategy).
+    'dynudns': {'dns_dynu_auth_token': 'token'},
     'desec': {'dns_desec_token': 'api_token'},
     'scaleway': {'dns_scaleway_application_token': 'application_token'},
 }
@@ -162,6 +190,16 @@ def validate_domain(domain: str) -> Tuple[bool, str]:
         except Exception:
             return False, "Invalid URL format provided."
             
+    # A single trailing dot is the root-anchored FQDN form: what `dig +short`
+    # prints, and what this project's own CNAME examples are written with
+    # (docs/dns-providers.md). Everything downstream already strips it —
+    # certificates.py and dns_alias_hook.py both rstrip('.') — and only this
+    # function refused it, so an operator pasting a record straight out of a
+    # zone file got "Domain labels cannot be empty". Exactly one dot: a name
+    # ending in '..' stays malformed and is caught below.
+    if domain.endswith('.') and not domain.endswith('..'):
+        domain = domain[:-1]
+
     domain_to_validate = domain[2:] if domain.startswith('*.') else domain
 
     if len(domain_to_validate) > 253 or '..' in domain_to_validate:
@@ -379,6 +417,84 @@ _CERTBOT_CONFIG_PATH_RE = re.compile(
 _CERTBOT_STDERR_MAX_BYTES = 4096
 
 
+# What a CA says when it refuses because a limit was reached, rather than
+# because anything about the request was wrong. Kept as data, and in one place,
+# because two callers ask the same question for different purposes: the API
+# turns it into a message and a code, and the metrics layer turns it into
+# certmate_acme_rate_limit_hits_total. A second copy of these markers would
+# drift, and the failure mode of the drift is silent — an alert that never
+# fires while the operator is being rate limited.
+#
+# The strings are Boulder's (Let's Encrypt) and the wording other ACME CAs
+# copied from it. Matched case-insensitively against certbot's stderr.
+# Deliberately NOT a bare 'rate limit': a DNS provider's API says that too, and
+# counting a Cloudflare throttle as an ACME rate limit would put the wrong
+# number in front of the operator at the worst moment. The ACME error type is
+# in certbot's output for every one of these, so the first marker is the
+# reliable one and the rest are the human-readable text people search for.
+_ACME_RATE_LIMIT_MARKERS = (
+    'ratelimited',                    # urn:ietf:params:acme:error:rateLimited
+    'too many certificates',
+    'too many failed authorizations',
+    'too many currently pending authorizations',
+    'too many new orders',
+    'too many registrations',
+)
+
+
+def is_acme_rate_limit(reason) -> bool:
+    """Did the CA refuse this because a rate limit was reached?
+
+    Worth distinguishing from every other issuance failure because it is the
+    one an operator cannot fix by retrying — retrying is what causes it — and
+    because the remedy (wait, or use a different account) is unlike any other.
+    """
+    return any(marker in str(reason or '').lower()
+               for marker in _ACME_RATE_LIMIT_MARKERS)
+
+
+def classify_renewal_error(reason: str) -> tuple:
+    """Map a renewal failure reason to a (user_message, code) pair.
+
+    The renew endpoints used to return an opaque ``"Certificate renewal failed"``
+    with HTTP 500, hiding diagnosable conditions. The most common one is a
+    *broken renewal configuration*: certbot's ``renewal/<domain>.conf`` bakes
+    absolute paths and expects the ``live/`` cert to be a symlink, so after the
+    data directory moves (e.g. a cert created on the host then mounted into the
+    container, or a relocated volume) certbot reports a ``parsefail`` and skips
+    the lineage. That is not a server fault — it is actionable: reissue.
+
+    Returns the clean broken-config message (no host paths leaked) with code
+    ``RENEWAL_CONFIG_BROKEN`` for that case, else a generic pair the caller can
+    pad with the sanitized reason.
+    """
+    low = (reason or '').lower()
+    broken_markers = ('parsefail', 'renewal configuration', 'is broken', 'to be a symlink')
+    if any(marker in low for marker in broken_markers):
+        return (
+            "This certificate's renewal configuration is broken: its certbot "
+            "config references paths that no longer exist. Use Edit & Reissue "
+            "to regenerate the certificate.",
+            'RENEWAL_CONFIG_BROKEN',
+        )
+    if 'not configured' in low and ('account' in low or 'dns provider' in low):
+        return (
+            "The DNS provider account this certificate uses is no longer "
+            "configured. Re-add it in Settings → DNS, then retry the renewal.",
+            'DNS_ACCOUNT_NOT_CONFIGURED',
+        )
+    if is_acme_rate_limit(low):
+        return (
+            "The certificate authority refused this because a rate limit was "
+            "reached, not because anything is wrong with the request. Retrying "
+            "makes it worse: wait for the window to pass, or issue from a "
+            "different ACME account. The server log carries the CA's own text, "
+            "which names the limit and when it resets.",
+            'ACME_RATE_LIMITED',
+        )
+    return ('Certificate renewal failed', 'RENEWAL_FAILED')
+
+
 def sanitize_certbot_stderr(stderr_text: str) -> str:
     """Strip credential material from a certbot stderr blob before it
     is sent to an API client.
@@ -468,15 +584,26 @@ def generate_secure_token(length: int = 40) -> str:
 # =============================================
 
 def _create_config_file(plugin_name: str, content: str) -> Path:
-    """Generic helper to create a config file in the right directory."""
+    """Generic helper to create a per-operation credentials file.
+
+    The filename carries a random suffix so two concurrent operations on the
+    SAME provider (e.g. renewing a.com and b.com, both Cloudflare) no longer
+    write — and then delete in their ``finally`` — the same shared
+    ``<plugin>.ini``, which raced one certbot run's credentials out from under
+    another. Each caller deletes its own unique file. The directory is
+    unchanged so the certbot-stderr path sanitizer still redacts these paths.
+    """
     config_dir = Path("letsencrypt/config")
     config_dir.mkdir(parents=True, exist_ok=True)
-    
-    config_file = config_dir / f"{plugin_name}.ini"
-    with open(config_file, 'w', encoding='utf-8') as f:
+
+    config_file = config_dir / f"{plugin_name}-{secrets.token_hex(8)}.ini"
+    # Create the file 0600 ATOMICALLY: O_EXCL never follows a pre-planted
+    # symlink at this (world-writable-dir) path, and the mode is set at open()
+    # so the DNS-provider secret is never briefly world-readable under the
+    # process umask (the old open()+chmod left a 0644 window).
+    fd = os.open(str(config_file), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
         f.write(content)
-    
-    config_file.chmod(0o600)
     return config_file
 
 def create_cloudflare_config(token: str) -> Path:
@@ -541,17 +668,59 @@ def create_azure_config(subscription_id: str, resource_group: str, tenant_id: st
     return _create_config_file("azure", content)
 
 def create_google_config(project_id: str, service_account_key: str) -> Path:
-    """Create Google Cloud DNS credentials file."""
+    """Write the Google Cloud DNS service-account JSON and return its path.
+
+    ``certbot-dns-google`` takes the service-account JSON **itself** as
+    ``--dns-google-credentials``: it calls
+    ``google.auth.load_credentials_from_file`` on whatever path it is given.
+    CertMate used to write an ini here (``dns_google_project_id`` /
+    ``dns_google_service_account_key``) and hand certbot that ini, a format the
+    plugin has never supported — every Google DNS-01 issuance failed with
+    ``File ... is not a valid json file``. The project id is not part of any
+    file either; it is its own CLI flag, ``--dns-google-project``. See #385.
+
+    The service-account JSON is a live GCP private key. It previously landed at
+    a FIXED path (``google-service-account.json``), written 0644-then-chmod, and
+    was NEVER deleted — so a full cloud credential sat on disk indefinitely at a
+    predictable location, and two concurrent Google issuances clobbered each
+    other's key. Now: a per-operation random name, created 0600 atomically
+    (O_EXCL), plus a best-effort sweep of orphaned key files from crashed or
+    older runs (anything older than the certbot timeout is dead).
+
+    ``project_id`` is accepted and ignored here so callers keep one obvious
+    call shape; GoogleStrategy passes it to certbot as a flag."""
     config_dir = Path("letsencrypt/config")
     config_dir.mkdir(parents=True, exist_ok=True)
-    
-    sa_file = config_dir / "google-service-account.json"
-    with open(sa_file, 'w', encoding='utf-8') as f:
+    # 1800s is not arbitrary: it is the certbot subprocess timeout used on both
+    # the create and renew paths (certificates.py), so a key older than that
+    # belongs to a run that is already dead and cannot be swept out from under
+    # a live issuance. Left at the 3600 default this window was twice as long
+    # as the rationale above claims, leaving a live GCP private key on disk for
+    # an extra half hour after a crash.
+    _sweep_orphaned_files(config_dir, "google-sa-*.json", max_age_seconds=1800)
+
+    sa_file = config_dir / f"google-sa-{secrets.token_hex(8)}.json"
+    fd = os.open(str(sa_file), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
         f.write(service_account_key)
-    sa_file.chmod(0o600)
-    
-    content = f"dns_google_project_id = {project_id}\ndns_google_service_account_key = {str(sa_file)}\n"
-    return _create_config_file("google", content)
+
+    return sa_file
+
+
+def _sweep_orphaned_files(directory: Path, pattern: str, max_age_seconds: int = 3600) -> None:
+    """Best-effort deletion of files matching *pattern* older than
+    *max_age_seconds*. A live issuance cannot outlast the 1800s certbot timeout,
+    so anything older is an orphan (crashed run, killed worker). Never raises."""
+    try:
+        cutoff = time.time() - max_age_seconds
+        for p in directory.glob(pattern):
+            try:
+                if p.stat().st_mtime < cutoff:
+                    p.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
 
 def create_powerdns_config(api_url: str, api_key: str) -> Path:
     """Create PowerDNS credentials file."""
@@ -608,8 +777,14 @@ def create_namecheap_config(username: str, api_key: str) -> Path:
     return _create_config_file("namecheap", content)
 
 def create_arvancloud_config(api_key: str) -> Path:
-    """Create ArvanCloud DNS credentials file."""
-    content = f"dns_arvancloud_api_key = {api_key}\n"
+    """Create ArvanCloud DNS credentials file.
+
+    certbot-dns-arvancloud (0.1.0) requires the ``dns_arvancloud_api_token``
+    property (certbot_dns_arvancloud/dns_arvancloud.py, _configure_credentials
+    var ``api_token``); the previously written ``dns_arvancloud_api_key`` key
+    made every ArvanCloud issuance fail with "Property not found".
+    """
+    content = f"dns_arvancloud_api_token = {api_key}\n"
     return _create_config_file("arvancloud", content)
 
 def create_infomaniak_config(api_token: str) -> Path:
@@ -641,8 +816,26 @@ def create_acme_dns_config(api_url: str, username: str, password: str, subdomain
     return _create_config_file("acme-dns", content)
 
 def create_multi_provider_config(provider: str, config_data: Dict[str, Any]) -> Optional[Path]:
-    """
-    Creates a certbot DNS plugin configuration file from a provider and data.
+    """Write the certbot plugin credentials file for a multi-provider plugin.
+
+    Returns the path, or None when this provider does not use one of these
+    files or its account is not configured. **None never means "the file could
+    not be written"**, and that distinction is the whole point of the narrow
+    catch below.
+
+    Previously the body ended with `except (KeyError, Exception): return None`
+    and no log line at all. `_create_config_file` opens the file with O_EXCL and
+    can raise OSError — a read-only config directory, a full disk — and for the
+    twelve providers that come through here that OSError was swallowed and
+    turned into the same None that means "route53 authenticates through the
+    environment". The caller then built a certbot command with
+    `--authenticator dns-hetzner` and no `--dns-hetzner-credentials`, certbot
+    failed complaining about missing plugin credentials, and the real error
+    existed nowhere. cloudflare and route53 never had the problem: their
+    builders let the OSError propagate, which is what this now does.
+
+    The `(KeyError, Exception)` tuple showed the intent — catch the template
+    lookup — so that is what is caught.
     """
     if provider not in _MULTI_PROVIDER_PLUGIN_FILES:
         return None
@@ -657,10 +850,19 @@ def create_multi_provider_config(provider: str, config_data: Dict[str, Any]) -> 
         for ini_key, source in template.items():
             value = config_data.get(*source) if isinstance(source, tuple) else config_data[source]
             config_lines.append(f"{ini_key} = {value}")
-
-        return _create_config_file(provider, "\n".join(config_lines) + "\n")
-    except (KeyError, Exception):
+    except KeyError as e:
+        # A provider in _MULTI_PROVIDER_PLUGIN_FILES with no entry in the
+        # template map, or a template naming a credential field the validator
+        # above did not require. Both are bugs in this file rather than in the
+        # operator's configuration, so they are logged as such and the caller
+        # gets the same None it always did.
+        logger.error(
+            "No credentials template entry for DNS provider %r (%s); the "
+            "issuance will fail with certbot complaining about missing plugin "
+            "credentials", provider, e)
         return None
+
+    return _create_config_file(provider, "\n".join(config_lines) + "\n")
 
 
 # =============================================
@@ -678,9 +880,23 @@ def validate_dns_provider_account(provider: str, account_id: str, account_config
         if not isinstance(account_config, dict):
             return False, f"Account configuration must be a dictionary, but got {type(account_config).__name__}."
         
+        # A field is satisfied by a value OR by a reference to one
+        # (`api_token_file`, `api_token_env` — see modules/core/secret_refs).
+        # Without this, an account that keeps its token in a Docker secret
+        # could not be SAVED: the save path rejected it as missing the very
+        # field it supplies, and the feature would exist only for configs
+        # edited into settings.json by hand.
+        #
+        # Imported here rather than at module scope: utils.py has no
+        # intra-package imports at all, which is what lets every other module
+        # import it without thinking about order. One local import is cheaper
+        # than making it a node in that graph.
+        from .secret_refs import has_value
+
         required_fields = _DNS_PROVIDER_CREDENTIALS[provider]
-        missing_fields = [f for f in required_fields if not str(account_config.get(f) or '').strip()]
-            
+        missing_fields = [f for f in required_fields
+                          if not has_value(account_config, f)]
+
         if missing_fields:
             return False, f"Missing or empty required fields: {', '.join(sorted(missing_fields))}."
         
@@ -692,6 +908,32 @@ def validate_dns_provider_account(provider: str, account_id: str, account_config
 # =============================================
 # CACHE SYSTEM CLASS
 # =============================================
+
+def _record_cache_outcome(hit: bool) -> None:
+    """Tell the metrics collector about one cache lookup. Never raises.
+
+    Imported here rather than at module scope on purpose: utils.py has no
+    intra-package imports at all, which is what lets every other module import
+    it without thinking about order — and modules.core.metrics imports from
+    modules.core.constants, so a top-level import here would put this file into
+    a graph it deliberately stays out of. One local import is cheaper than
+    making it a node in that graph (the same trade `validate_dns_provider_account`
+    makes for secret_refs).
+    """
+    try:
+        from .metrics import metrics_collector
+        if hit:
+            metrics_collector.record_cache_hit()
+        else:
+            metrics_collector.record_cache_miss()
+    except Exception as e:  # pragma: no cover - telemetry is never the failure
+        # DEBUG, and said rather than swallowed: this runs on every lookup, so
+        # a louder level would drown the log the moment it started failing —
+        # but a broad catch whose body is `pass` is the shape that turns a real
+        # failure into a wrong value with nothing attached (#671).
+        logger.debug("Failed to record a cache %s: %s",
+                     'hit' if hit else 'miss', e)
+
 
 @dataclasses.dataclass
 class _CacheEntry:
@@ -714,12 +956,24 @@ class DeploymentStatusCache:
         self._lock = threading.Lock()
 
     def get(self, domain: str) -> Optional[Any]:
-        """Get a cached result for a domain, returning None if expired or not found."""
+        """Get a cached result for a domain, returning None if expired or not found.
+
+        The hit and the miss are counted here because here is where they
+        happen. certmate_cache_hits_total and certmate_cache_misses_total were
+        declared and exported from the first release and nothing ever
+        incremented either, so the hit rate an operator would use to decide
+        whether the cache TTL is doing anything was permanently 0/0.
+
+        Counting outside the lock: the counter is the collector's own concern
+        and must not extend the window during which nothing else can read the
+        cache. `_record_cache_outcome` never raises.
+        """
         with self._lock:
             entry = self._cache.get(domain)
-            if entry and time.time() <= entry.expires_at:
-                return entry.result
-        return None
+            hit = bool(entry and time.time() <= entry.expires_at)
+            result = entry.result if hit else None
+        _record_cache_outcome(hit)
+        return result
 
     def set(self, domain: str, result: Any, ttl: Optional[int] = None) -> None:
         """Cache a result for a domain with a specific or default TTL."""
@@ -797,3 +1051,122 @@ class DeploymentStatusCache:
                 self._default_ttl = int(ttl)
             return True
         return False
+
+# certbot lays out each lineage as live/<domain>/<name>.pem -> a relative
+# symlink into archive/<domain>/<name><N>.pem. A ZIP archive cannot preserve
+# that: zipfile.write() dereferences symlinks, so a backup restore writes
+# plain files into live/. certbot then reports a parsefail and SKIPS the
+# lineage, which is why, after a restore, every scheduled renewal used to
+# fail (or exit 0 reporting "renewed: False") forever — silently, until the
+# certificates expired (#410).
+_CERTBOT_LINEAGE_FILES = ('cert.pem', 'chain.pem', 'fullchain.pem', 'privkey.pem')
+_ARCHIVE_VERSION_RE = re.compile(r'^(?P<stem>cert|chain|fullchain|privkey)(?P<n>\d+)\.pem$')
+
+
+def repair_certbot_lineage_symlinks(domain_dir: Union[str, Path], domain: str) -> bool:
+    """Rebuild live/<domain>/*.pem as symlinks into archive/<domain>/.
+
+    Returns True when a repair was performed. A no-op (and False) when the
+    lineage is absent, already healthy, or when archive/ holds nothing to
+    point at — the caller then still has the flat PEMs CertMate serves from,
+    which are untouched either way.
+
+    Only the *newest* archive generation is linked, which is what certbot's
+    own ``live`` symlinks mean.
+    """
+    # `domain` reaches the restore caller from ZIP entry names, so treat it as
+    # untrusted here rather than relying on the caller: validate its shape,
+    # then confirm every path we touch resolves inside domain_dir. The
+    # ZIP-slip guard in the restore path is the first line of defence; this is
+    # the second, and it makes the helper safe for any future caller.
+    # Unpacked. `validate_domain` returns (ok, normalized_or_reason), and a
+    # two-element tuple is always truthy, so `if not validate_domain(domain)`
+    # could not fire for any input — the shape check described above has
+    # never run. The containment check below (`_inside`) is the one that has
+    # been doing the work; this restores the first of the two.
+    shape_ok, _ = validate_domain(domain)
+    if not shape_ok:
+        return False
+
+    domain_dir = Path(domain_dir)
+    try:
+        base = domain_dir.resolve()
+    except OSError:
+        return False
+
+    def _inside(path: Path) -> Optional[Path]:
+        try:
+            resolved = (base / path).resolve()
+            resolved.relative_to(base)
+        except (OSError, ValueError):
+            return None
+        return base / path
+
+    live_dir = _inside(Path('live') / domain)
+    archive_dir = _inside(Path('archive') / domain)
+    conf = _inside(Path('renewal') / f'{domain}.conf')
+    if live_dir is None or archive_dir is None or conf is None:
+        return False
+
+    if not conf.exists() or not archive_dir.is_dir():
+        return False
+
+    live_cert = live_dir / 'cert.pem'
+    # Healthy lineage: live/cert.pem is a symlink that resolves.
+    if live_cert.is_symlink() and live_cert.exists():
+        return False
+    # Nothing restored into live/ at all is a different failure mode
+    # (handled by _quarantine_broken_lineage on the reissue path).
+    if not live_cert.exists():
+        return False
+
+    # Highest generation present for every one of the four members.
+    generations = {}
+    for entry in archive_dir.iterdir():
+        m = _ARCHIVE_VERSION_RE.match(entry.name)
+        if m:
+            generations.setdefault(m.group('stem'), set()).add(int(m.group('n')))
+    if len(generations) != len(_CERTBOT_LINEAGE_FILES):
+        return False
+
+    # The newest generation present for EVERY member, not min(max(...)): a
+    # lineage where privkey jumps 2 -> 4 while cert runs 1..3 has a max-of-
+    # maxes intersection that is empty at 3, and linking per-member would
+    # leave a half-relinked live/ (cert as a symlink, privkey still a flat
+    # file) — a state certbot handles no better than the one we started in.
+    common = set.intersection(*generations.values())
+    if not common:
+        return False
+    version = max(common)
+
+    # All four targets must exist before we touch live/, so the repair is
+    # all-or-nothing.
+    targets = {name: archive_dir / f"{name[:-len('.pem')]}{version}.pem"
+               for name in _CERTBOT_LINEAGE_FILES}
+    if not all(t.exists() for t in targets.values()):
+        return False
+
+    repaired = False
+    for name in _CERTBOT_LINEAGE_FILES:
+        target = targets[name]
+        link = live_dir / name
+        # Build the symlink under a temp name and rename it into place, so a
+        # filesystem that refuses symlinks (or a permission error) leaves the
+        # restored flat PEM intact instead of deleting it first and failing.
+        tmp_link = live_dir / f'.{name}.relink'
+        try:
+            if tmp_link.is_symlink() or tmp_link.exists():
+                tmp_link.unlink()
+            # Relative, exactly as certbot writes it, so the lineage keeps
+            # working if the data dir is moved again.
+            tmp_link.symlink_to(os.path.relpath(target, live_dir))
+            os.replace(tmp_link, link)
+            repaired = True
+        except OSError:
+            try:
+                if tmp_link.is_symlink() or tmp_link.exists():
+                    tmp_link.unlink()
+            except OSError:
+                pass
+            return repaired
+    return repaired

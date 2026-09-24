@@ -23,8 +23,8 @@ This document covers the complete CertMate architecture — both the main server
 CertMate is a modular, pluggable SSL/TLS certificate management system built with Python/Flask. It supports multiple CA providers, two dozen+ DNS providers, and pluggable storage backends.
 
 **Key Facts:**
-- **Language**: Python 3.9+ (Flask, Flask-RESTX)
-- **Storage**: Local filesystem default + 4 cloud backends (Azure Key Vault, AWS Secrets Manager, HashiCorp Vault, Infisical)
+- **Language**: Python 3.12 (Flask, Flask-RESTX)
+- **Storage**: Local filesystem default + 5 remote backends (Azure Key Vault, AWS Secrets Manager, HashiCorp Vault, Infisical, S3-compatible)
 - **CA Providers**: Let's Encrypt, DigiCert ACME, Private CA
 - **DNS Providers**: two dozen+ supported (Cloudflare, AWS Route53, Azure, Google, and more — see [DNS Providers](./dns-providers.md) for the full list)
 - **API**: REST with Swagger/OpenAPI via Flask-RESTX
@@ -71,8 +71,34 @@ CertMate is a modular, pluggable SSL/TLS certificate management system built wit
 │  │          Storage Layer (Pluggable Backends)    │  │
 │  │  Local FS │ Azure KV │ AWS SM │ Vault │ Infis │  │
 │  └───────────────────────────────────────────────┘  │
+│                                                     │
+│  ┌───────────────────────────────────────────────┐  │
+│  │   Composition root — modules/core/factory.py   │  │
+│  │                                               │  │
+│  │   create_app() constructs every manager above  │  │
+│  │   and then REGISTERS the API and web layers    │  │
+│  │   onto the Flask app.                          │  │
+│  └───┬───────────────────────────────────────┬───┘  │
+│      │ constructs (downward, like the rest)  │      │
+│      └──────────────► Manager Layer          │      │
+│                                              │      │
+│      ┌───────────────────────────────────────┘      │
+│      │ imports UPWARD — the one edge in the system  │
+│      └──────────────► REST API / Web Routes         │
 └─────────────────────────────────────────────────────┘
 ```
+
+Every arrow above points down except one. `modules/core/factory.py` is the
+composition root: it builds the managers *and* imports the API and web layers
+to register them, which is an import from `core/` into `api/` and `web/` —
+upward through the layers everything else respects.
+
+That is what a composition root is for, and it is deliberate: the alternative
+is either a layer that knows how to construct itself (and therefore its
+dependencies) or a registry that hides the same edge behind indirection. It is
+drawn here because a single documented exception is a design; an undocumented
+one is something the next reader finds by tracing an import and then wonders
+whether the rest of the diagram is true.
 
 ---
 
@@ -181,6 +207,7 @@ All backends implement `CertificateStorageBackend`:
 | **AWS Secrets Manager** | AWS Secrets Manager |
 | **HashiCorp Vault** | Vault KV v1/v2 |
 | **Infisical** | Infisical secrets |
+| **S3-compatible** | Any S3 API: MinIO/Ceph self-hosted, or Hetzner, Contabo, OVHcloud, Scaleway, Exoscale, Wasabi |
 
 #### Azure Key Vault — storage modes
 
@@ -293,7 +320,7 @@ Renewals always preserve the shape that was in effect at creation time: certbot 
 | POST | `/api/certificates` | Create new certificate |
 | GET | `/api/certificates/{domain}` | Get certificate info |
 | POST | `/api/certificates/{domain}/renew` | Renew certificate |
-| GET | `/api/certificates/{domain}/download` | Download as ZIP |
+| GET | `/api/certificates/{domain}/download` | Download: ZIP by default; `?file=<cert.pem\|chain.pem\|fullchain.pem\|privkey.pem\|combined.pem\|cert.pfx>` for one file; `?format=json` for every PEM inline |
 | GET | `/{domain}/tls` | Direct fullchain download |
 
 ### Client Certificates
@@ -317,7 +344,7 @@ Renewals always preserve the shape that was in effect at creation time: certbot 
 
 | Layer | Technologies |
 |-------|-------------|
-| **Backend** | Python 3.9+, Flask, Flask-RESTX, APScheduler, Certbot |
+| **Backend** | Python 3.12, Flask, Flask-RESTX, APScheduler, Certbot |
 | **Frontend** | HTML5, Tailwind CSS, Vanilla JavaScript, Font Awesome |
 | **Cloud SDKs** | Azure SDK, boto3, hvac, infisical-python |
 | **Crypto** | cryptography (OpenSSL), certbot plugins |
@@ -479,7 +506,7 @@ data/certs/client/
  "locality": "San Francisco",
  "serial_number": "12345678901234567890",
  "key_usage": ["digitalSignature", "keyEncipherment"],
- "extended_key_usage": ["serverAuth", "clientAuth"],
+ "extended_key_usage": ["clientAuth"],
  "created_at": "2024-10-30T18:00:00Z",
  "expires_at": "2025-10-30T18:00:00Z",
  "cert_usage": "api-mtls",
@@ -605,7 +632,6 @@ log_certificate_downloaded() # Log downloads
 log_batch_operation() # Log batch operations
 log_api_request() # Log API requests
 get_recent_entries() # Get latest audit entries
-get_entries_by_resource() # Get entries for a resource
 ```
 
 ---
@@ -777,7 +803,7 @@ Each certificate has a `metadata.json` file containing:
 
 - **Rate Limiting**: Prevents resource exhaustion
 - **Stateless Design**: Can run multiple instances
-- **Batch Operations**: Handles 100-30k certs per request
+- **Batch Operations**: up to 100 rows per request (the API rejects more with a 400)
 
 ### Auto-Renewal
 
@@ -791,27 +817,48 @@ Each certificate has a `metadata.json` file containing:
 
 ### Minimum Requirements
 
-- Python 3.9+
+- Python 3.12
 - 100MB disk space for CA and initial certificates
 - 50MB for audit logs per 1M operations
 - Low memory footprint
 
 ### Production Recommendations
 
-- Use storage backend (Azure, AWS, Vault) for HA
+- Use a storage backend (Azure, AWS, Vault, Infisical, S3-compatible) so certificate material survives the node
 - Enable audit logging for compliance
 - Configure rate limiting based on load
 - Regular CRL updates (daily or on revocation)
-- Backup CA keys and metadata
+- Back up CA keys and metadata with a disaster-recovery archive (`include_secrets=true` + `CERTMATE_BACKUP_PASSPHRASE`); the default share-safe backup deliberately leaves the CA key out
 - Monitor audit logs for suspicious activity
 
-### High Availability
+### Availability and failover
 
-For multi-instance deployments:
-1. Use shared storage backend for certificates
-2. Synchronize audit logs to central location
-3. Use load balancer with sticky sessions
-4. Monitor rate limit counters across instances
+**CertMate does not run multiple instances.** The renewal scheduler
+(APScheduler) runs inside the web process and gunicorn runs a single worker on
+purpose, so a second replica is a second scheduler issuing and renewing against
+the same certificate store: duplicate ACME orders, and the CA's
+duplicate-certificate rate limit. The Helm chart fails at template time if
+`replicaCount` is anything but `1`.
+
+
+What availability looks like instead — **active/standby**:
+
+1. Put `DATA_DIR` on storage that can be reattached (a network volume, or a
+   replicated filesystem). This is the state that matters: settings, the audit
+   chain, the private CA, and the certificates themselves.
+2. Configure a [storage backend](#storage-backends) (Azure Key Vault, AWS
+   Secrets Manager, Vault, Infisical, S3-compatible) so certificate material also lives
+   somewhere independent of the node.
+3. Run **one** instance. On failure, start a replacement against the same data
+   and point the ingress at it. A missed renewal window is not urgent — renewal
+   begins 30 days before expiry, so a failover has weeks of slack.
+4. Keep [disaster-recovery backups](./guide.md) with
+   `CERTMATE_BACKUP_PASSPHRASE` set, so a rebuild from scratch is possible when
+   the volume itself is lost.
+
+The consumers of certificates are what should be highly available. CertMate
+issues and distributes; it is not in the request path of the services it issues
+for, and it being down for an hour does not take anything else down with it.
 
 ---
 

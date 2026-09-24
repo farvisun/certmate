@@ -5,6 +5,7 @@ Handles DNS provider configuration, account management, and provider-specific op
 
 import logging
 
+from .secret_refs import SecretReferenceError, has_value, resolve
 from .utils import _DNS_PROVIDER_CREDENTIALS
 
 logger = logging.getLogger(__name__)
@@ -28,7 +29,7 @@ class DNSManager:
         'hetzner-cloud', 'rfc2136', 'powerdns', 'edgedns', 'gandi',
         'arvancloud', 'infomaniak', 'acme-dns', 'duckdns', 'vultr',
         'dnsmadeeasy', 'nsone', 'porkbun', 'he-ddns', 'dynudns',
-        'desec', 'scaleway',
+        'desec', 'scaleway', 'solidserver',
         'custom-script',
     ]
 
@@ -40,7 +41,6 @@ class DNSManager:
         """
         settings = self.settings_manager.load_settings()
         settings = self.settings_manager.migrate_dns_providers_to_multi_account(settings)
-        dns_providers = settings.get('dns_providers', {})
 
         result = []
         for provider in self.SUPPORTED_PROVIDERS:
@@ -54,14 +54,83 @@ class DNSManager:
             })
         return result
 
-    def get_dns_provider_account_config(self, provider, account_id=None, settings=None):
-        """Get DNS provider account configuration
-        
+    @staticmethod
+    def _account_has_credentials(provider, acc_config):
+        """True when *acc_config* looks like a configured account for *provider*.
+
+        Replaces a hardcoded 6-key allowlist (api_token / access_key_id /
+        api_key / api_url / username / token) that did not cover the real
+        credential fields of rfc2136 (nameserver/tsig_key/tsig_secret),
+        scaleway (application_token), azure, google, ovh, edgedns and more — so
+        a fully configured account for one of those resolved to (None, None) and
+        issuance died with "account not configured" naming credentials that were
+        already there. Now checks the provider's OWN required fields
+        (_DNS_PROVIDER_CREDENTIALS); for a provider not in that registry, any
+        non-empty value counts, so an unknown provider is not silently rejected.
+
+        A field counts as present when it holds a value OR names one — see
+        secret_refs: `api_token_file` and `api_token_env` configure an account
+        just as `api_token` does. The reference is NOT followed here. This
+        question is asked to render a settings page, and reading every secret
+        off disk to decide whether to draw a green tick would both put
+        credentials in memory for a page view and make the page fail on a host
+        where the secret simply is not mounted.
+        """
+        if not isinstance(acc_config, dict):
+            return False
+        required = _DNS_PROVIDER_CREDENTIALS.get(provider)
+        if required:
+            # ALL required fields must be present — the same rule test_provider()
+            # enforces (it reports each missing field). A partial account that
+            # passed here would resolve, then fail at certbot with a less
+            # specific error; consistency keeps "configured" meaning one thing.
+            return all(has_value(acc_config, field) for field in required)
+        # Unknown provider: treat any non-empty value as "configured" rather
+        # than rejecting it (the old allowlist would have).
+        return any(v for v in acc_config.values())
+
+    def get_dns_provider_account_config(self, provider, account_id=None,
+                                        settings=None):
+        """The account's configuration, with any referenced secret resolved.
+
+        Thin wrapper over the lookup below, so that resolution happens once for
+        every caller instead of at each of the seven call sites. Everything
+        that issues a certificate arrives here; everything that only lists
+        accounts does not, which is what keeps a resolved secret out of the
+        API responses and out of anything that writes settings back.
+        """
+        config, used_account_id = self._locate_account_config(
+            provider, account_id=account_id, settings=settings)
+        if config is None:
+            return None, None
+        try:
+            return resolve(config), used_account_id
+        except SecretReferenceError as exc:
+            # Named precisely, because the alternative is an issuance failure
+            # at the DNS provider that blames the credential rather than the
+            # mount. Never the value: this line goes to the log.
+            #
+            # %r on every interpolated value, not %s. The provider name comes
+            # from the request and the account id and path come from
+            # settings.json, so a newline in any of them would forge a log
+            # line; repr escapes it. It also makes an account id with a space
+            # in it readable, which %s did not.
+            logger.error(
+                'DNS provider %r account %r: field %r names %r, which %s',
+                provider, used_account_id, exc.field, exc.reference,
+                exc.reason)
+            return None, None
+
+    def _locate_account_config(self, provider, account_id=None, settings=None):
+        """Find the stored account configuration, exactly as written.
+
+        Returns what is in settings, references unresolved — see the wrapper.
+
         Args:
             provider: DNS provider name (e.g., 'cloudflare')
             account_id: Specific account ID (optional, uses default if not provided)
             settings: Settings dict (optional, loads current if not provided)
-            
+
         Returns:
             tuple: (account_config_dict, used_account_id)
         """
@@ -105,17 +174,13 @@ class DNSManager:
                 
                 # If we get here and no account_id was specified, try to use the first available account
                 for acc_id, acc_config in accounts.items():
-                    if isinstance(acc_config, dict) and any(key in acc_config for key in [
-                        'api_token', 'access_key_id', 'api_key', 'api_url', 'username', 'token'
-                    ]):
+                    if self._account_has_credentials(provider, acc_config):
                         return acc_config, acc_id
                 
                 return None, None
             else:
                 # Check if this is old single-account format (has direct config keys)
-                if any(key in provider_config for key in [
-                    'api_token', 'access_key_id', 'api_key', 'api_url', 'username', 'token'
-                ]):
+                if self._account_has_credentials(provider, provider_config):
                     # This is old single-account format
                     return provider_config, 'default'
                 
@@ -142,9 +207,7 @@ class DNSManager:
                     
                     # Fall back to first available account
                     for acc_id, acc_config in provider_config.items():
-                        if isinstance(acc_config, dict) and any(key in acc_config for key in [
-                            'api_token', 'access_key_id', 'api_key', 'api_url', 'username', 'token'
-                        ]):
+                        if self._account_has_credentials(provider, acc_config):
                             return acc_config, acc_id
                 
                 return None, None
@@ -182,10 +245,8 @@ class DNSManager:
                         'account_id': account_id,
                         'name': account_config.get('name', account_id.title()),
                         'description': account_config.get('description', ''),
-                        'configured': bool(any(account_config.get(key) for key in [
-                            'api_token', 'access_key_id', 'api_key', 'api_url', 'username', 'token',
-                            'nameserver', 'tsig_key', 'tsig_secret', 'secret_key', 'password'
-                        ]))
+                        'configured': self._account_has_credentials(
+                            provider, account_config)
                     })
             elif provider_config:
                 # Legacy single-account format
@@ -193,10 +254,8 @@ class DNSManager:
                     'account_id': 'default',
                     'name': f'Default {provider.title()} Account',
                     'description': 'Legacy single-account configuration',
-                    'configured': bool(any(provider_config.get(key) for key in [
-                        'api_token', 'access_key_id', 'api_key', 'api_url', 'username', 'token',
-                        'nameserver', 'tsig_key', 'tsig_secret', 'secret_key', 'password'
-                    ]))
+                    'configured': self._account_has_credentials(
+                        provider, provider_config)
                 })
                 
             return accounts
@@ -291,10 +350,25 @@ class DNSManager:
                     provider_config['accounts'] = {}
                 provider_config['accounts'][account_id] = account_config
 
-                # First account for this provider becomes the default.
+                # Claim the default slot for the first REAL account. The
+                # first-run migration pre-seeds default_accounts[provider] =
+                # 'default' pointing at the empty scaffolded placeholder, so
+                # `provider not in default_accounts` was never true after that
+                # and a real account added later never became the default —
+                # issuance then resolved the empty placeholder and handed certbot
+                # a blank credential. Promote the new account when there is
+                # no default, or the current default points at an account that
+                # is not actually configured, provided the new one is.
                 if 'default_accounts' not in settings:
                     settings['default_accounts'] = {}
-                if provider not in settings['default_accounts']:
+                accounts = provider_config['accounts']
+                current_default = settings['default_accounts'].get(provider)
+                current_cfg = (accounts.get(current_default)
+                               if current_default else None)
+                if not current_default or (
+                        not self._account_has_credentials(provider, current_cfg)
+                        and self._account_has_credentials(
+                            provider, account_config)):
                     settings['default_accounts'][provider] = account_id
 
             success = self.settings_manager.update(
@@ -376,7 +450,11 @@ class DNSManager:
 
             required = _DNS_PROVIDER_CREDENTIALS.get(provider, [])
             config = config if isinstance(config, dict) else {}
-            missing = [field for field in required if not config.get(field)]
+            # has_value, so a field supplied as `<field>_file` / `<field>_env`
+            # passes. The reference is not followed: this is a shape check, and
+            # it is reached from a button in the UI.
+            missing = [field for field in required
+                       if not has_value(config, field)]
             if missing:
                 return False, (
                     f"Missing required credential field(s) for {provider}: "
@@ -426,7 +504,11 @@ class DNSManager:
             outcome = {'ok': False}
 
             def _mutate(settings):
-                _, existing_account_id = self.get_dns_provider_account_config(
+                # The lookup, not the resolving wrapper: this only needs to
+                # know the account exists. Choosing a default should not read a
+                # secret off disk, and must not fail because the secret is
+                # mounted somewhere this process cannot see it.
+                _, existing_account_id = self._locate_account_config(
                     provider, account_id, settings
                 )
                 if not existing_account_id:

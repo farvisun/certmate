@@ -2,41 +2,198 @@
 
 Contributions are welcome. Open a pull request at any time.
 
-## How to Contribute
+CertMate issues TLS certificates for other people's infrastructure, so the bar
+for merging is deliberately high — and most of it is automated. Nothing below is
+a matter of taste: it is the list of gates that will run on your branch. Running
+them locally is faster than finding out from CI.
+
+## How to contribute
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/my-change`)
-3. Commit your changes (`git commit -m 'Add my change'`)
-4. Push to the branch (`git push origin feature/my-change`)
-5. Open a Pull Request
+3. Commit your changes
+4. Push the branch
+5. Open a pull request
 
-## Development Setup
+## Development setup
 
 ```bash
 git clone https://github.com/fabriziosalmi/certmate.git
 cd certmate
-python3 -m venv venv
-source venv/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-pip install -r requirements-dev.txt
+pip install -r requirements-test.txt   # pytest + playwright, and the in-repo SDK/CLI editable
 python app.py
 ```
 
-## Running Tests
+`requirements-test.txt` installs `clients/certmate-sdk` and `clients/certmate-cli`
+editable, in that order — the CLI depends on the SDK — so the end-to-end tests
+exercise the real clients against the server they wrap.
+
+The linters are **not** in `requirements-test.txt`; CI pins them explicitly and
+so should you:
 
 ```bash
-python -m pytest tests/ -v
+pip install flake8==7.3.0 bandit==1.9.4
 ```
 
-## Code Style
+## Running the tests
 
-- Follow existing code conventions
-- Keep commits focused and descriptive
-- Add tests for new functionality when possible
+```bash
+./run-tests.sh                                   # or, equivalently:
+pytest -v --tb=short -m "not ui and not e2e"
+```
 
-## Reporting Issues
+**The marker expression is not optional.** A bare `pytest` runs the Playwright
+`ui` suite in the same process as everything else and hands you four failures
+that have nothing to do with your change; `e2e` needs a running instance.
+`make test` and `scripts/release.sh` use exactly this selection.
 
-Open an issue on GitHub with:
-- Steps to reproduce
-- Expected vs. actual behavior
-- CertMate version and environment details
+The UI suite runs on its own and needs Docker:
+
+```bash
+pytest -m ui           # builds a container and drives it with Playwright
+```
+
+## Before you push
+
+These are the gates that will run on the PR, in rough order of how often they
+catch something:
+
+| Gate | Command |
+|---|---|
+| Syntax + bug-class lint (**fails CI**) | `flake8 . --count --select=E9,F63,F7,F82,F811,F632,E711,E712,E713,E714,F401,F841,E722 --show-source` |
+| Complexity budget (**fails CI**) | `python scripts/check_complexity_budget.py` |
+| Security scan (**fails CI**) | `bandit -r modules/ app.py --severity-level medium` |
+| Tests + coverage floor of 75% on `modules/` | `pytest -m "not ui and not network" --cov=modules --cov-fail-under=75` |
+| Theme tokens | `python3 scripts/theme_codemod.py --check` |
+| CSS bundle freshness | `npm ci && npm run css:build`, then commit `static/css/tailwind.min.css` |
+| No emoji in the release notes (`RELEASE_NOTES.md` + `docs/releases/`) | `.github/workflows/lint-emoji.yml` |
+| Image builds | `docker build -t certmate:test .` |
+
+The gated commands are the ones `ci.yml` runs, character for character. They had
+drifted — the lint row was missing `F401,F841,E722` and the test row was
+missing `not network` — which is the worst way for this table to be wrong: it
+passes locally and fails on the PR, or it fails locally on the CA-reachability
+tier that CI deliberately does not gate on.
+
+The full style pass (`flake8 .` with no `--select`) is informational — the
+codebase is not clean against it and CI runs it with `--exit-zero`. Do not
+reformat unrelated files to quieten it.
+
+The coverage floor is a floor, not a target. Raise it as a ratchet; never lower
+it to make a red build pass.
+
+The complexity budget works the same way in the other direction. Every function
+may reach a cyclomatic complexity of 40; the thirteen already above it are
+listed in `scripts/check_complexity_budget.py` with the value they measure
+today, and the check fails four ways: a new function over the limit with no
+entry, a budgeted function getting worse, a budgeted function getting *better*
+without its entry coming down, and an entry that matches nothing. Adding an
+entry is a decision to keep a function complex — decompose it instead, or argue
+for the entry in review.
+
+### Editing templates or CSS
+
+Rebuild the bundle and commit it — CI fails if the committed
+`static/css/tailwind.min.css` differs from a fresh build. Use the semantic theme
+tokens rather than raw `*-600 dark:*-400` colour pairs; `theme_codemod.py --check`
+enforces that.
+
+### Editing docs
+
+`tests/test_docs_navigation.py` fails if a page stops being linked from its
+`index.md`, if an index points at a file that is not there, or if the README's
+documentation table drops a page.
+
+Translations live one directory deeper than the English originals, so a relative
+link out of `docs/<lang>/` needs `../../`, not `../`. Copying an English page
+without adjusting that broke thirteen links before anyone noticed.
+
+## Getting a PR merged
+
+Branch protection is on, and admins are not exempt:
+
+- **Every review conversation must be resolved**, bots included. Copilot and
+  CodeQL comment on most PRs and the branch will not merge until each thread is
+  resolved — read them rather than resolving on sight. In one recent batch, four
+  of five bot findings were real bugs.
+- CI must be green. Auto-merge is disabled repo-wide, so merging is a deliberate
+  act by a human.
+
+### Which checks actually block a merge
+
+Not all of them, and the difference is written down in
+[`.github/required-checks.yml`](.github/required-checks.yml): every job that
+runs on a pull request is listed as **gating** (branch protection will not let
+the PR merge without it) or **advisory** (it reports, and the reason it does not
+block is next to it). `tests/test_required_checks_registry.py` fails if a job is
+missing from that file, so a new job cannot arrive unclassified.
+
+Read the advisory ones anyway. `storage-live` and `acme-dns-live` boot real
+service containers and do not gate because a registry hiccup would block
+unrelated work — but acme-dns shipped broken in every release up to v2.24.1
+precisely because nobody was looking.
+
+The UI suite is the one odd shape. `ui` only runs when a PR touches the
+frontend (`scripts/ui_paths_changed.py` decides), so the required context is
+`ui-gate`, which always runs and treats "skipped" as a pass. If you add a
+frontend directory, add it to that script's `PATTERNS` — otherwise changes to it
+silently skip the suite.
+
+### Touching the issuance pipeline
+
+If your change touches certificate issuance, a DNS provider, or the ACME path,
+say so in the PR. `scripts/release.sh` detects those paths and requires a real
+certificate issued against Let's Encrypt **staging** before a release carrying
+the change can be cut. That gate is not skippable for those paths — it exists
+because two DNS providers once shipped in a state where they had never worked in
+any release, and nothing caught it for months.
+
+### Version strings
+
+Don't add one by hand. Every user-facing copy of the version is bumped by
+`scripts/release.sh` and pinned by `tests/test_version_consistency.py`. If you
+create a new place where the version appears, add it to both: a version string
+that has to be remembered is a version string that goes stale.
+
+## Code style
+
+- Match the conventions of the file you are editing.
+- Comments should explain *why*, particularly where the obvious implementation
+  is wrong. Much of the commentary in this codebase records a bug that was paid
+  for once; that is the house style, and it is worth more than a comment
+  restating the code.
+- **Put the history in the past tense.** That style has one failure mode: a
+  paragraph describing the defect a line exists to prevent, written in the
+  present, reads as a description of what the code does now. A reader skimming
+  for current behaviour comes away believing the bug is still there.
+
+  ```python
+  # WRONG — reads as the current behaviour
+  # The settings entry is written after the lock is released, so a renewal
+  # can interleave and read the old provider.
+
+  # RIGHT — the tense says which is which
+  # Both writes happen under one lock. Previously the settings entry was
+  # written after the lock was released, so a renewal could interleave and
+  # read the old provider.
+  ```
+
+  Present tense for what the code does; past tense, or a leading
+  `Previously:`, for what it used to do wrongly. Existing comments are not
+  being rewritten for this — it applies to the ones you add.
+- Add tests for new behaviour. For a bug fix, check that your test **fails
+  against the old code** — a gate nobody has watched fail is not a gate.
+
+## Reporting issues
+
+Open an issue with:
+
+- steps to reproduce;
+- expected vs. actual behaviour;
+- the CertMate version (`GET /health`, or `certmate --version` for the CLI) and
+  the environment — Docker tag, DNS provider, CA.
+
+Security issues follow [SECURITY.md](SECURITY.md), not the public tracker.

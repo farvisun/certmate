@@ -5,6 +5,7 @@ Supports both API token and local username/password authentication
 """
 
 import logging
+import os
 import secrets
 import hashlib
 import hmac
@@ -12,8 +13,9 @@ import threading
 import uuid
 import time
 from functools import wraps
-from flask import request, jsonify, session
-from datetime import datetime, timedelta
+from flask import request
+from datetime import datetime, timezone
+from .structured_logging import scrub_log_value
 from .utils import utc_now
 
 try:
@@ -25,6 +27,99 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 ROLE_HIERARCHY = {'viewer': 0, 'operator': 1, 'admin': 2}
+
+# Who a request is while the instance is in setup mode: anyone who can reach
+# it, served as admin. Anything created under this name was created by whoever
+# was there during the setup window, which is why it is recorded and reviewed.
+SETUP_USERNAME = 'setup_user'
+
+# Distinct from None/False so the operator-bearer-token detection can be
+# memoised (env/file are fixed for the process lifetime) without a False
+# result being mistaken for "not computed yet".
+_UNSET = object()
+
+
+# bcrypt has always ignored everything past the 72nd byte of a password. Until
+# 4.x it truncated silently; 5.0.0 raises ValueError instead.
+#
+# That change is a lockout, not a crash, and it is invisible: `_verify_password`
+# catches ValueError and returns False, so every operator whose password is
+# longer than 72 bytes would simply be told their password is wrong, for ever,
+# with nothing in the logs to say why. Their stored hash was derived from the
+# truncated form, so it is still perfectly valid — only the call to check it
+# would fail.
+#
+# So the truncation is now explicit and applied on both sides, which keeps
+# behaviour identical to bcrypt 4.x rather than changing it during an upgrade.
+# It does mean two passwords sharing their first 72 bytes are equivalent, as
+# they always have been under bcrypt; that is a property of the algorithm, not
+# something introduced here.
+_BCRYPT_MAX_BYTES = 72
+
+
+def _bcrypt_input(password):
+    """The bytes bcrypt will actually consider, whatever the caller passed."""
+    return password.encode()[:_BCRYPT_MAX_BYTES]
+
+
+# A username is a key in settings['users']; it is also rendered in the UI, put
+# in audit records, and interpolated into log messages. Nothing constrained it,
+# and the OIDC path takes it from an IdP claim rather than from an operator.
+USERNAME_MAX_LENGTH = 256
+
+
+def validate_username(username):
+    """Normalise and check a username. Returns ``(clean, error)``.
+
+    Deliberately narrow. It rejects control characters and nothing else about
+    the character set: an IdP legitimately issues addresses, dots, apostrophes
+    and non-ASCII names as ``preferred_username``, and an allowlist would lock
+    real people out of a working SSO deployment to prevent a problem they do
+    not cause. No name a person chooses contains a control character.
+
+    Surrounding whitespace is stripped rather than refused. Nobody intends a
+    trailing space as part of their identity, and normalising means " alice "
+    now collides with an existing "alice" instead of creating a second,
+    visually identical account.
+    """
+    if not isinstance(username, str):
+        return None, 'Username is required'
+    clean = username.strip()
+    if not clean:
+        return None, 'Username is required'
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in clean):
+        return None, 'Username cannot contain control characters'
+    if len(clean) > USERNAME_MAX_LENGTH:
+        return None, f'Username cannot exceed {USERNAME_MAX_LENGTH} characters'
+    return clean, None
+
+def active_admin_count(users):
+    """How many enabled admins the instance has.
+
+    The lockout guard, in one place. `update_user` applied it to disable,
+    delete and demote; the OIDC role sync wrote a role straight into the user
+    table without it, so an IdP group edit could demote the last admin — and
+    an SSO-provisioned row has an empty password_hash, so there was no local
+    login left to recover with.
+    """
+    return sum(1 for u in (users or {}).values()
+               if u.get('role') == 'admin' and u.get('enabled', True))
+
+
+class BearerTokenFileUnreadable(Exception):
+    """API_BEARER_TOKEN_FILE is set and cannot be read.
+
+    Exists so that "the operator configured no bearer token" and "the operator
+    configured one in a file we cannot read right now" stop being the same
+    value. They lead to opposite decisions: the first is a fresh install that
+    must stay open so it can be bootstrapped, the second is a configured
+    instance that must stay closed.
+    """
+
+    def __init__(self, path, cause):
+        self.path = path
+        self.cause = cause
+        super().__init__(f"{path}: {cause}")
 
 
 class AuthManager:
@@ -43,10 +138,32 @@ class AuthManager:
         self._last_used_persist_ts = {}
         self._last_used_lock = threading.Lock()
         import os
-        _timeout_hours = int(os.getenv('SESSION_TIMEOUT_HOURS', '8'))
+        from .constants import DEFAULT_SESSION_TIMEOUT_HOURS
+        try:
+            _timeout_hours = int(os.getenv(
+                'SESSION_TIMEOUT_HOURS', str(DEFAULT_SESSION_TIMEOUT_HOURS)))
+        except ValueError:
+            logger.warning(
+                "SESSION_TIMEOUT_HOURS is not an integer; using the default "
+                "of %d hours", DEFAULT_SESSION_TIMEOUT_HOURS)
+            _timeout_hours = DEFAULT_SESSION_TIMEOUT_HOURS
+        # max(1, ...) so a zero or negative value cannot expire every session
+        # at the moment it is created and lock everyone out.
         self._session_timeout = max(1, _timeout_hours) * 60 * 60
         if not BCRYPT_AVAILABLE:
-            logger.warning("bcrypt not available, falling back to SHA-256 (less secure)")
+            logger.warning("bcrypt not available; using the scrypt KDF fallback. "
+                           "Install bcrypt for the preferred password hashing.")
+
+    @property
+    def session_timeout_seconds(self) -> int:
+        """How long a session lives, in seconds.
+
+        Public because the cookie has to agree with it (#590): both mint sites
+        set ``max_age`` from this rather than repeating a literal, so an
+        operator who changes SESSION_TIMEOUT_HOURS gets a browser cookie that
+        expires with the server-side record instead of eight hours later.
+        """
+        return self._session_timeout
 
     def set_audit_logger(self, audit_logger):
         """Inject the AuditLogger so authorization denials emit a real audit
@@ -72,33 +189,61 @@ class AuthManager:
         return role if role in ROLE_HIERARCHY else 'viewer'
 
     def _hash_password(self, password, salt=None):
-        """Hash password using bcrypt (preferred) or SHA-256 with salt (fallback)
-        
-        bcrypt is the industry standard for password hashing as it's designed
-        to be slow and resistant to GPU/ASIC attacks.
+        """Hash a password with bcrypt (preferred) or scrypt (fallback).
+
+        bcrypt is the industry standard — slow and GPU/ASIC-resistant. If bcrypt
+        cannot be imported, fall back to scrypt (a slow, memory-hard KDF from the
+        stdlib) rather than a fast hash: a bare SHA-256 of salt+password would be
+        trivially GPU-crackable for low-entropy passwords.
         """
         if BCRYPT_AVAILABLE:
             # bcrypt handles salt internally, rounds=12 provides good security
-            return bcrypt.hashpw(password.encode(), bcrypt.gensalt(rounds=12)).decode()
-        else:
-            # Fallback to SHA-256 with salt (less secure but functional)
-            if salt is None:
-                salt = secrets.token_hex(16)
-            hashed = hashlib.sha256((salt + password).encode()).hexdigest()
-            return f"sha256:{salt}:{hashed}"
-    
+            return bcrypt.hashpw(_bcrypt_input(password),
+                                 bcrypt.gensalt(rounds=12)).decode()
+        # bcrypt import failed — scrypt KDF fallback (NOT a fast hash).
+        # Format: "scrypt:<n>:<r>:<p>:<salt_hex>:<hash_hex>".
+        if salt is None:
+            salt = secrets.token_hex(16)
+        n, r, p = 2 ** 14, 8, 1  # ~16 MiB work factor, under scrypt's default maxmem
+        dk = hashlib.scrypt(password.encode(), salt=salt.encode(),
+                            n=n, r=r, p=p, dklen=32)
+        return f"scrypt:{n}:{r}:{p}:{salt}:{dk.hex()}"
+
     def _verify_password(self, password, stored_hash):
-        """Verify password against stored hash (supports bcrypt and legacy SHA-256)"""
+        """Verify a password against a stored hash.
+
+        Supports bcrypt, the scrypt fallback, and the pre-existing legacy
+        SHA-256 formats ("sha256:salt:hash" and bare "salt:hash") so operators
+        hashed under the old fallback can still log in after upgrade.
+        """
         try:
-            # Check if it's a bcrypt hash (starts with $2b$ or $2a$)
+            # bcrypt hash (starts with $2b$ / $2a$)
             if stored_hash.startswith('$2'):
                 if BCRYPT_AVAILABLE:
-                    return bcrypt.checkpw(password.encode(), stored_hash.encode())
-                else:
-                    logger.error("bcrypt hash found but bcrypt not available")
+                    return bcrypt.checkpw(_bcrypt_input(password),
+                                          stored_hash.encode())
+                logger.error("bcrypt hash found but bcrypt not available")
+                return False
+
+            # scrypt fallback: "scrypt:<n>:<r>:<p>:<salt>:<hash>"
+            if stored_hash.startswith('scrypt:'):
+                _, n_s, r_s, p_s, salt, expected_hash = stored_hash.split(':', 5)
+                n, r, p = int(n_s), int(r_s), int(p_s)
+                # Bounds-check the stored KDF params BEFORE the (costly) work so a
+                # corrupted settings.json can't turn each login into an expensive
+                # scrypt run. These bracket what _hash_password writes
+                # (n=2**14, r=8, p=1); scrypt's own maxmem is the hard backstop.
+                if not (2 ** 12 <= n <= 2 ** 17 and (n & (n - 1)) == 0
+                        and 1 <= r <= 16 and 1 <= p <= 8
+                        and 0 < len(expected_hash) <= 256
+                        and all(c in '0123456789abcdefABCDEF' for c in expected_hash)):
                     return False
-            
-            # Legacy SHA-256 format: "sha256:salt:hash" or "salt:hash"
+                dk = hashlib.scrypt(password.encode(), salt=salt.encode(),
+                                    n=n, r=r, p=p, dklen=len(expected_hash) // 2)
+                return secrets.compare_digest(dk.hex(), expected_hash)
+
+            # Legacy SHA-256 formats (verify-only, for pre-upgrade hashes):
+            # "sha256:salt:hash" or the older bare "salt:hash".
             if stored_hash.startswith('sha256:'):
                 parts = stored_hash.split(':', 2)
                 if len(parts) == 3:
@@ -106,9 +251,8 @@ class AuthManager:
                 else:
                     return False
             else:
-                # Old format without prefix
                 salt, expected_hash = stored_hash.split(':', 1)
-            
+
             actual_hash = hashlib.sha256((salt + password).encode()).hexdigest()
             return secrets.compare_digest(actual_hash, expected_hash)
         except (ValueError, AttributeError) as e:
@@ -133,11 +277,16 @@ class AuthManager:
 
     # --- Scoped API Key management ---
 
-    # Domain pattern used by allowed_domains validation. Mirrors the existing
-    # _DOMAIN_RE in modules/api/resources.py but also accepts the bare
-    # wildcard form "*.example.com" (no leading label before the asterisk).
+    # Domain pattern used by allowed_domains validation. Mirrors DOMAIN_RE in
+    # modules/api/path_validation.py but also accepts the bare wildcard form
+    # "*.example.com" (no leading label before the asterisk).
+    #
+    # `\Z`, not `$`: in Python `$` also matches before a trailing newline, so
+    # the previous expression treated "example.com\n" as a valid pattern. That
+    # was inert here because the caller strips each entry before matching — but
+    # it is inert by accident, and the next caller need not strip.
     _ALLOWED_DOMAIN_RE = __import__('re').compile(
-        r'^(\*\.)?([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$'
+        r'^(\*\.)?([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}\Z'
     )
 
     @classmethod
@@ -270,6 +419,67 @@ class AuthManager:
             return secrets.compare_digest(actual, expected)
         return False
 
+    @staticmethod
+    def _normalize_expires_at(expires_at):
+        """Validate an API-key expiry on write (#432).
+
+        The value used to be stored verbatim and compared as a STRING, so
+        "31/12/2026" sorted after every ISO timestamp and never expired, while
+        a JSON *number* raised an uncaught TypeError inside
+        authenticate_api_token — which 401s every bearer token on the instance.
+
+        Returns (normalised_iso_or_None, error_message_or_None).
+        """
+        if expires_at in (None, ''):
+            return None, None
+        if not isinstance(expires_at, str):
+            return None, "expires_at must be an ISO-8601 timestamp string"
+        try:
+            parsed = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
+        except ValueError:
+            return None, ("expires_at must be an ISO-8601 timestamp "
+                          "(e.g. 2027-01-31T23:59:59)")
+        # Store naive UTC, matching utc_now() and every other timestamp on disk.
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed.isoformat(), None
+
+    @staticmethod
+    def _api_key_expired(key_data, now=None, key_id=None):
+        """Has this key expired? Compared as a datetime, never as a string.
+
+        Fails CLOSED: a value that cannot be parsed is treated as expired.
+        A key whose expiry we cannot understand is a key we cannot vouch for,
+        and the alternative — the previous behaviour — was that a malformed
+        expiry meant *never expires*.
+
+        ``key_id`` is only for the log line. It is passed in rather than read
+        from ``key_data`` on purpose: that dict also holds the token hash and
+        prefix, and logging anything read out of it is how credential material
+        ends up in an application log.
+        """
+        raw = key_data.get('expires_at')
+        if raw in (None, ''):
+            return False
+        label = key_id or '<unknown>'
+        if not isinstance(raw, str):
+            logger.warning(
+                "API key %s has a non-string expires_at (%s); treating it as "
+                "expired", label, type(raw).__name__,
+            )
+            return True
+        try:
+            expires = datetime.fromisoformat(raw.replace('Z', '+00:00'))
+        except ValueError:
+            logger.warning(
+                "API key %s has an unparseable expires_at; treating it as "
+                "expired", label,
+            )
+            return True
+        if expires.tzinfo is not None:
+            expires = expires.astimezone(timezone.utc).replace(tzinfo=None)
+        return expires <= (now or utc_now())
+
     def create_api_key(self, name, role='viewer', expires_at=None, created_by=None,
                        allowed_domains=None, is_agent=False):
         """Create a new scoped API key.
@@ -305,6 +515,10 @@ class AuthManager:
             if scope_err:
                 return False, scope_err
 
+            normalized_expiry, expiry_err = self._normalize_expires_at(expires_at)
+            if expiry_err:
+                return False, expiry_err
+
             api_keys = self._get_api_keys()
 
             # Check name uniqueness among active keys
@@ -322,7 +536,7 @@ class AuthManager:
                 'token_prefix': plaintext[:7],
                 'created_at': utc_now().isoformat(),
                 'created_by': created_by,
-                'expires_at': expires_at,
+                'expires_at': normalized_expiry,
                 'last_used_at': None,
                 'revoked': False,
                 'allowed_domains': scoped_domains,
@@ -353,25 +567,93 @@ class AuthManager:
     def list_api_keys(self):
         """List all API keys without token hashes."""
         api_keys = self._get_api_keys()
-        now = utc_now().isoformat()
+        now = utc_now()
         result = {}
         for key_id, data in api_keys.items():
-            exp = data.get('expires_at')
-            is_expired = bool(exp and exp < now)
+            # Same datetime comparison the auth path uses (#432): the string
+            # compare here made the UI's "expired" badge disagree with whether
+            # the key actually still worked.
+            is_expired = self._api_key_expired(data, now, key_id=key_id)
             result[key_id] = {
                 'name': data.get('name'),
                 'role': data.get('role'),
                 'token_prefix': data.get('token_prefix'),
                 'created_at': data.get('created_at'),
                 'created_by': data.get('created_by'),
-                'expires_at': exp,
+                'expires_at': data.get('expires_at'),
                 'last_used_at': data.get('last_used_at'),
                 'revoked': data.get('revoked', False),
                 'is_expired': is_expired,
                 'allowed_domains': data.get('allowed_domains'),
                 'is_agent': bool(data.get('is_agent')),
+                **self._setup_origin_view(data),
             }
         return result
+
+    # --- keys created during the setup window ------------------------------ #
+
+    @staticmethod
+    def _created_during_setup(data):
+        return (data or {}).get('created_by') == SETUP_USERNAME
+
+    def _setup_origin_view(self, data):
+        """The review state of a key created while the instance was in setup
+        mode, for the key listing.
+
+        While in setup mode every request is served as admin, so a key minted
+        then was minted by whoever could reach the instance, and nobody can
+        vouch for it. Such keys are no longer mintable (the route refuses in
+        setup mode); the ones that already exist stay valid, are flagged, and
+        wait for an operator to confirm or revoke them.
+        """
+        during_setup = self._created_during_setup(data)
+        confirmed_at = data.get('setup_origin_confirmed_at') if during_setup else None
+        return {
+            'created_during_setup': during_setup,
+            'setup_origin_confirmed_at': confirmed_at,
+            'setup_origin_confirmed_by': data.get('setup_origin_confirmed_by') if during_setup else None,
+            'needs_review': bool(during_setup and not confirmed_at and not data.get('revoked')),
+        }
+
+    def unreviewed_setup_keys(self):
+        """IDs of live keys created during setup that no operator has confirmed."""
+        return sorted(
+            key_id for key_id, data in self._get_api_keys().items()
+            if self._setup_origin_view(data)['needs_review']
+        )
+
+    def confirm_setup_key(self, key_id, confirmed_by):
+        """Record that an operator vouches for a key created during setup.
+
+        Returns ``(ok, message)``. Refused for a key that was not created during
+        setup (there is nothing to confirm), for a revoked key, and for one
+        already confirmed.
+        """
+        try:
+            api_keys = self._get_api_keys()
+            data = api_keys.get(key_id)
+            if data is None:
+                return False, "API key not found"
+            if not self._created_during_setup(data):
+                return False, "This key was not created during setup; there is nothing to confirm"
+            if data.get('revoked'):
+                return False, "API key is revoked"
+            if data.get('setup_origin_confirmed_at'):
+                return False, "API key is already confirmed"
+            data['setup_origin_confirmed_at'] = utc_now().isoformat()
+            data['setup_origin_confirmed_by'] = confirmed_by
+            if self._save_api_keys(api_keys):
+                # The key id, not its name: the name is text whoever created
+                # the key chose, and it is read out of the api_keys record,
+                # which also holds the token hash. Nothing derived from that
+                # record needs to reach a log line.
+                logger.info("API key %s, created during setup, was confirmed by %s",
+                            key_id, scrub_log_value(confirmed_by))
+                return True, "API key confirmed"
+            return False, "Failed to save changes"
+        except (OSError, ValueError, KeyError) as e:
+            logger.error(f"Error confirming API key: {e}")
+            return False, "An internal error occurred"
 
     def revoke_api_key(self, key_id):
         """Revoke an API key by ID (soft-delete)."""
@@ -435,13 +717,12 @@ class AuthManager:
                 return {'username': 'api_user', 'role': 'admin'}
 
             # 2. Check scoped API keys
-            now = utc_now().isoformat()
+            now = utc_now()
             api_keys = settings.get('api_keys', {})
             for key_id, key_data in api_keys.items():
                 if key_data.get('revoked'):
                     continue
-                exp = key_data.get('expires_at')
-                if exp and exp < now:
+                if self._api_key_expired(key_data, now, key_id=key_id):
                     continue
                 if self._verify_api_token(token, key_data.get('token_hash', '')):
                     # Update last_used_at via settings_manager.update so a
@@ -459,12 +740,21 @@ class AuthManager:
                             keys = s.get('api_keys') or {}
                             target = keys.get(matched_id)
                             if target is not None:
-                                target['last_used_at'] = now
+                                # ISO text, not the datetime object: json.dump
+                                # refused the object, the swallowed error kept
+                                # the column empty for every key, forever.
+                                target['last_used_at'] = now.isoformat()
                                 s['api_keys'] = keys
                         try:
                             self.settings_manager.update(_touch, None)
-                        except Exception:
-                            pass  # Non-critical, don't fail auth on last_used update
+                        except Exception as e:
+                            # Non-critical: never fail auth over a last_used
+                            # write. But never silent either — this swallow
+                            # already hid one defect (see the comment above:
+                            # json.dump refused a datetime and the column
+                            # stayed empty for every key, forever).
+                            logger.debug(
+                                "Could not persist last_used_at for an API key: %s", e)
                     return {
                         'username': 'api_key:' + key_data.get('name', key_id),
                         'role': self._normalize_role(key_data.get('role', 'viewer')),
@@ -483,6 +773,10 @@ class AuthManager:
     def create_user(self, username, password, role='operator', email=None):
         """Create a new user"""
         try:
+            username, err = validate_username(username)
+            if err:
+                return False, err
+
             users = self._get_users()
 
             if username in users:
@@ -527,22 +821,14 @@ class AuthManager:
             # everyone out of admin-gated endpoints. delete_user carries the
             # parallel guard for removal.
             if enabled is False and user.get('role') == 'admin':
-                active_admins = sum(
-                    1 for u in users.values()
-                    if u.get('role') == 'admin' and u.get('enabled', True)
-                )
-                if active_admins <= 1:
+                if active_admin_count(users) <= 1:
                     return False, "Cannot disable the last active admin user"
 
             # Demoting the last active admin out of the admin role is the same
             # lockout in a different shape, so it carries the same guard as the
             # disable/delete paths above.
             if role is not None and user.get('role') == 'admin' and self._normalize_role(role) != 'admin':
-                active_admins = sum(
-                    1 for u in users.values()
-                    if u.get('role') == 'admin' and u.get('enabled', True)
-                )
-                if active_admins <= 1:
+                if active_admin_count(users) <= 1:
                     return False, "Cannot change the role of the last active admin user"
 
             if password:
@@ -632,11 +918,83 @@ class AuthManager:
                 logger.warning(f"Login attempt for disabled user: {username}")
                 return None
             
-            if self._verify_password(password, user.get('password_hash', '')):
-                # Update last login
-                user['last_login'] = utc_now().isoformat()
-                self._save_users(users)
-                
+            stored_hash = user.get('password_hash', '')
+            if self._verify_password(password, stored_hash):
+                # Upgrade a legacy hash now that we hold the plaintext.
+                #
+                # _verify_password still accepts the pre-bcrypt formats
+                # ("sha256:<salt>:<hex>" and the bare "<salt>:<hex>") so an
+                # operator who installed before those were replaced can still
+                # log in. But nothing ever rewrote them, so those accounts kept
+                # a salted SHA-256 for ever, however often they signed in — a
+                # fast hash, brute-forceable at GPU speed from a leaked
+                # settings.json, where bcrypt and scrypt are deliberately slow.
+                # The only escape was changing the password by hand, and
+                # nothing told anyone to. (CodeQL py/weak-sensitive-data-hashing
+                # has pointed at this since 2026-05-17.)
+                #
+                # A successful login is the one moment the plaintext is in
+                # hand, so it is the only place this can happen without asking
+                # the operator to do anything.
+                upgraded = None
+                if not stored_hash.startswith(('$2', 'scrypt:')):
+                    try:
+                        upgraded = self._hash_password(password)
+                    except Exception as exc:
+                        # Never turn a correct password into a failed login over
+                        # a hashing problem. Worst case the account keeps the
+                        # old hash and the next login tries again.
+                        logger.warning(
+                            "Could not upgrade the stored password hash for "
+                            f"'{username}': {exc}")
+
+                now = utc_now().isoformat()
+
+                # A targeted mutation, not a rewrite of the whole users map.
+                # `_save_users(users)` wrote back the snapshot this request had
+                # read, so a login racing an admin's edit clobbered it — and a
+                # login racing a user deletion put the deleted user back.
+                # Re-reading the record under the settings lock makes the
+                # delete win, which is the correct outcome.
+                def _touch(settings):
+                    stored_users = settings.get('users') or {}
+                    record = stored_users.get(username)
+                    if record is None:
+                        return
+                    record['last_login'] = now
+                    # Compare-and-set, not a blind write. If an admin reset
+                    # this password between the check above and this locked
+                    # update, `upgraded` is derived from the OLD plaintext —
+                    # storing it would silently revert their reset and make the
+                    # old password work again. Only replace the hash we
+                    # actually verified.
+                    if upgraded and record.get('password_hash') == stored_hash:
+                        record['password_hash'] = upgraded
+                    settings['users'] = stored_users
+
+                try:
+                    # No backup for a plain login. save_settings writes a full
+                    # unified ZIP of settings + certificates for every reason
+                    # that is not None and then prunes to MAX_BACKUPS_PER_TYPE
+                    # (50), so recording last_login evicted a real restore
+                    # point every time somebody signed in. A hash upgrade IS
+                    # worth a restore point; a timestamp is not. The
+                    # backup_reason=None idiom already exists for exactly this
+                    # (api_keys last_used_at).
+                    self.settings_manager.update(
+                        _touch, "password_hash_upgraded" if upgraded else None)
+                    if upgraded:
+                        logger.info(
+                            f"Upgraded the stored password hash for '{username}'"
+                            " from a legacy format on successful login")
+                except Exception as exc:
+                    # Same reasoning: the credential was correct. Recording when
+                    # it was used is not worth refusing entry over — and the old
+                    # code did exactly that, turning a full disk into a failed
+                    # login.
+                    logger.warning(
+                        f"Could not persist login metadata for '{username}': {exc}")
+
                 logger.info(f"User '{username}' authenticated successfully")
                 return {
                     'username': username,
@@ -742,6 +1100,338 @@ class AuthManager:
     def has_any_users(self):
         """Check if any users exist"""
         return len(self._get_users()) > 0
+
+    @staticmethod
+    def _detect_operator_bearer_token():
+        """Return True iff the operator explicitly provided a *valid* API
+        bearer token via API_BEARER_TOKEN_FILE or API_BEARER_TOKEN.
+
+        settings.json ALWAYS carries an api_bearer_token (an auto-generated
+        random one when the operator supplied none — see
+        _bearer_token_from_env_or_generate), so the mere presence of a stored
+        token is NOT a usable signal: enforcing the auto-generated one would
+        lock a fresh install out (the operator never sees it). The env/file the
+        operator set is the signal that they configured auth and know the
+        token."""
+        from .utils import validate_api_token
+        token_file = os.getenv('API_BEARER_TOKEN_FILE')
+        if token_file:
+            try:
+                from pathlib import Path
+                token = Path(token_file).read_text().strip()
+            except Exception as e:
+                # NOT "no token was configured". The operator named this file
+                # as the source of the credential, so failing to read it is a
+                # configuration error, and the two answers must not collapse
+                # into the same False — see BearerTokenFileUnreadable.
+                raise BearerTokenFileUnreadable(token_file, e)
+            return bool(token) and validate_api_token(token)[0]
+        env_token = os.getenv('API_BEARER_TOKEN')
+        if env_token:
+            return validate_api_token(env_token)[0]
+        return False
+
+    def has_operator_bearer_token(self):
+        """Memoised wrapper over _detect_operator_bearer_token.
+
+        Two things this deliberately does NOT do.
+
+        It does not treat an unreadable API_BEARER_TOKEN_FILE as "no operator
+        token". That answer feeds setup_mode_for, and on a deployment whose
+        only credential is that file it would open the instance: setup mode
+        makes _authenticate_request return an admin identity for a caller with
+        no credential at all. A read failure therefore keeps the instance
+        LOCKED — the operator configured a credential, we simply cannot read
+        it this instant — and is logged at ERROR rather than swallowed.
+
+        And it does not memoise that failure. The docstring here used to say
+        env and file are fixed for the process lifetime; the variable is, the
+        file it names is not. A Kubernetes secret mounted a moment after the
+        container starts, a remount with different ownership, an SELinux
+        relabel — each produces one unreadable read followed by readable ones,
+        and caching the first would fix the wrong answer in place until the
+        next restart. Only a determination that actually read the file (or
+        found no file configured) is cached.
+        """
+        cached = getattr(self, '_operator_bearer_token', _UNSET)
+        if cached is not _UNSET:
+            return cached
+        try:
+            cached = self._detect_operator_bearer_token()
+        except BearerTokenFileUnreadable as e:
+            logger.error(
+                "API_BEARER_TOKEN_FILE is set but could not be read (%s). "
+                "Treating this instance as CONFIGURED so it stays locked; it "
+                "will not accept the bearer token until the file is readable. "
+                "This is deliberately not cached — the next check retries.", e)
+            return True
+        self._operator_bearer_token = cached
+        return cached
+
+    def _operator_supplied_token(self):
+        """The token from API_BEARER_TOKEN(_FILE), or '' if none was given."""
+        token_file = os.getenv('API_BEARER_TOKEN_FILE')
+        if token_file:
+            try:
+                from pathlib import Path
+                return Path(token_file).read_text().strip()
+            except Exception as e:
+                # Returning '' is right — this function answers "what did the
+                # operator supply", and an unreadable file supplied nothing, so
+                # reconcile_bearer_token_from_env declines rather than writing
+                # a token it did not read. Doing it in silence is not: the
+                # operator who rotated the token in that file then gets 401 on
+                # every request with no line anywhere saying why, which is
+                # exactly the symptom #401 exists to have fixed.
+                #
+                # settings.py reads the same file and REFUSES TO SERVE when it
+                # cannot (see _bearer_token_from_env_or_generate). It only does
+                # so while creating settings.json, so on an existing install
+                # this reader is the only one that looks, and it must at least
+                # say what it found.
+                logger.warning(
+                    "API_BEARER_TOKEN_FILE is set to %r and could not be read "
+                    "(%s), so the token stored in settings.json was left as it "
+                    "is. If you rotated the token in that file, the new value "
+                    "does not authenticate yet. Fix the path or permissions "
+                    "and restart.", token_file, e)
+                return ''
+        return (os.getenv('API_BEARER_TOKEN') or '').strip()
+
+    def reconcile_bearer_token_from_env(self):
+        """Make the env/file bearer token authoritative at startup (#401).
+
+        Two different pieces of code decided two different things about the
+        same token. `is_setup_mode()` asked whether the OPERATOR supplied one
+        via API_BEARER_TOKEN(_FILE); `authenticate_api_token()` checked the
+        presented token against the STORED hash. On a fresh install those agree,
+        because the stored value is seeded from the env one.
+
+        They diverge for an operator who ran once without a token — a value was
+        generated and stored — and then added or rotated API_BEARER_TOKEN and
+        restarted. The essential-keys merge never overwrites a token that is
+        already there, so enforcement saw the new token while authentication
+        still checked the old one: the first-run screen asked the operator to
+        paste the token they had just configured, and answered 401. The
+        documented way out was a reset script.
+
+        This closes it by making the supplied token authoritative, which is how
+        `has_operator_bearer_token()` already treats it for enforcement.
+
+        Deliberately narrow. It acts only when a token was supplied, that token
+        is well-formed, and it does NOT already authenticate — so an instance
+        where the two agree is never rewritten, and a malformed token is left to
+        the fail-closed bearer path rather than being stored.
+
+        It cannot open an instance: the token still has to be presented. What it
+        changes is WHICH token opens it, and that is the operator's own.
+        """
+        try:
+            env_token = self._operator_supplied_token()
+            if not env_token:
+                return False
+
+            from .utils import validate_api_token
+            is_valid, cleaned = validate_api_token(env_token)
+            if not is_valid:
+                # Not ours to store. The bearer path already fails closed on a
+                # malformed token, and writing one here would turn a
+                # configuration mistake into a persisted one.
+                return False
+
+            settings = self.settings_manager.load_settings()
+            stored_hash = settings.get('api_bearer_token_hash')
+            stored_plain = settings.get('api_bearer_token')
+
+            if stored_hash and self._verify_api_token(cleaned, stored_hash):
+                return False   # already the same token
+            if not stored_hash and stored_plain == cleaned:
+                return False   # legacy plaintext, already the same
+
+            if not stored_hash and not stored_plain:
+                return False   # nothing stored yet; the normal seeding covers it
+
+            source = ('API_BEARER_TOKEN_FILE'
+                      if os.getenv('API_BEARER_TOKEN_FILE')
+                      else 'API_BEARER_TOKEN')
+            self.settings_manager.atomic_update({'api_bearer_token': cleaned})
+            logger.warning(
+                "Reconciled the stored API bearer token from %s: the value "
+                "supplied there did not match what was stored, so enforcement "
+                "and authentication disagreed and every request with the "
+                "supplied token answered 401. The supplied token is now the "
+                "one that authenticates; any previously stored token no longer "
+                "does. If you did not expect this, the usual causes are a "
+                "token added or rotated after first run, or a settings backup "
+                "restored onto a host with a different SECRET_KEY — in that "
+                "second case other SECRET_KEY-bound values may also need "
+                "attention.", source)
+            return True
+        except Exception as e:
+            logger.debug(f"Bearer token reconciliation skipped: {e}")
+            return False
+
+    def warn_if_bearer_token_hash_is_stale(self):
+        """At startup, diagnose the one failure that otherwise looks like a
+        wrong token: an api_bearer_token_hash that no longer matches SECRET_KEY.
+
+        The stored hash is HMAC-SHA256 keyed on SECRET_KEY. Restoring a backup
+        onto a host with a different SECRET_KEY leaves the hash unverifiable, so
+        the operator's own token — the right one — 401s on every request, and
+        nothing says why (the instance is not world-open thanks to the bearer
+        fail-closed, it just rejects). If the operator supplied a token via
+        API_BEARER_TOKEN(_FILE) and it does not verify against the stored HMAC
+        hash, log the likely cause and the fix. Best-effort and read-only: it
+        never changes the stored hash (a wrong token must not overwrite it) and
+        never raises into startup.
+        """
+        try:
+            token_file = os.getenv('API_BEARER_TOKEN_FILE')
+            if token_file:
+                try:
+                    from pathlib import Path
+                    env_token = Path(token_file).read_text().strip()
+                except Exception:
+                    return
+            else:
+                env_token = (os.getenv('API_BEARER_TOKEN') or '').strip()
+            if not env_token:
+                return  # operator supplied no token — nothing to diagnose
+
+            # A malformed token is not a SECRET_KEY problem — it is the token,
+            # and the bearer fail-closed path (#610) already handles that. Only
+            # a well-formed token that does not verify points at a stale hash,
+            # so validate first to avoid a misleading SECRET_KEY diagnostic.
+            from .utils import validate_api_token
+            if not validate_api_token(env_token)[0]:
+                return
+
+            stored = self.settings_manager.load_settings().get(
+                'api_bearer_token_hash')
+            if not stored or not stored.startswith('hmac-sha256:'):
+                return  # no HMAC hash to compare against (fresh or legacy)
+            if self._verify_api_token(env_token, stored):
+                return  # the token matches the hash — nothing wrong
+
+            source = ('API_BEARER_TOKEN_FILE'
+                      if os.getenv('API_BEARER_TOKEN_FILE')
+                      else 'API_BEARER_TOKEN')
+            logger.warning(
+                "The %s supplied does not match the stored "
+                "api_bearer_token_hash. That hash is bound to SECRET_KEY "
+                "(HMAC-SHA256), so the usual cause is a SECRET_KEY different "
+                "from the one in effect when the token was hashed — typically "
+                "after restoring a backup onto a new host. API requests will "
+                "401 until this is resolved. Fix: provide the original "
+                "SECRET_KEY (SECRET_KEY or SECRET_KEY_FILE), or reset the "
+                "bearer token via the API Keys UI / a fresh settings save.",
+                source)
+        except Exception as e:
+            logger.debug(f"bearer-token staleness check skipped: {e}")
+
+    def _is_oidc_configured(self):
+        """True iff the operator fully configured OIDC (enabled + issuer_url +
+        client_id). That is an operator-controlled credential exactly like
+        API_BEARER_TOKEN or local-auth-plus-a-user, so it must turn setup mode
+        OFF. Otherwise an SSO-only deployment (no bearer token, local auth left
+        disabled) stays in setup mode forever and serves every gated endpoint
+        to anonymous callers as admin — local_auth_enabled defaults False and
+        OIDC JIT provisioning never flips it, so the local-auth branch below
+        can never become True on such a box. Mirrors OIDCManager.is_enabled()
+        without importing it (settings is the single source of truth)."""
+        try:
+            cfg = self.settings_manager.load_settings().get('oidc', {}) or {}
+        except (OSError, ValueError, KeyError, AttributeError):
+            return False
+        return bool(cfg.get('enabled') and cfg.get('issuer_url') and cfg.get('client_id'))
+
+    def is_setup_mode(self):
+        """True on a genuinely unconfigured instance, where unauthenticated
+        access is allowed so the operator can bootstrap (reach the UI, create
+        the first admin, enable local auth).
+
+        Becomes False as soon as ANY credential the operator controls exists:
+          * local auth is enabled AND at least one user exists, OR
+          * the operator provided an API bearer token (API_BEARER_TOKEN[_FILE]), OR
+          * OIDC is fully configured (enabled + issuer_url + client_id).
+
+        Once False, every gated surface requires a real credential. This closes
+        the gap where an operator configured auth — API_BEARER_TOKEN, or an
+        OIDC/SSO-only deployment — but the instance stayed world-open because
+        local auth was never enabled. A fresh install with no operator-provided
+        credential is unchanged: it stays in setup mode so onboarding works."""
+        return self.setup_mode_for(self.settings_manager.load_settings())
+
+    def setup_mode_for(self, settings):
+        """``is_setup_mode()`` evaluated against an arbitrary settings dict.
+
+        One definition, two callers: the live predicate above, and
+        ``would_open_setup_mode`` below, which asks the same question about a
+        change that has not been written yet. Keeping them as one function is
+        the point — a guard that re-implements the predicate it defends drifts
+        away from it, and the drift is invisible until the day it matters.
+        """
+        if self.has_operator_bearer_token():
+            return False
+        oidc = settings.get('oidc') or {}
+        if oidc.get('enabled') and oidc.get('issuer_url') and oidc.get('client_id'):
+            return False
+        users = settings.get('users') or {}
+        return not (settings.get('local_auth_enabled', False) and len(users) > 0)
+
+    def would_open_setup_mode(self, candidate_settings):
+        """True iff applying *candidate_settings* would leave this instance
+        serving every gated endpoint to anonymous callers as admin.
+
+        Setup mode is not a mild state. ``_authenticate_request`` returns
+        ``{'username': 'setup_user', 'role': 'admin'}`` for a caller with no
+        credential at all, which is enough to read /api/settings, mint API
+        keys, create admin users and download private keys.
+
+        It exists so a fresh install can be bootstrapped, and it closes as soon
+        as the operator configures ANY credential. The hole this guards is the
+        way back: an SSO-only deployment (no API_BEARER_TOKEN, local auth never
+        enabled because OIDC JIT provisioning does not flip it) is held closed
+        by the OIDC branch alone, so unchecking "Enable OIDC/SSO" reopened the
+        whole instance. That branch was added in v2.21.4 to CLOSE the
+        world-open hole on SSO-only boxes; it also made closure depend on a
+        checkbox, and nothing checked the transition.
+
+        Returns False when the instance is already in setup mode: a fresh
+        install must still be configurable, and this guard is about not
+        REGRESSING out of a secured state.
+        """
+        if self.is_setup_mode():
+            return False
+        return self.setup_mode_for(candidate_settings)
+
+    def needs_credentialed_bootstrap(self):
+        """RESTRICTED (never world-open) bootstrap signal for the web UI only.
+
+        True iff the operator configured an API bearer token but local auth is
+        not yet provisioned — local auth is disabled, or no admin user exists
+        yet (the predicate returns False only once BOTH hold). In this state
+        ``is_setup_mode()`` is ALREADY False, so ``_authenticate_request()``
+        still demands the bearer token on every gated surface — this predicate
+        does NOT grant access and is deliberately kept out of the auth gate. It
+        only tells the UI to render the create-admin form instead of a
+        dead-end login page (local auth is off, so ``/api/auth/login`` 403s).
+        The form authenticates its two bootstrap POSTs with the operator's
+        bearer token, so creating the first admin requires proof-of-possession
+        of the token the operator configured — nothing is granted for free.
+
+        Returns False on a fresh no-token install (``has_operator_bearer_token``
+        is False there), keeping it disjoint from genuine setup mode and from
+        OIDC-only deployments. See issue #397."""
+        if self.is_local_auth_enabled() and self.has_any_users():
+            return False
+        # OIDC-capable boxes bootstrap their first user through SSO (JIT
+        # provisioning), not this local-admin form. Mirror is_setup_mode()'s
+        # OIDC branch so the SSO login page stays reachable instead of being
+        # hidden behind the create-admin form on an OIDC+bearer deployment.
+        if self._is_oidc_configured():
+            return False
+        return self.has_operator_bearer_token()
     
     def _authenticate_request(self):
         """Resolve the caller's identity for the current Flask request.
@@ -764,10 +1454,12 @@ class AuthManager:
         owns it, instead of leaking across two helpers.
         """
         try:
-            # Allow unauthenticated access during initial setup
-            # (matches require_web_auth: bypass if auth disabled OR no users)
-            if not self.is_local_auth_enabled() or not self.has_any_users():
-                return {'username': 'setup_user', 'role': 'admin'}, None
+            # Allow unauthenticated access ONLY during genuine initial setup.
+            # is_setup_mode() is False as soon as the operator configures a
+            # credential (local auth + a user, OR an API bearer token), so a
+            # configured bearer token is always enforced here.
+            if self.is_setup_mode():
+                return {'username': SETUP_USERNAME, 'role': 'admin'}, None
 
             # Check for session-based auth first (for web UI)
             session_id = request.cookies.get('certmate_session')
@@ -849,7 +1541,73 @@ class AuthManager:
                 return err
             request.current_user = user
             return f(*args, **kwargs)
+        # Make the protection inspectable from outside the call. Route
+        # protection is expressed three ways in this codebase — this
+        # decorator, `require_role`, and `require_web_auth` in the web
+        # blueprint — and nothing could enumerate which routes carried one,
+        # so a route added without a check was indistinguishable from the
+        # ones that are public on purpose. See
+        # tests/test_every_route_is_protected_or_listed.py.
+        decorated_function._certmate_protection = 'require_auth'
         return decorated_function
+
+    def require_session_role(self, min_role):
+        """Like :meth:`require_role`, but the cookie session is the only
+        accepted credential.
+
+        For surfaces a browser reaches that cannot carry an Authorization
+        header — Server-Sent Events is the whole set today. `EventSource`
+        offers no way to add one, so a bearer token cannot reach these routes
+        no matter how the caller is configured.
+
+        That was already the behaviour, written inline in the route as
+        `if not auth_manager.is_setup_mode(): ...check the cookie...`. Three
+        things were wrong with expressing it there and not here. The route was
+        invisible to any scan of what is protected, so it sat in the public
+        allowlist with "checked inline" as its reason. The check drifted from
+        the decorators' — it never consulted a role, so a `viewer`-only session
+        and an `admin` one were the same to it. And a second such surface would
+        have copied it.
+
+        Setup mode is honoured exactly as the other decorators honour it: with
+        no operator credential configured at all, every caller is admin, and
+        the live stream is no different from the dashboard it feeds.
+        """
+        def decorator(f):
+            @wraps(f)
+            def decorated_function(*args, **kwargs):
+                if self.is_setup_mode():
+                    request.current_user = {'username': SETUP_USERNAME,
+                                            'role': 'admin'}
+                    return f(*args, **kwargs)
+
+                session_id = request.cookies.get('certmate_session')
+                user = (self.validate_session(session_id)
+                        if session_id else None)
+                if not user:
+                    # No redirect, even for a browser: an EventSource cannot
+                    # follow one usefully, and a 302 to the login page would
+                    # arrive as an opaque stream error. 401 lets the client
+                    # decide to reconnect after logging in.
+                    return {'error': 'Unauthenticated',
+                            'code': 'SESSION_REQUIRED'}, 401
+
+                if (ROLE_HIERARCHY.get(user.get('role'), -1)
+                        < ROLE_HIERARCHY.get(min_role, 999)):
+                    self._log_rbac_denial(user=user, required_role=min_role,
+                                          endpoint=request.path)
+                    return {'error': f'{min_role} privileges required',
+                            'code': 'INSUFFICIENT_ROLE'}, 403
+
+                request.current_user = user
+                return f(*args, **kwargs)
+
+            decorated_function._certmate_protection = (
+                f'require_session_role:{min_role}')
+            return decorated_function
+
+        decorator._certmate_protection = f'require_session_role:{min_role}'
+        return decorator
 
     def require_role(self, min_role):
         """Decorator factory requiring a minimum role level.
@@ -911,7 +1669,14 @@ class AuthManager:
                             'code': 'INSUFFICIENT_ROLE'}, 403
 
                 return f(*args, **kwargs)
+            decorated_function._certmate_protection = f'require_role:{min_role}'
             return decorated_function
+        # flask-restx resources declare protection as
+        # `method_decorators = [auth.require_role('viewer')]`, which stores
+        # this factory's product — the decorator itself, never applied here.
+        # Marking it too lets the route enumeration read protection off a
+        # Resource class without instantiating or calling anything.
+        decorator._certmate_protection = f'require_role:{min_role}'
         return decorator
 
     def _log_rbac_denial(self, user, required_role, endpoint):

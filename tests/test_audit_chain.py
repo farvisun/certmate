@@ -15,6 +15,9 @@ from modules.core import audit_verify
 from modules.web.misc_routes import register_misc_routes
 
 
+pytestmark = [pytest.mark.unit]
+
+
 @pytest.fixture
 def make_audit():
     """Factory that builds AuditLoggers and detaches their shared-logger
@@ -287,7 +290,8 @@ def _passthrough(*_a, **_k):
 
 def _verify_app(managers):
     app = Flask(__name__)
-    auth_manager = SimpleNamespace(require_role=_passthrough)
+    auth_manager = SimpleNamespace(require_role=_passthrough,
+                                   require_session_role=_passthrough)
     register_misc_routes(app, managers, _passthrough, auth_manager)
     return app
 

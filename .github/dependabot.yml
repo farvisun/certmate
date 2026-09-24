@@ -1,0 +1,108 @@
+# Dependabot configuration — https://docs.github.com/code-security/dependabot
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      pip:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # The ACME stack is deliberately held (issue #103): certbot 3.x/4.x and
+      # josepy 2.x break the pinned resolver set, so dependabot must not keep
+      # reopening bumps for it. Core packages: ignore ALL updates.
+      - dependency-name: "certbot"
+      - dependency-name: "josepy"
+      - dependency-name: "acme"
+      # DNS plugins used to be blocked at MAJOR only, on the reasoning that
+      # minor and patch fixes are compatible. They are not, and the exception
+      # cost a release: every plugin from certbot's own release train carries
+      # `certbot>=` its own version, so a MINOR bump drags certbot off the pin
+      # just as surely as a major one.
+      #
+      #   certbot-dns-route53 2.10.0 -> 2.11.0  requires certbot>=2.11.0
+      #   certbot-dns-azure   2.5.0  -> 2.6.1   requires certbot>=3.0,<4.0
+      #
+      # Both are minor bumps. The second is the one requirements-azure.txt
+      # already documents as breaking the install — and PR #387 proposed it.
+      # Measured: layering such a plugin moved certbot 2.10.0 -> 3.3.0 in a
+      # build that reported success (fixed in #533).
+      - dependency-name: "certbot-dns-*"
+      - dependency-name: "certbot-plugin-*"
+      # The pins that actually hold the stack together, and that the previous
+      # list left entirely exposed. Each is documented in requirements.txt at
+      # the line it appears on; tests/test_dependabot_holds_the_stack.py fails
+      # if one is pinned-and-documented but missing here.
+      #
+      #   pyopenssl    26.2.0+ removes OpenSSL.crypto.X509Extension, which
+      #                acme 3.3.0 evaluates at import — certbot crashes before
+      #                it can issue anything.
+      #   cryptography 48.0.1 requires pyopenssl>=26.2.0, i.e. the same crash
+      #                by another route. GHSA-537c-gmf6-5ccf is open by choice
+      #                until the certbot 5.x epic; see SECURITY.md.
+      #   dns-lexicon  the resolver set is balanced around 3.25.1; moving it
+      #                breaks the lexicon-based plugins against each other.
+      - dependency-name: "pyopenssl"
+      - dependency-name: "cryptography"
+      - dependency-name: "dns-lexicon"
+      # python-cloudflare 3.x+ is a different SDK under the same name.
+      # certbot-dns-cloudflare 2.10.0 imports the 2.x client and declares
+      # only `cloudflare>=1.5.1`, so pip resolves a 5.x bump happily and
+      # certbot dies at import — tests/test_requirements_sets.py caught it
+      # on #568. Moves with #103. Ignored entirely, like the rest of the
+      # held set: 2.19.4 is where the 2.x line the plugin understands ends.
+      - dependency-name: "cloudflare"
+      # infisical-python 2.3.6 ships no manylinux x86_64 wheel and no sdist,
+      # so the amd64 image cannot install it while the arm64 image can. The
+      # requirements files have said so next to the pin since it was set, and
+      # dependabot proposed 2.3.6 anyway (#795), leaving the explanation of
+      # why not to in place above the version it had just changed. A bump
+      # that can only install on one of the two published architectures is
+      # not a bump this project can take.
+      - dependency-name: "infisical-python"
+
+  - package-ecosystem: "npm"
+    directories:
+      - "/"
+      - "/mcp"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      npm:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    ignore:
+      # New python interpreter lines are blocked by the held ACME stack
+      # (python 3.14 breaks via josepy — issue #103). The base tag is
+      # `python:3.12-slim-trixie`, so dependabot classifies 3.12 -> 3.14 as
+      # semver-MINOR (major stays 3); CPython's breaking boundary is its
+      # minor number, so both major and minor are ignored here. Patch and
+      # digest updates within 3.12 still flow.
+      - dependency-name: "python"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]

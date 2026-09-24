@@ -18,6 +18,9 @@ from modules.core import audit_chain, audit_verify
 from modules.web.misc_routes import register_misc_routes
 
 
+pytestmark = [pytest.mark.unit]
+
+
 @pytest.fixture
 def make_audit():
     created = []
@@ -199,9 +202,10 @@ def test_half_signed_bundle_is_rejected(make_audit, tmp_path):
 
 
 def test_unsupported_format_is_rejected(make_audit, tmp_path):
+    # 2 is the anchored-slice format (#441); 99 is nobody's format.
     bundle, _ = _signed_bundle(make_audit, tmp_path)
     bad = copy.deepcopy(bundle)
-    bad['manifest']['format_version'] = 2
+    bad['manifest']['format_version'] = 99
     r = audit_verify.verify_bundle(bad)
     assert not r['ok'] and 'format_version' in r['reason']
 
@@ -229,7 +233,8 @@ def _passthrough(*_a, **_k):
 
 def _app(managers):
     app = Flask(__name__)
-    auth_manager = SimpleNamespace(require_role=_passthrough)
+    auth_manager = SimpleNamespace(require_role=_passthrough,
+                                   require_session_role=_passthrough)
     register_misc_routes(app, managers, _passthrough, auth_manager)
     return app
 

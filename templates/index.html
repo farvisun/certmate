@@ -3,80 +3,117 @@
 {% block title %}CertMate - SSL Certificate Manager{% endblock %}
 {% block content %}
     <!-- Main Content -->
-    <div class="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8"
+    <div class="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8"
          x-data="{ certView: (location.hash === '#client' ? 'client' : 'server') }"
-         x-init="$watch('certView', v => { history.replaceState(null, '', v === 'client' ? '#client' : '#'); if (v === 'client') initClientCerts(); })">
+         x-init="$watch('certView', v => { history.replaceState(null, '', v === 'client' ? '#client' : '#'); if (v === 'client') initClientCerts(); });
+                 window.addEventListener('hashchange', () => { certView = (location.hash === '#client' ? 'client' : 'server') })">
 
-        <!-- Top toolbar: certificate type toggle on the left, create-new
-             button on the right (`ml-auto`). `flex-wrap` lets the
-             button drop to the second line on narrow viewports instead
-             of overflowing. The button is only shown on the server view
-             — client certs have their own create UI inside that partial. -->
-        <div class="flex flex-wrap items-center gap-3 mb-6">
-            <div class="flex items-center space-x-1 bg-gray-100 dark:bg-gray-700/50 rounded-lg p-1 w-fit">
-                <button type="button" @click="certView = 'server'"
-                        :class="certView === 'server'
-                            ? 'bg-surface shadow text-foreground'
-                            : 'text-muted hover:text-gray-700 dark:hover:text-gray-200'"
-                        class="px-4 py-2 text-sm font-medium rounded-md transition-all">
-                    <i class="fas fa-globe mr-1.5"></i>گواهی‌های سرور
+        <!-- Page-header cluster: [ Server | Client | New ]. The Server/Client
+             segments are state toggles (ghost); "New" is an imperative action
+             (filled brand, divider, text label) so it never reads as a third
+             certificate type. "New" opens the creation drawer (overlay) — no
+             inline form, no layout jump. -->
+        <div class="flex flex-wrap items-center justify-between gap-3 mb-6">
+            <div class="inline-flex items-center gap-1 rounded-xl border border-border bg-surface-2 p-1" role="group" aria-label="نمای گواهی و ایجاد">
+                <button type="button" id="certViewServerBtn" @click="certView = 'server'"
+                        :aria-pressed="certView === 'server' ? 'true' : 'false'"
+                        :class="certView === 'server' ? 'bg-surface text-foreground shadow-sm' : 'text-muted hover:text-foreground'"
+                        class="inline-flex items-center gap-2 px-3.5 py-2 text-sm font-semibold rounded-lg transition-all">
+                    <i class="fas fa-globe" aria-hidden="true"></i>سرور
                 </button>
-                <button type="button" @click="certView = 'client'"
-                        :class="certView === 'client'
-                            ? 'bg-surface shadow text-foreground'
-                            : 'text-muted hover:text-gray-700 dark:hover:text-gray-200'"
-                        class="px-4 py-2 text-sm font-medium rounded-md transition-all">
-                    <i class="fas fa-id-card mr-1.5"></i>گواهی‌های کلاینت
+                <button type="button" id="certViewClientBtn" @click="certView = 'client'"
+                        :aria-pressed="certView === 'client' ? 'true' : 'false'"
+                        :class="certView === 'client' ? 'bg-surface text-foreground shadow-sm' : 'text-muted hover:text-foreground'"
+                        class="inline-flex items-center gap-2 px-3.5 py-2 text-sm font-semibold rounded-lg transition-all">
+                    <i class="fas fa-id-card" aria-hidden="true"></i>کلاینت
+                </button>
+                <span class="mx-1 h-6 w-px bg-border" aria-hidden="true"></span>
+                <button type="button" @click="openCertDrawer(certView)"
+                        class="inline-flex items-center gap-2 px-3.5 py-2 text-sm font-semibold rounded-lg bg-primary text-white hover:bg-secondary transition-colors shadow-sm"
+                        title="گواهی جدید">
+                    <i class="fas fa-plus" aria-hidden="true"></i>جدید
                 </button>
             </div>
-            <div x-show="certView === 'server'" x-cloak class="ml-auto">
-                <button type="button" id="toggleCreateForm"
-                        onclick="toggleCreateCertForm()"
-                        class="inline-flex items-center px-5 py-2.5 border border-transparent text-sm font-medium rounded-lg shadow-sm text-white bg-gradient-to-r from-primary to-secondary hover:from-secondary hover:to-primary focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary transition-all duration-200">
-                    <i class="fas fa-plus-circle mr-2"></i>
-                    <span id="toggleCreateFormText">ایجاد گواهی جدید</span>
-                    <i id="toggleCreateFormChevron" class="fas fa-chevron-down ml-2 transform transition-transform duration-200"></i>
-                </button>
+            <!-- Compact KPI strip — pulled up to share the toggle's row at the
+                 same height, filling the formerly-empty band on the right. Server
+                 is rendered by updateStats(); client is static + filled by
+                 ccLoadStatistics() (same ids). -->
+            <div x-show="certView === 'server'" id="statsCards"
+                 class="inline-flex items-stretch rounded-xl border border-border bg-surface divide-x divide-border overflow-hidden"
+                 aria-label="تعداد گواهی‌ها"></div>
+            <div x-show="certView === 'client'"
+                 class="inline-flex items-stretch rounded-xl border border-border bg-surface divide-x divide-border overflow-hidden"
+                 aria-label="تعداد گواهی‌های کلاینت">
+                <div class="flex items-baseline gap-1.5 px-3.5 py-3"><span class="text-lg font-bold leading-none tabular-nums text-foreground" id="totalCount">0</span><span class="text-[10px] font-medium text-muted uppercase tracking-wider">کل</span></div>
+                <div class="flex items-baseline gap-1.5 px-3.5 py-3"><span class="text-lg font-bold leading-none tabular-nums text-success-fg" id="activeCount">0</span><span class="text-[10px] font-medium text-muted uppercase tracking-wider">فعال</span></div>
+                <div class="flex items-baseline gap-1.5 px-3.5 py-3"><span class="text-lg font-bold leading-none tabular-nums text-danger-fg" id="revokedCount">0</span><span class="text-[10px] font-medium text-muted uppercase tracking-wider">لغو شده</span></div>
             </div>
         </div>
 
-        <!-- SERVER CERTIFICATES -->
-        <div x-show="certView === 'server'">
-
-        <!-- Create Certificate Form (hidden by default) -->
-        <div id="createCertFormContainer" class="hidden">
-        <div class="bg-surface border-border shadow-lg rounded-xl mb-6 border overflow-hidden">
+        <!-- Create Certificate drawer (overlay from the right). The form below
+             was relocated out of the inline layout to kill the layout-jump;
+             all field IDs are unchanged, so the submit handler in dashboard.js
+             keeps working untouched. -->
+        <div id="certDrawerScrim" onclick="closeCertDrawer()" aria-hidden="true"
+             class="fixed inset-0 z-40 bg-black/40 backdrop-blur-sm opacity-0 pointer-events-none transition-opacity duration-200 motion-reduce:transition-none"></div>
+        <!-- Creating a certificate is the primary action, so on >=md it presents
+             as a CENTERED MODAL (fade + scale); on mobile it stays a side/full
+             drawer for one-handed reachability. Open/close is still driven by the
+             `translate-x-full` state class (checked in the JS below), so the
+             behaviour wiring is unchanged — only the desktop presentation differs. -->
+        <style>
+        @media (min-width: 768px) {
+            #createCertFormContainer {
+                top: 50%; left: 50%; right: auto; bottom: auto;
+                height: auto; max-height: 88vh; width: calc(100% - 4rem); max-width: 640px;
+                border-radius: 1rem; overflow: hidden;
+                transform: translate(-50%, -50%) scale(1); opacity: 1;
+                transition: opacity .2s ease-out, transform .2s ease-out;
+            }
+            #createCertFormContainer.translate-x-full {
+                transform: translate(-50%, -48%) scale(.96); opacity: 0; pointer-events: none;
+            }
+        }
+        @media (min-width: 768px) and (prefers-reduced-motion: reduce) {
+            #createCertFormContainer { transition: none; }
+        }
+        </style>
+        <div id="createCertFormContainer" role="dialog" aria-modal="true" aria-label="New certificate"
+             class="fixed top-0 right-0 z-50 h-full w-full max-w-[480px] bg-surface shadow-2xl flex flex-col translate-x-full transition-transform duration-300 ease-out motion-reduce:transition-none">
+        <div class="bg-surface flex flex-col h-full overflow-hidden">
             <div class="px-6 py-5 border-b border-border bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-gray-800 dark:to-gray-700">
                 <div class="flex items-center justify-between">
                     <div>
-                        <h3 class="text-xl font-bold text-foreground flex items-center">
-                             <i class="fas fa-plus-circle mr-2 text-primary"></i>
+                        <!-- Title is parameterized by mode: setReissueFormMode
+                             (dashboard.js) swaps it to "Edit Certificate" when
+                             the drawer is opened for an existing cert (#382). -->
+                        <h3 id="drawerTitle" class="text-xl font-bold text-foreground flex items-center">
+                            <i class="fas fa-plus-circle mr-2 text-primary"></i>
                             ایجاد گواهی جدید
                         </h3>
-                        <p class="text-sm text-muted mt-1">تولید گواهی‌های SSL با ارائه‌دهندگان CA متعدد و پشتیبانی پیشرفته از DNS challenge</p>
+                        <p id="drawerSubtitle" class="text-sm text-muted mt-1">تولید گواهی‌های SSL با ارائه‌دهندگان CA متعدد و پشتیبانی پیشرفته از DNS challenge</p>
                     </div>
                     <div class="flex items-center space-x-2">
-                        <div class="hidden lg:flex items-center space-x-2">
-                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-success-surface text-success-strong">
-                                <i class="fas fa-leaf mr-1"></i>
-                                Let's Encrypt
-                            </span>
-                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-info-surface text-info-strong">
-                                <i class="fas fa-shield-alt mr-1"></i>
-                                DigiCert
-                            </span>
-                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-300">
-                                <i class="fas fa-building mr-1"></i>
-                                Private CA
-                            </span>
-                        </div>
-                        <button type="button" onclick="toggleCreateCertForm()" class="ml-3 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 p-1" title="بستن فرم">
+                        <button type="button" onclick="closeCertDrawer()" class="ml-3 inline-flex items-center justify-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 p-2 rounded hover:bg-hover" title="بستن فرم" aria-label="بستن فرم ایجاد گواهی">
                             <i class="fas fa-times text-lg"></i>
                         </button>
                     </div>
                 </div>
             </div>
-            <div class="px-6 py-6">
+            <div class="px-6 py-6 flex-1 overflow-y-auto">
+                <!-- Type segmented: the decision, in the head. Preset from the
+                     active view; locally overridable for this one creation. -->
+                <div class="grid grid-cols-2 gap-1.5 rounded-xl border border-border bg-surface-2 p-1.5 mb-5" role="group" aria-label="Certificate type">
+                    <button type="button" id="drawerTypeServer" aria-pressed="true" onclick="setDrawerType('server')"
+                            class="inline-flex items-center justify-center gap-2 rounded-lg py-2.5 text-sm font-semibold text-muted hover:text-foreground transition-all aria-pressed:bg-surface aria-pressed:text-primary aria-pressed:shadow-sm">
+                        <i class="fas fa-globe" aria-hidden="true"></i>Server
+                    </button>
+                    <button type="button" id="drawerTypeClient" aria-pressed="false" onclick="setDrawerType('client')"
+                            class="inline-flex items-center justify-center gap-2 rounded-lg py-2.5 text-sm font-semibold text-muted hover:text-foreground transition-all aria-pressed:bg-surface aria-pressed:text-primary aria-pressed:shadow-sm">
+                        <i class="fas fa-id-card" aria-hidden="true"></i>Client
+                    </button>
+                </div>
+                <div id="form-server">
                 <form id="createCertForm" class="space-y-6">
                     <!-- Main Certificate Configuration -->
                     <div class="grid grid-cols-1 gap-6 lg:grid-cols-2">
@@ -88,7 +125,7 @@
                                 </label>
                                 <input type="text" id="domain" name="domain"
                                        autocomplete="off"
-                                       class="block w-full border border-border dark:bg-gray-700 dark:text-white rounded-lg shadow-sm py-3 px-4 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary transition-colors duration-200 placeholder-gray-400"
+                                       class="block w-full border border-border bg-input text-foreground rounded-lg shadow-sm py-3 px-4 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary transition-colors duration-200 placeholder-gray-400"
                                        placeholder="example.com یا *.example.com" required>
                                 <p class="mt-1 text-xs text-muted">
                                      <i class="fas fa-info-circle mr-1"></i>
@@ -98,42 +135,96 @@
                             
                             <!-- SAN Domains (optional) -->
                             <div>
-                                <label for="san_domains" class="block text-sm font-semibold text-label mb-2">
-                                     <i class="fas fa-plus-circle mr-2 text-indigo-500"></i>
-                                     دامنه‌های اضافی (SAN)
-                                     <span class="font-normal text-xs text-muted ml-1">اختیاری</span>
+                                <label for="san_entry" class="block text-sm font-semibold text-label mb-2">
+                                    <i class="fas fa-plus-circle mr-2 text-indigo-500"></i>
+                                    دامنه‌های اضافی (SAN)
+                                    <span class="font-normal text-xs text-muted ml-1">اختیاری</span>
                                 </label>
-                                <input type="text" id="san_domains" name="san_domains"
-                                       autocomplete="off"
-                                       class="block w-full border border-border dark:bg-gray-700 dark:text-white rounded-lg shadow-sm py-3 px-4 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary transition-colors duration-200 placeholder-gray-400"
-                                       placeholder="www.example.com, mail.example.com, *.api.example.com">
-                                <p class="mt-1 text-xs text-muted">
-                                     <i class="fas fa-info-circle mr-1"></i>
-                                     لیست نام‌های جایگزین Subject (SANs) جدا شده با کاما برای درج در گواهی
+                                <!-- Chip editor (#725). #san_domains stays the single source of
+                                     truth as a hidden field holding the comma-joined value, so
+                                     every existing reader and writer of `.value` is unaffected;
+                                     the chips are a view over it. -->
+                                <div id="san_editor"
+                                     class="flex flex-wrap items-center gap-2 w-full border border-border bg-input rounded-lg shadow-sm py-2 px-3 max-h-40 overflow-y-auto focus-within:ring-2 focus-within:ring-primary focus-within:border-primary transition-colors duration-200">
+                                    <span id="san_chips" class="contents"></span>
+                                    <input type="text" id="san_entry"
+                                           autocomplete="off" spellcheck="false"
+                                           aria-describedby="san_help"
+                                           class="flex-1 min-w-[14rem] bg-transparent border-0 p-0 py-1 text-foreground focus:outline-none focus:ring-0 placeholder-gray-400"
+                                           placeholder="www.example.com, mail.example.com, *.api.example.com">
+                                </div>
+                                <input type="hidden" id="san_domains" name="san_domains">
+                                <p id="san_help" class="mt-1 text-xs text-muted">
+                                    <i class="fas fa-info-circle mr-1"></i>
+                                    برای افزودن هر نام، <kbd class="px-1 border border-border rounded">Enter</kbd> را بزنید یا یک کاما تایپ کنید. می‌توانید یک لیست کامل را جای‌گذاری کنید — کاما، فاصله و خط جدید همگی پشتیبانی می‌شوند.
                                 </p>
                             </div>
                             
+                            <!-- CSR from a device (#599). Collapsed by default:
+                                 almost every certificate is key-managed here,
+                                 and an always-open textarea would suggest a CSR
+                                 is expected. Opening it disables the fields a
+                                 CSR already decides — the names and the key
+                                 shape — rather than letting the request be
+                                 refused by the server for asking two things at
+                                 once. -->
+                            <div class="border border-border rounded-lg overflow-hidden">
+                                <button type="button" id="csr_toggle"
+                                        aria-expanded="false" aria-controls="csr_panel"
+                                        class="w-full flex items-center justify-between px-4 py-3 bg-gray-50 dark:bg-gray-700/30 hover:bg-gray-100 dark:hover:bg-gray-700/50 transition text-left">
+                                    <span class="font-medium text-foreground text-sm">
+                                        <i class="fas fa-file-signature mr-2 text-purple-500"></i>
+                                        The private key stays on the device
+                                        <span class="font-normal text-xs text-muted ml-1">Optional</span>
+                                    </span>
+                                    <i id="csr_chevron" class="fas fa-chevron-down text-gray-400"></i>
+                                </button>
+                                <div id="csr_panel" class="hidden p-4">
+                                    <p class="text-xs text-muted mb-2">
+                                        For appliances that generate their key on the device and cannot
+                                        export it. Paste the CSR: CertMate obtains the certificate and
+                                        manages the chain, and never sees the private key. The
+                                        certificate covers the names inside the CSR, and
+                                        <strong>one of them must be the domain above</strong>.
+                                    </p>
+                                    <textarea id="cert_csr" name="csr" rows="6"
+                                              spellcheck="false" aria-label="Certificate signing request"
+                                              class="w-full text-xs font-mono border border-border bg-input text-foreground rounded-lg py-2 px-3 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
+                                              placeholder="-----BEGIN CERTIFICATE REQUEST-----"></textarea>
+                                    <p class="mt-1 text-xs text-muted">
+                                        These certificates are renewed by re-submitting this CSR to the CA.
+                                        Submit a new one here if the device rotates its key.
+                                    </p>
+                                </div>
+                            </div>
+
                             <div>
                                 <label for="ca_provider_select" class="block text-sm font-semibold text-label mb-2">
                                      <i class="fas fa-certificate mr-2 text-green-500"></i>
                                      مرجع صدور گواهی
                                 </label>
                                 <select id="ca_provider_select" name="ca_provider" 
-                                        class="block w-full border border-border dark:bg-gray-700 dark:text-white rounded-lg shadow-sm py-3 px-4 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary transition-colors duration-200"
+                                        class="block w-full border border-border bg-input text-foreground rounded-lg shadow-sm py-3 px-4 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary transition-colors duration-200"
                                         onchange="updateCAProviderInfo()">
-                                     <option value="">استفاده از پیش‌فرض تنظیمات</option>
+                                    <option value="">استفاده از پیش‌فرض تنظیمات</option>
                                     <option value="letsencrypt">Let's Encrypt (رایگان، گواهی‌های DV)</option>
                                     <option value="letsencrypt_staging">Let's Encrypt Staging (تستی، غیرقابل اعتماد)</option>
                                     <option value="zerossl">ZeroSSL (رایگان، گواهی‌های ۹۰ روزه DV)</option>
                                     <option value="google">Google Trust Services (رایگان، گواهی‌های DV)</option>
                                     <option value="actalis">Actalis (رایگان، گواهی‌های ۹۰ روزه DV)</option>
                                     <option value="digicert">DigiCert ACME (سازمانی، DV/OV/EV)</option>
+                                    <option value="sectigo">Sectigo ACME (حساب SCM)</option>
                                     <option value="sslcom">SSL.com (سازمانی، DV/OV/EV)</option>
-                                    <option value="private_ca">Private CA ( داخلی/سازمانی)</option>
+                                    <option value="private_ca">Private CA (داخلی/سازمانی)</option>
                                 </select>
                                 <div id="ca-provider-info" class="mt-2 text-xs text-muted hidden">
                                     <!-- CA provider info will be populated here -->
                                 </div>
+                                <label for="ca_account_id" class="block text-sm text-label mt-2">CA account ID (optional)</label>
+                                <input type="text" id="ca_account_id" class="block w-full border border-border bg-input text-foreground rounded-lg py-2 px-4" placeholder="Use provider default account">
+                                <!-- CAA advice (never a gate): filled by checkCaaFromForm when a
+                                     CAA record would make the chosen CA refuse these names. -->
+                                <div id="caa_warning" class="mt-2 hidden" role="status" aria-live="polite"></div>
                             </div>
                         </div>
                         
@@ -144,7 +235,7 @@
                                      نوع چالش
                                 </label>
                                 <select id="challenge_type_select" name="challenge_type"
-                                        class="block w-full border border-border dark:bg-gray-700 dark:text-white rounded-lg shadow-sm py-3 px-4 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary transition-colors duration-200"
+                                        class="block w-full border border-border bg-input text-foreground rounded-lg shadow-sm py-3 px-4 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary transition-colors duration-200"
                                         onchange="toggleDnsProviderVisibility()">
                                      <option value="">استفاده از پیش‌فرض تنظیمات</option>
                                     <option value="dns-01">DNS-01 ( اعتبارنامه‌های ارائه‌دهنده DNS)</option>
@@ -163,30 +254,31 @@
                                      ارائه‌دهنده DNS
                                 </label>
                                 <select id="dns_provider_select" name="dns_provider"
-                                        class="block w-full border border-border dark:bg-gray-700 dark:text-white rounded-lg shadow-sm py-3 px-4 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary transition-colors duration-200"
+                                        class="block w-full border border-border bg-input text-foreground rounded-lg shadow-sm py-3 px-4 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary transition-colors duration-200"
                                         onchange="updateAccountSelection()">
-                                     <option value="">🔧 استفاده از پیش‌فرض تنظیمات</option>
-                                    <option value="cloudflare">☁️ Cloudflare</option>
-                                    <option value="route53">🚀 AWS Route53</option>
-                                    <option value="digitalocean">🌊 DigitalOcean</option>
-                                    <option value="azure">☁️ Azure DNS</option>
-                                    <option value="google">📊 Google Cloud DNS</option>
-                                    <option value="powerdns">⚡ PowerDNS</option>
-                                    <option value="rfc2136">🔧 RFC2136 (Generic)</option>
-                                    <option value="linode">🌐 Akamai Connected Cloud (Linode)</option>
-                                    <option value="edgedns">🌐 Akamai EdgeDNS</option>
-                                    <option value="vultr">⚡ Vultr</option>
-                                    <option value="hetzner">🇩🇪 Hetzner</option>
-                                    <option value="gandi">🇫🇷 Gandi</option>
-                                    <option value="ovh">🇫🇷 OVH</option>
-                                    <option value="namecheap">💰 Namecheap</option>
-                                    <option value="porkbun">🐷 Porkbun</option>
-                                    <option value="godaddy">🌐 GoDaddy</option>
-                                    <option value="dnsmadeeasy">📡 DNS Made Easy</option>
-                                    <option value="nsone">1️⃣ NS1</option>
-                                    <option value="he-ddns">🌪️ Hurricane Electric</option>
-                                    <option value="dynudns">🔄 Dynu</option>
-                                    <option value="duckdns">🦆 DuckDNS (free subdomain)</option>
+                                    <option value="">استفاده از پیش‌فرض تنظیمات</option>
+                                    <option value="cloudflare">Cloudflare</option>
+                                    <option value="route53">AWS Route53</option>
+                                    <option value="digitalocean">DigitalOcean</option>
+                                    <option value="azure">Azure DNS</option>
+                                    <option value="google">Google Cloud DNS</option>
+                                    <option value="powerdns">PowerDNS</option>
+                                    <option value="rfc2136">RFC2136 (Generic)</option>
+                                    <option value="linode">Akamai Connected Cloud (Linode)</option>
+                                    <option value="edgedns">Akamai EdgeDNS</option>
+                                    <option value="vultr">Vultr</option>
+                                    <option value="solidserver">SOLIDserver</option>
+                                    <option value="hetzner">Hetzner</option>
+                                    <option value="gandi">Gandi</option>
+                                    <option value="ovh">OVH</option>
+                                    <option value="namecheap">Namecheap</option>
+                                    <option value="porkbun">Porkbun</option>
+                                    <option value="godaddy">GoDaddy</option>
+                                    <option value="dnsmadeeasy">DNS Made Easy</option>
+                                    <option value="nsone">NS1</option>
+                                    <option value="he-ddns">Hurricane Electric</option>
+                                    <option value="dynudns">Dynu</option>
+                                    <option value="duckdns">DuckDNS (free subdomain)</option>
                                     <option value="hetzner-cloud">Hetzner Cloud</option>
                                     <option value="arvancloud">ArvanCloud</option>
                                     <option value="infomaniak">Infomaniak</option>
@@ -207,8 +299,8 @@
                                      حساب
                                 </label>
                                 <select id="account_select" name="account_id"
-                                        class="block w-full border border-border dark:bg-gray-700 dark:text-white rounded-lg shadow-sm py-3 px-4 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary transition-colors duration-200">
-                                     <option value="">🔧 استفاده از حساب پیش‌فرض</option>
+                                        class="block w-full border border-border bg-input text-foreground rounded-lg shadow-sm py-3 px-4 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary transition-colors duration-200">
+                                    <option value="">استفاده از حساب پیش‌فرض</option>
                                 </select>
                                 <p class="mt-1 text-xs text-muted">
                                      <i class="fas fa-info-circle mr-1"></i>
@@ -221,7 +313,8 @@
                     
                     <!-- Advanced Options (Collapsible) -->
                     <div class="border-t border-border pt-6">
-                        <button type="button" onclick="toggleAdvancedOptions()" 
+                        <button type="button" onclick="toggleAdvancedOptions()" id="advancedOptionsToggle"
+                                aria-expanded="false" aria-controls="advanced-options"
                                 class="flex items-center text-sm font-medium text-label hover:text-primary transition-colors duration-200">
                              <i class="fas fa-cog mr-2"></i>
                             گزینه‌های پیشرفته
@@ -253,8 +346,8 @@
                                 </label>
                                 <input type="text" id="dns_alias_domain" name="dns_alias_domain"
                                        autocomplete="off"
-                                       class="w-full px-3 py-2 border border-border rounded-md shadow-sm focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white text-sm"
-                                        placeholder="مثال: validation.example.org">
+                                       class="w-full px-3 py-2 border border-border rounded-md shadow-sm focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground text-sm"
+                                       placeholder="مثال: validation.example.org">
                                 <p id="dns_alias_help" class="mt-1 text-xs text-muted">
                                      Use DNS-01 Alias Mode when <code class="font-mono bg-gray-100 dark:bg-gray-600 px-1 rounded">_acme-challenge.yourdomain.com</code>
                                     به CNAMEd به منطقه اعتبارسنجی که کنترل می‌کنید تبدیل می‌شود. FQDM هدف را وارد کنید (بدون پیشوند <code class="font-mono bg-gray-100 dark:bg-gray-600 px-1 rounded">_acme-challenge.</code>).
@@ -277,7 +370,7 @@
                                          نوع کلید <span class="text-xs font-normal text-muted">(اختیاری)</span>
                                     </label>
                                     <select id="cert_key_type"
-                                            class="w-full px-3 py-2 border border-border rounded-md shadow-sm focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white text-sm"
+                                            class="w-full px-3 py-2 border border-border rounded-md shadow-sm focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground text-sm"
                                             onchange="toggleCertKeyOptions()">
                                          <option value="">استفاده از پیش‌فرض سراسری</option>
                                         <option value="rsa">RSA</option>
@@ -292,8 +385,8 @@
                                          اندازه کلید RSA
                                     </label>
                                     <select id="cert_key_size"
-                                            class="w-full px-3 py-2 border border-border rounded-md shadow-sm focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white text-sm">
-                                         <option value="2048">۲۰۴۸ بیت (پیش‌فرض)</option>
+                                            class="w-full px-3 py-2 border border-border rounded-md shadow-sm focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground text-sm">
+                                        <option value="2048">۲۰۴۸ بیت (پیش‌فرض)</option>
                                         <option value="3072">۳۰۷۲ بیت</option>
                                         <option value="4096">۴۰۹۶ بیت</option>
                                     </select>
@@ -303,8 +396,8 @@
                                          منحنی ECDSA
                                     </label>
                                     <select id="cert_elliptic_curve"
-                                            class="w-full px-3 py-2 border border-border rounded-md shadow-sm focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white text-sm">
-                                         <option value="secp256r1">secp256r1 / P-256 (پیش‌فرض)</option>
+                                            class="w-full px-3 py-2 border border-border rounded-md shadow-sm focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground text-sm">
+                                        <option value="secp256r1">secp256r1 / P-256 (پیش‌فرض)</option>
                                         <option value="secp384r1">secp384r1 / P-384</option>
                                     </select>
                                 </div>
@@ -318,8 +411,8 @@
                             <i class="fas fa-shield-alt mr-1 text-green-500"></i>
                             گواهی‌های SSL رایگان با تمدید خودکار
                         </div>
-                        <button type="submit" 
-                                class="w-full sm:w-auto inline-flex items-center justify-center px-8 py-3 border border-transparent text-base font-medium rounded-lg shadow-lg text-white bg-gradient-to-r from-primary to-secondary hover:from-secondary hover:to-primary focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary transform transition-all duration-200 hover:scale-105">
+                        <button type="submit"
+                                class="btn-cta w-full sm:w-auto px-8 py-3 text-base shadow-lg hover:scale-105">
                             <i class="fas fa-magic mr-2"></i>
                             ایجاد گواهی
                         </button>
@@ -337,54 +430,120 @@
                         </div>
                     </div>
                 </form>
+                </div><!-- /#form-server -->
+                <div id="form-client" class="hidden">
+                    {% include 'partials/_client_create.html' %}
+                </div>
             </div>
         </div>
         </div><!-- /createCertFormContainer -->
 
         <script>
-        // Fix #131: toggle create certificate form visibility
-        function toggleCreateCertForm() {
-            var container = document.getElementById('createCertFormContainer');
-            var chevron = document.getElementById('toggleCreateFormChevron');
-            var isHidden = container.classList.contains('hidden');
-            container.classList.toggle('hidden');
-            if (chevron) {
-                chevron.style.transform = isHidden ? 'rotate(180deg)' : '';
-            }
-            // Persist state in sessionStorage
-            try { sessionStorage.setItem('cm_create_form_open', isHidden ? '1' : '0'); } catch(e){}
+        // Create-certificate drawer (overlay from the right). Replaces the old
+        // inline expand-in-place form that pushed the page down on open. The
+        // form markup and all its field IDs are unchanged, so the submit
+        // handler in dashboard.js keeps working untouched.
+        function setDrawerType(type) {
+            var isServer = type !== 'client';
+            var fs = document.getElementById('form-server');
+            var fc = document.getElementById('form-client');
+            if (fs) fs.classList.toggle('hidden', !isServer);
+            if (fc) fc.classList.toggle('hidden', isServer);
+            var bs = document.getElementById('drawerTypeServer');
+            var bc = document.getElementById('drawerTypeClient');
+            if (bs) bs.setAttribute('aria-pressed', isServer ? 'true' : 'false');
+            if (bc) bc.setAttribute('aria-pressed', isServer ? 'false' : 'true');
+            var sub = document.getElementById('drawerSubtitle');
+            if (sub) sub.textContent = isServer
+                ? 'Generate SSL certificates with multiple CA providers and advanced DNS challenge support'
+                : 'Client identity for mTLS, VPN or user authentication';
+            // Bind the client form lazily (initClientCerts is idempotent) so it
+            // works even if the drawer is opened to Client without first
+            // visiting the Client tab.
+            if (!isServer && typeof initClientCerts === 'function') initClientCerts();
         }
-        // Open the form (no-op if already open), focus the domain input,
-        // and scroll it into view. Called from the empty-state CTA
-        // rendered by dashboard.js — that button previously just called
-        // .focus() on a hidden input, which silently did nothing.
-        function openCreateCertForm() {
-            var c = document.getElementById('createCertFormContainer');
-            if (c && c.classList.contains('hidden')) toggleCreateCertForm();
-            var dom = document.getElementById('domain');
-            if (dom) {
-                dom.focus();
-                dom.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            }
+        // Focus trap for the modal drawer (a11y, redesign phase 6). aria-modal
+        // promises focus stays inside; this keeps Tab/Shift+Tab cycling within
+        // the drawer's visible controls (the hidden server/client form is
+        // excluded via offsetParent), and focus is restored to the opener on
+        // close.
+        var drawerLastFocused = null;
+        function drawerTrapTab(e) {
+            if (e.key !== 'Tab') return;
+            var d = document.getElementById('createCertFormContainer');
+            if (!d || d.classList.contains('translate-x-full')) return;
+            var nodes = d.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])');
+            var f = Array.prototype.filter.call(nodes, function (el) { return el.offsetParent !== null; });
+            if (!f.length) return;
+            var first = f[0], last = f[f.length - 1];
+            if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+            else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
         }
-        // Restore form state on load
-        (function() {
+        function openCertDrawer(type) {
+            var d = document.getElementById('createCertFormContainer');
+            var s = document.getElementById('certDrawerScrim');
+            if (!d) return;
+            drawerLastFocused = document.activeElement;
+            setDrawerType(type === 'client' ? 'client' : 'server');
+            d.classList.remove('translate-x-full');
+            if (s) { s.classList.remove('opacity-0', 'pointer-events-none'); s.classList.add('opacity-100'); }
+            try { CertMate.lockScroll(); } catch (e) {}
+            document.addEventListener('keydown', drawerTrapTab);
+            var focusTarget = (type === 'client') ? document.getElementById('commonName') : document.getElementById('domain');
+            if (focusTarget) setTimeout(function () { focusTarget.focus(); }, 320);
+        }
+        function closeCertDrawer() {
+            // Leaving the drawer abandons an in-progress "Edit & reissue"
+            // (#492). The edit state used to survive the close, so the next
+            // "New certificate" silently re-opened the edit form for the
+            // previous certificate, with its domain field read-only and no
+            // obvious way back. Closing a dialog is how people abandon an
+            // edit, so treat it as one. No-op when not editing.
+            if (typeof window.cancelEditReissue === 'function') {
+                window.cancelEditReissue();
+            }
+            var d = document.getElementById('createCertFormContainer');
+            var s = document.getElementById('certDrawerScrim');
+            if (d) d.classList.add('translate-x-full');
+            if (s) { s.classList.add('opacity-0', 'pointer-events-none'); s.classList.remove('opacity-100'); }
+            try { CertMate.unlockScroll(); } catch (e) {}
+            document.removeEventListener('keydown', drawerTrapTab);
+            // Return focus to whatever opened the drawer (the +New button, a
+            // palette action, the empty-state CTA), unless it has since vanished.
+            if (drawerLastFocused && typeof drawerLastFocused.focus === 'function') {
+                try { drawerLastFocused.focus(); } catch (e) { /* opener gone */ }
+            }
+            drawerLastFocused = null;
+        }
+        // Back-compat aliases — the dashboard empty-state CTA and any other
+        // caller used these names to reveal the (now drawer) create form.
+        function toggleCreateCertForm() { openCertDrawer('server'); }
+        function openCreateCertForm() { openCertDrawer('server'); }
+        document.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape') {
+                var d = document.getElementById('createCertFormContainer');
+                if (d && !d.classList.contains('translate-x-full')) closeCertDrawer();
+            }
+        });
+        // The ⌘K palette's "New … Certificate" actions, when fired from another
+        // page, stash the desired type here and navigate to the dashboard; open
+        // the drawer once the form markup exists.
+        document.addEventListener('DOMContentLoaded', function () {
             try {
-                if (sessionStorage.getItem('cm_create_form_open') === '1') {
-                    var c = document.getElementById('createCertFormContainer');
-                    var ch = document.getElementById('toggleCreateFormChevron');
-                    if (c) c.classList.remove('hidden');
-                    if (ch) ch.style.transform = 'rotate(180deg)';
+                var want = sessionStorage.getItem('cm_open_drawer');
+                if (want) {
+                    sessionStorage.removeItem('cm_open_drawer');
+                    openCertDrawer(want === 'client' ? 'client' : 'server');
                 }
-            } catch(e){}
-        })();
+            } catch (e) { /* storage unavailable */ }
+        });
         </script>
 
-        <!-- Statistics Cards (skeleton placeholders rendered by JS on
-             DOMContentLoaded; count is driven by STAT_METRICS_COUNT in
-             dashboard.js so the placeholder matches whatever number of
-             cards updateStats() actually emits). -->
-        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6" id="statsCards"></div>
+        <!-- SERVER CERTIFICATES (stats + table). The creation drawer sits
+             above, outside this x-show, so it is available from either view. -->
+        <div x-show="certView === 'server'">
+        <!-- The stat counters moved up to share the toggle's row (see #statsCards
+             above). updateStats() renders them there. -->
 
         <!-- Certificates List -->
         <div class="bg-surface shadow-card rounded-xl overflow-hidden">
@@ -392,37 +551,49 @@
                 <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between space-y-3 lg:space-y-0">
                     <h3 class="text-lg font-semibold text-foreground">گواهی‌های شما</h3>
                     <div class="flex flex-col sm:flex-row items-stretch sm:items-center space-y-2 sm:space-y-0 sm:space-x-2 lg:space-x-3">
-                        <div class="relative">
-                            <input type="text" id="certificateSearch" placeholder="جستجوی گواهی‌ها..."
-                                   class="pl-10 pr-8 py-2 border border-border bg-input dark:text-white rounded-lg focus:ring-2 focus:ring-primary focus:border-primary text-sm shadow-sm transition-shadow duration-200 w-full sm:w-48">
-                            <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                                <i class="fas fa-search text-gray-400"></i>
-                            </div>
-                            <div class="absolute inset-y-0 right-0 pr-2 hidden sm:flex items-center pointer-events-none">
-                                <kbd class="px-1.5 py-0.5 text-[10px] text-gray-400 bg-gray-100 dark:bg-gray-600 rounded border border-border">/</kbd>
-                            </div>
+                        <!-- Per-page certificate search retired in the redesign:
+                             the global ⌘K / "/" command palette is the single search
+                             surface. Status filtering is a row of chips (phase 5)
+                             driving setStatusFilter(); counts come from updateStats. -->
+                        <div class="inline-flex flex-wrap items-center gap-1 rounded-lg border border-border bg-surface-2 p-1" role="group" aria-label="فیلتر گواهی‌ها بر اساس وضعیت">
+                            <button type="button" data-status-chip="all" aria-pressed="true" onclick="setStatusFilter('all')"
+                                    class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors text-muted hover:text-foreground aria-pressed:bg-primary/15 aria-pressed:text-primary aria-pressed:ring-1 aria-pressed:ring-inset aria-pressed:ring-primary/30">
+                                همه <span class="text-[10px] tabular-nums opacity-70" data-status-count="all"></span>
+                            </button>
+                            <button type="button" data-status-chip="valid" aria-pressed="false" onclick="setStatusFilter('valid')"
+                                    class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors text-muted hover:text-foreground aria-pressed:bg-green-500/15 aria-pressed:text-success-fg aria-pressed:ring-1 aria-pressed:ring-inset aria-pressed:ring-green-500/30">
+                                معتبر <span class="text-[10px] tabular-nums opacity-70" data-status-count="valid"></span>
+                            </button>
+                            <button type="button" data-status-chip="expiring" aria-pressed="false" onclick="setStatusFilter('expiring')"
+                                    class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors text-muted hover:text-foreground aria-pressed:bg-yellow-500/15 aria-pressed:text-warning-fg aria-pressed:ring-1 aria-pressed:ring-inset aria-pressed:ring-yellow-500/30">
+                                نزدیک انقضا <span class="text-[10px] tabular-nums opacity-70" data-status-count="expiring"></span>
+                            </button>
+                            <button type="button" data-status-chip="expired" aria-pressed="false" onclick="setStatusFilter('expired')"
+                                    class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors text-muted hover:text-foreground aria-pressed:bg-red-500/15 aria-pressed:text-danger-fg aria-pressed:ring-1 aria-pressed:ring-inset aria-pressed:ring-red-500/30">
+                                منقضی شده <span class="text-[10px] tabular-nums opacity-70" data-status-count="expired"></span>
+                            </button>
                         </div>
-                        <select id="statusFilter" class="border border-border bg-input text-foreground rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-primary focus:border-primary shadow-sm transition-shadow duration-200">
-                             <option value="all">همه وضعیت‌ها</option>
-                            <option value="valid">معتبر</option>
-                            <option value="expiring">نزدیک انقضا</option>
-                            <option value="expired">منقضی شده</option>
-                        </select>
-                        <button type="button" onclick="checkAllDeploymentStatuses()"
-                                class="inline-flex items-center px-3 py-2 border border-indigo-300 dark:border-indigo-600 shadow-sm text-sm font-medium rounded-lg text-indigo-700 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-900/30 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors duration-200 whitespace-nowrap"
-                                title="Re-check deployment status for every certificate in the list. Probes both the backend (TLS handshake from the server) and the browser (this tab), one row at a time."
-                                aria-label="Re-check deployment status for all certificates">
-                            <i class="fas fa-sync mr-1 sm:mr-2"></i>
-                             <span class="hidden sm:inline">بررسی همه</span>
-                            <span class="sm:hidden">بررسی</span>
-                        </button>
-                        <button type="button" data-debug-control onclick="toggleDebugConsole()"
-                                class="hidden inline-flex items-center px-3 py-2 border text-muted border-border shadow-sm text-sm font-medium rounded-lg bg-input hover:bg-gray-50 dark:hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500 transition-colors duration-200 whitespace-nowrap"
-                                aria-label="Open deployment-check debug console">
-                            <i class="fas fa-terminal mr-1 sm:mr-2"></i>
-                             <span class="hidden sm:inline">اشکال‌زدایی</span>
-                            <span class="sm:hidden">اشکال‌زدایی</span>
-                        </button>
+                        <!-- List actions — quick-action icon group (replaces the
+                             labelled "Check All"). -->
+                        <div class="inline-flex items-center gap-1.5" role="group" aria-label="عملیات لیست گواهی‌ها">
+                            <button type="button" onclick="checkAllDeploymentStatuses(event)" class="cm-icon-btn"
+                                    title="بررسی مجدد وضعیت استقرار برای همه گواهی‌ها (بررسی از سرور + مرورگر)."
+                                    aria-label="بررسی استقرار همه گواهی‌ها">
+                                <i class="fas fa-tower-broadcast" aria-hidden="true"></i>
+                            </button>
+                            <button type="button" onclick="exportAllCertificates()" class="cm-icon-btn"
+                                    title="خروجی گرفتن از همه گواهی‌ها به صورت ZIP" aria-label="خروجی گرفتن از همه گواهی‌ها به صورت ZIP">
+                                <i class="fas fa-file-zipper" aria-hidden="true"></i>
+                            </button>
+                            <button type="button" onclick="loadCertificates()" class="cm-icon-btn"
+                                    title="بروزرسانی لیست گواهی‌ها" aria-label="بروزرسانی لیست گواهی‌ها">
+                                <i class="fas fa-arrows-rotate" aria-hidden="true"></i>
+                            </button>
+                            <button type="button" data-debug-control onclick="toggleDebugConsole()" class="cm-icon-btn hidden"
+                                    title="باز کردن کنسول اشکال‌زدایی بررسی استقرار" aria-label="باز کردن کنسول اشکال‌زدایی بررسی استقرار">
+                                <i class="fas fa-terminal" aria-hidden="true"></i>
+                            </button>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -460,8 +631,19 @@
                                     انقضا <i class="fas fa-sort ml-1 text-gray-400" id="sort-icon-expiry" aria-hidden="true"></i>
                                 </button>
                             </th>
-                            <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-muted uppercase tracking-wider hidden lg:table-cell">
-                                 ارائه‌دهنده
+                            <th id="sort-th-provider" scope="col" aria-sort="none"
+                                class="px-4 py-3 text-left text-xs font-medium text-muted uppercase tracking-wider hidden lg:table-cell">
+                                <button type="button" onclick="sortCertificates('provider')"
+                                        class="inline-flex items-center w-full text-left uppercase tracking-wider hover:text-gray-700 dark:hover:text-gray-200 focus:outline-none focus:ring-2 focus:ring-primary focus:ring-inset rounded">
+                                    ارائه‌دهنده <i class="fas fa-sort ml-1 text-gray-400" id="sort-icon-provider" aria-hidden="true"></i>
+                                </button>
+                            </th>
+                            <th id="sort-th-ca" scope="col" aria-sort="none"
+                                class="px-4 py-3 text-left text-xs font-medium text-muted uppercase tracking-wider hidden lg:table-cell">
+                                <button type="button" onclick="sortCertificates('ca')"
+                                        class="inline-flex items-center w-full text-left uppercase tracking-wider hover:text-gray-700 dark:hover:text-gray-200 focus:outline-none focus:ring-2 focus:ring-primary focus:ring-inset rounded">
+                                    CA <i class="fas fa-sort ml-1 text-gray-400" id="sort-icon-ca" aria-hidden="true"></i>
+                                </button>
                             </th>
                             <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-muted uppercase tracking-wider hidden lg:table-cell">
                                  استقرار
@@ -489,22 +671,33 @@
 
     </div><!-- /max-w-7xl Alpine scope -->
 
-    <!-- Certificate Detail Slide-out Panel -->
+    <!-- Certificate Detail Modal — centered on every viewport; the body
+         scrolls within max-h-[90vh] so the card stays fully visible on mobile
+         and portrait orientations. -->
     <div id="certDetailOverlay" class="fixed inset-0 bg-gray-900/50 backdrop-blur-sm z-40 hidden" onclick="closeCertDetail()"></div>
-    <div id="certDetailPanel" class="fixed top-0 right-0 h-full w-full sm:w-96 lg:w-[480px] bg-surface shadow-elevated z-50 transform translate-x-full panel-slide overflow-y-auto">
-        <div class="sticky top-0 bg-surface border-b border-gray-100 dark:border-white/5 px-6 py-4 flex items-center justify-between z-10">
-             <h3 class="text-lg font-semibold text-foreground truncate" id="detailDomain">جزئیات گواهی</h3>
-            <button type="button" onclick="closeCertDetail()" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 p-1 rounded-lg hover:bg-gray-100 dark:hover:bg-white/5 transition-colors" title="بستن پنل">
-                <i class="fas fa-times text-lg"></i>
-            </button>
-        </div>
-        <div id="certDetailContent" class="p-6">
-            <!-- Detail content loaded dynamically -->
+    <div id="certDetailPanel" class="fixed inset-0 z-50 hidden items-center justify-center p-4 sm:p-6" role="dialog" aria-modal="true" aria-labelledby="detailDomain" onclick="if (event.target === this) closeCertDetail()">
+        <div id="certDetailCard" class="bg-surface rounded-2xl shadow-elevated w-full max-w-2xl max-h-[90vh] flex flex-col overflow-hidden transform transition-all duration-200 opacity-0 scale-95">
+            <div class="flex-shrink-0 bg-surface border-b border-gray-100 dark:border-white/5 px-6 py-4 flex items-center justify-between gap-2">
+                <div class="flex items-center gap-2 min-w-0 flex-1">
+                    <!-- Domain shown in full on one line (mono, horizontally
+                         scrollable for very long names) and copyable. -->
+                    <h3 class="text-base font-semibold font-mono text-foreground whitespace-nowrap overflow-x-auto min-w-0" id="detailDomain">جزئیات گواهی</h3>
+                    <button type="button" onclick="copyDetailDomain()" class="flex-shrink-0 text-gray-400 hover:text-foreground p-1.5 rounded-lg hover:bg-hover transition-colors" title="کپی دامنه" aria-label="کپی دامنه">
+                        <i class="fas fa-copy text-sm"></i>
+                    </button>
+                </div>
+                <button type="button" data-detail-close onclick="closeCertDetail()" class="flex-shrink-0 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 p-1 rounded-lg hover:bg-gray-100 dark:hover:bg-white/5 transition-colors" title="بستن" aria-label="بستن جزئیات گواهی">
+                    <i class="fas fa-times text-lg"></i>
+                </button>
+            </div>
+            <div id="certDetailContent" class="p-6 overflow-y-auto">
+                <!-- Detail content loaded dynamically -->
+            </div>
         </div>
     </div>
 
     <!-- Loading Modal -->
-    <div id="loadingModal" class="fixed inset-0 bg-gray-600 bg-opacity-50 hidden z-50">
+    <div id="loadingModal" class="fixed inset-0 bg-black/50 hidden z-50">
         <div class="bg-surface rounded-lg p-6 m-4 max-w-md w-full">
             <div class="text-center">
                 <div class="relative">
@@ -560,16 +753,16 @@
                 <span class="text-gray-400 text-xs">| کش: <span id="debug-cache-info">در حال بارگذاری...</span></span>
             </div>
             <div class="flex items-center space-x-2">
-                 <button onclick="showCacheStats()" class="text-blue-400 hover:text-blue-300" title="نمایش آمار کش">
+                <button onclick="showCacheStats()" class="text-blue-400 hover:text-blue-300" title="نمایش آمار کش" aria-label="نمایش آمار کش">
                     <i class="fas fa-database"></i>
                 </button>
-                 <button onclick="invalidateAllCache()" class="text-orange-400 hover:text-orange-300" title="پاک کردن کش">
+                <button onclick="invalidateAllCache()" class="text-orange-400 hover:text-orange-300" title="پاک کردن کش" aria-label="پاک کردن کش">
                     <i class="fas fa-trash"></i>
                 </button>
-                 <button onclick="clearDebugConsole()" class="text-yellow-400 hover:text-yellow-300" title="پاک کردن کنسول">
+                <button onclick="clearDebugConsole()" class="text-yellow-400 hover:text-yellow-300" title="پاک کردن کنسول" aria-label="پاک کردن کنسول اشکال‌زدایی">
                     <i class="fas fa-eraser"></i>
                 </button>
-                 <button onclick="toggleDebugConsole()" class="text-gray-400 hover:text-white" title="بستن کنسول">
+                <button onclick="toggleDebugConsole()" class="text-gray-400 hover:text-white" title="بستن کنسول" aria-label="بستن کنسول اشکال‌زدایی">
                     <i class="fas fa-times"></i>
                 </button>
             </div>

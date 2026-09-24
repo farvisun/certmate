@@ -5,6 +5,8 @@ Handles creation, management, renewal, and revocation of client certificates
 
 import logging
 import json
+import shutil
+import threading
 import os
 import re
 from pathlib import Path
@@ -13,16 +15,22 @@ from .utils import utc_now
 from typing import Optional, List, Dict, Any, Tuple
 from uuid import uuid4
 
-from cryptography import x509
-from cryptography.hazmat.primitives import serialization, hashes
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import serialization
 
 from .private_ca import PrivateCAGenerator
 from .csr_handler import CSRHandler
 from .constants import MIN_CERTIFICATE_VALIDITY_DAYS, MAX_CERTIFICATE_VALIDITY_DAYS
 
 logger = logging.getLogger(__name__)
+
+# The subject's country and state when the caller names neither. These were
+# hardcoded at the CSR call, so every client identity CertMate has ever issued
+# says C=CH, ST=Switzerland regardless of who ran it. They are the defaults
+# rather than "omit when unset" deliberately: changing the subject DN of newly
+# issued certificates would stop the new cohort matching an mTLS allowlist or
+# per-DN authorization rule that the old cohort matches.
+DEFAULT_COUNTRY = "CH"
+DEFAULT_STATE = "Switzerland"
 
 
 # Characters allowed verbatim in the on-disk identifier slug. Anything else
@@ -67,6 +75,18 @@ class ClientCertificateManager:
         self.client_certs_dir = Path(client_certs_dir)
         self.private_ca = private_ca
 
+        # Per-identifier lock over metadata.json.
+        #
+        # Re-reading immediately before the write narrowed the renew/revoke
+        # lost-update window from the length of a signature to a few
+        # microseconds, but narrow is not closed: two unlocked
+        # read-modify-writes can still interleave, and then either the
+        # revocation or the supersede marker is the one that disappears
+        # (Copilot, #603). Held only around the metadata sections — never
+        # around the signing — so renewals do not serialise on each other.
+        self._metadata_locks: dict[str, threading.Lock] = {}
+        self._metadata_locks_mutex = threading.Lock()
+
         # Create subdirectories for different cert types
         self.vpn_certs_dir = self.client_certs_dir / "vpn"
         self.api_certs_dir = self.client_certs_dir / "api"
@@ -101,6 +121,29 @@ class ClientCertificateManager:
         except Exception:  # pragma: no cover - defensive
             logger.debug("Failed to emit scheduled client-cert renew audit")
 
+    def _audit_ca_reset(self, removed: int, actor: Optional[str]) -> None:
+        """Record the reset. Same shape as _audit_scheduled_renew above.
+
+        Guarded, and the guard is the point: the reset has already happened by
+        the time this runs. Failing to record it is bad; letting the failure
+        propagate would be worse, because the caller would see an error, retry,
+        and regenerate the CA a second time.
+        """
+        if not self._audit_logger:
+            return
+        try:
+            self._audit_logger.log_operation(
+                operation='ca_reset', resource_type='client_ca',
+                resource_id='client-ca', status='success',
+                error=None,
+                details={'certificates_removed': removed},
+                user=actor, actor=actor,
+            )
+        except Exception:  # pragma: no cover - defensive
+            logger.error(
+                'Client CA was reset and %d certificate(s) removed, but the '
+                'audit record could not be written.', removed)
+
     def _ensure_directories(self):
         """Create all required directories."""
         for cert_dir in [self.vpn_certs_dir, self.api_certs_dir, self.other_certs_dir]:
@@ -127,6 +170,8 @@ class ClientCertificateManager:
         days_valid: int = 365,
         generate_key: bool = True,
         csr_pem: Optional[bytes] = None,
+        country: str = DEFAULT_COUNTRY,
+        state: str = DEFAULT_STATE,
         notes: str = ""
     ) -> Tuple[bool, Optional[str], Optional[Dict[str, Any]]]:
         """
@@ -179,13 +224,19 @@ class ClientCertificateManager:
             # Handle CSR or generate CSR + key
             if generate_key:
                 # Generate CSR and private key
+                # C and ST used to be the literals "CH" and "Switzerland",
+                # with no way to change them: every client identity CertMate
+                # issued, for every operator anywhere, claimed to be Swiss.
+                # The defaults keep those values so no existing mTLS rule
+                # that matches on the subject stops matching after an
+                # upgrade — but they are now the caller's to set.
                 csr_pem, key_pem, error = CSRHandler.create_csr(
                     common_name=common_name,
                     organization=organization,
                     organizational_unit=organizational_unit,
                     email=email,
-                    country="CH",
-                    state="Switzerland"
+                    country=country or DEFAULT_COUNTRY,
+                    state=state or DEFAULT_STATE
                 )
 
                 if error:
@@ -256,6 +307,11 @@ class ClientCertificateManager:
                 "extended_key_usage": ["clientAuth"],
                 "created_at": utc_now().isoformat(),
                 "expires_at": (utc_now() + timedelta(days=days_valid)).isoformat(),
+                # Persisted so a renewal can inherit the operator's chosen
+                # validity instead of silently resetting it to the 365-day
+                # default (#422). Certificates issued before this field
+                # existed fall back to deriving it from created_at/expires_at.
+                "days_valid": days_valid,
                 "serial_number": str(signed_cert.serial_number),
                 "renewal_enabled": True,
                 "renewal_threshold_days": 30,
@@ -359,6 +415,13 @@ class ClientCertificateManager:
             logger.error(f"Error listing client certificates: {str(e)}")
             return []
 
+    def _metadata_lock(self, identifier: str) -> threading.Lock:
+        """Return the per-identifier metadata lock, creating it on first use."""
+        with self._metadata_locks_mutex:
+            if identifier not in self._metadata_locks:
+                self._metadata_locks[identifier] = threading.Lock()
+            return self._metadata_locks[identifier]
+
     def get_certificate_metadata(self, identifier: str) -> Optional[Dict[str, Any]]:
         """
         Get metadata for a specific certificate.
@@ -394,43 +457,92 @@ class ClientCertificateManager:
             Tuple of (success, error_message)
         """
         try:
-            # Get metadata
-            metadata = self.get_certificate_metadata(identifier)
-            if not metadata:
-                return False, f"Certificate not found: {identifier}"
+            # Read and write under the per-identifier lock: a renewal
+            # finishing at the same moment does its own read-modify-write on
+            # this file, and unlocked they interleave (Copilot, #603).
+            with self._metadata_lock(identifier):
+                metadata = self.get_certificate_metadata(identifier)
+                if not metadata:
+                    return False, f"Certificate not found: {identifier}"
 
-            # Update metadata
-            metadata["revoked"] = True
-            metadata["revoked_at"] = utc_now().isoformat()
-            metadata["reason_revoked"] = reason
+                # Update metadata
+                metadata["revoked"] = True
+                metadata["revoked_at"] = utc_now().isoformat()
+                metadata["reason_revoked"] = reason
 
-            # Save updated metadata
-            for metadata_file in self.client_certs_dir.glob(f"*/{identifier}/metadata.json"):
-                with open(metadata_file, 'w') as f:
-                    json.dump(metadata, f, indent=2)
+                # Save updated metadata. Writing every match and then
+                # regenerating the CRL once is deliberate: this used to sit
+                # inside the loop and return from the first file, which was
+                # the same thing only while the glob yielded exactly one.
+                written = 0
+                for metadata_file in self.client_certs_dir.glob(f"*/{identifier}/metadata.json"):
+                    with open(metadata_file, 'w') as f:
+                        json.dump(metadata, f, indent=2)
+                    written += 1
+                if not written:
+                    # get_certificate_metadata found it a moment ago with the
+                    # same glob, so this means it vanished underneath us.
+                    # Reporting success here would be a lie about a revocation.
+                    return False, f"Metadata file not found for: {identifier}"
 
                 logger.info(f"Revoked certificate: {identifier} (reason: {reason})")
 
-                # Update CRL with ALL revoked serials (not just the current one)
-                all_revoked = self.list_client_certificates(revoked=True)
-                revoked_serials = []
-                for cert in all_revoked:
-                    try:
-                        sn = int(cert.get('serial_number', 0))
+                # Update CRL with ALL revoked certs (not just the current one).
+                # Pass full records — serial + persisted revoked_at + reason —
+                # not bare serials: otherwise generate_crl would stamp every
+                # entry (including previously-revoked certs) with today's date,
+                # rewriting older entries' revocation_date on each regeneration.
+                #
+                # Read the revoked set AND regenerate under the CA's global CRL
+                # lock. The per-identifier lock above serialises this cert's
+                # metadata, but the CRL is rebuilt from every revoked cert, so a
+                # concurrent revocation of a DIFFERENT identifier (a different
+                # per-identifier lock) could otherwise read the set and write
+                # crl.pem in an order that drops this serial from the signed CRL.
+                with self.private_ca.crl_lock():
+                    all_revoked = self.list_client_certificates(revoked=True)
+                    revoked_records = []
+                    for cert in all_revoked:
+                        try:
+                            sn = int(cert.get('serial_number', 0))
+                        except (ValueError, TypeError):
+                            continue
                         if sn > 0:
-                            revoked_serials.append(sn)
-                    except (ValueError, TypeError):
-                        continue
-                if revoked_serials:
-                    self.private_ca.generate_crl(revoked_serials)
+                            revoked_records.append({
+                                'serial_number': sn,
+                                'revoked_at': cert.get('revoked_at'),
+                                'reason_revoked': cert.get('reason_revoked'),
+                            })
+                    if revoked_records:
+                        self.private_ca.generate_crl(revoked_records)
 
                 return True, None
-
-            return False, f"Metadata file not found for: {identifier}"
 
         except Exception as e:
             logger.error(f"Error revoking certificate: {str(e)}")
             return False, "An internal error occurred while revoking the certificate"
+
+    @staticmethod
+    def _inherited_days_valid(old_metadata: Dict[str, Any], default: int = 365) -> int:
+        """The validity a renewal should reuse (#422).
+
+        Prefers the persisted ``days_valid``; for certificates issued before
+        that field existed, derives it from created_at/expires_at. Falls back
+        to the default only when neither is usable, and never returns a
+        non-positive value (which would produce an already-expired cert).
+        """
+        raw = old_metadata.get("days_valid")
+        if isinstance(raw, bool):  # bool is an int subclass — not a duration
+            raw = None
+        if isinstance(raw, (int, float)) and raw > 0:
+            return int(raw)
+        try:
+            created = datetime.fromisoformat(old_metadata["created_at"])
+            expires = datetime.fromisoformat(old_metadata["expires_at"])
+        except (KeyError, TypeError, ValueError):
+            return default
+        days = round((expires - created).total_seconds() / 86400)
+        return days if days > 0 else default
 
     def renew_certificate(self, identifier: str) -> Tuple[bool, Optional[str], Optional[Dict[str, Any]]]:
         """
@@ -452,25 +564,102 @@ class ClientCertificateManager:
             if old_metadata.get("revoked"):
                 return False, "Cannot renew a revoked certificate", None
 
-            # Create new certificate with same parameters
+            # A CSR-issued identity cannot be renewed server-side (#422).
+            # The client holds the private key; CertMate never had it. Issuing
+            # a new CertMate-generated keypair produces a certificate the
+            # client cannot use, while stamping the original superseded and
+            # renewal_enabled=False — so the working mTLS identity silently
+            # expires with no further renewal. Refuse, and say what is needed.
+            if old_metadata.get("csr_required"):
+                return (
+                    False,
+                    "This certificate was issued from a client-supplied CSR, so "
+                    "it cannot be renewed server-side: CertMate does not hold "
+                    "the private key. Ask the holder for a fresh CSR and issue "
+                    "a new certificate from it.",
+                    None,
+                )
+
+            # Create new certificate with same parameters, INCLUDING the
+            # validity the operator chose (#422): renewal used to fall back to
+            # the 365-day default, so a 730-day certificate quietly halved its
+            # lifetime on every renewal.
             success, error, cert_data = self.create_client_certificate(
                 common_name=old_metadata.get("common_name", ""),
                 email=old_metadata.get("email", ""),
                 organization=old_metadata.get("organization", "CertMate"),
                 organizational_unit=old_metadata.get("organizational_unit", "Users"),
                 cert_usage=old_metadata.get("cert_usage", "api-mtls"),
+                days_valid=self._inherited_days_valid(old_metadata),
                 generate_key=True,  # Always generate new key on renewal
                 notes=f"Renewal of {identifier}"
             )
 
             if success:
-                # Update old metadata to mark as superseded
-                old_metadata["superseded_by"] = cert_data["identifier"]
-                old_metadata["superseded_at"] = utc_now().isoformat()
+                # Write back only the three fields this operation owns, onto
+                # the metadata as it is NOW — not onto the snapshot read at the
+                # top of this method.
+                #
+                # create_client_certificate above generates a key and signs a
+                # certificate; that takes long enough for a revocation to land
+                # in between. `old_metadata` was read before it and does not
+                # carry `revoked`, so writing the whole dict back erased the
+                # revocation — and OCSP decides on exactly that field
+                # (ocsp_crl.py:49), so the responder went back to answering
+                # "good" for a certificate the operator had just revoked. The
+                # credible trigger is not an operator double-clicking (the UI
+                # confirms before revoking) but the 03:00 renewal sweep
+                # crossing a manual revoke.
+                superseded = {
+                    "superseded_by": cert_data["identifier"],
+                    "superseded_at": utc_now().isoformat(),
+                    # Belt-and-braces against runaway re-renewal:
+                    # renewal_enabled gates check_renewals, so disabling it on
+                    # the superseded cert guarantees the scheduled sweep can
+                    # never re-pick this old cert even if the superseded_by
+                    # guard were ever weakened.
+                    "renewal_enabled": False,
+                }
+                revoked_meanwhile = False
+                # Under the same per-identifier lock the revoke path takes:
+                # the re-read below is only atomic with the write if nothing
+                # else can slip between them (Copilot, #603). The lock covers
+                # the metadata section only — never create_client_certificate
+                # above — so two renewals of different certificates, and the
+                # signing itself, stay concurrent.
+                lock = self._metadata_lock(identifier)
+                with lock:
+                    for metadata_file in self.client_certs_dir.glob(f"*/{identifier}/metadata.json"):
+                        try:
+                            with open(metadata_file) as f:
+                                current = json.load(f)
+                            if not isinstance(current, dict):
+                                current = dict(old_metadata)
+                        except (OSError, ValueError):
+                            # Unreadable now, readable at the top of the method:
+                            # fall back to the snapshot rather than lose the
+                            # supersede marker, and say so.
+                            logger.warning(
+                                "Could not re-read metadata for %s before marking "
+                                "it superseded; writing from the pre-renewal copy",
+                                identifier)
+                            current = dict(old_metadata)
+                        revoked_meanwhile = revoked_meanwhile or bool(current.get("revoked"))
+                        current.update(superseded)
+                        with open(metadata_file, 'w') as f:
+                            json.dump(current, f, indent=2)
 
-                for metadata_file in self.client_certs_dir.glob(f"*/{identifier}/metadata.json"):
-                    with open(metadata_file, 'w') as f:
-                        json.dump(old_metadata, f, indent=2)
+                if revoked_meanwhile:
+                    # The identity was revoked while this renewal was signing.
+                    # The revocation stands — it is not erased — but a new
+                    # certificate now exists for an identity the operator just
+                    # withdrew, and nothing else would ever tell them.
+                    logger.warning(
+                        "Certificate %s was revoked while its renewal was in "
+                        "flight. The revocation stands, but %s was issued for "
+                        "the same identity and is NOT revoked; revoke it too "
+                        "if that was not intended.",
+                        identifier, cert_data["identifier"])
 
                 logger.info(f"Renewed certificate: {identifier} -> {cert_data['identifier']}")
                 return True, None, cert_data
@@ -505,6 +694,37 @@ class ClientCertificateManager:
             logger.error(f"Error getting certificate file: {str(e)}")
             return None
 
+    def build_pfx(self, identifier: str, password: bytes) -> Optional[bytes]:
+        """Build an encrypted PKCS#12 (.pfx) bundle for a client certificate.
+
+        Bundles the leaf certificate + private key, plus the issuing CA cert as
+        the chain, into a password-encrypted PFX — generated on demand from the
+        on-disk PEMs (client certs, where a .pfx for import into Windows/mobile
+        keystores is most useful, #465). Returns None if the cert or key is
+        missing, or if *password* is empty (an unencrypted PFX carrying a
+        private key is never produced — mirrors the server-side policy).
+        """
+        if not password:
+            return None
+        for cert_dir in self.client_certs_dir.glob(f"*/{identifier}"):
+            crt_path = cert_dir / f"{identifier}.crt"
+            key_path = cert_dir / f"{identifier}.key"
+            if not (crt_path.exists() and key_path.exists()):
+                # A partial / wrong-usage directory: keep looking for a complete
+                # one rather than declaring the whole identifier unexportable.
+                continue
+            chain_pem = None
+            try:
+                ca_path = getattr(self.private_ca, 'ca_cert_path', None)
+                if ca_path and Path(ca_path).exists():
+                    chain_pem = Path(ca_path).read_bytes()
+            except Exception:  # pragma: no cover - chain is best-effort
+                chain_pem = None
+            from .storage_backends import _build_pfx
+            return _build_pfx(
+                crt_path.read_bytes(), chain_pem, key_path.read_bytes(), password)
+        return None
+
     def check_renewals(self) -> Tuple[int, int, List[str]]:
         """
         Check for certificates that need renewal.
@@ -522,6 +742,15 @@ class ClientCertificateManager:
             for cert_metadata in certificates:
                 checked_count += 1
 
+                # A superseded certificate has ALREADY been replaced by a newer
+                # cert (renew_certificate set superseded_by on it and left its
+                # expires_at untouched). Renewing it again would supersede the
+                # replacement's ancestor once more every run, issuing a fresh
+                # CA-signed key+cert per tick forever (runaway issuance, disk
+                # fill). It is never a renewal candidate.
+                if cert_metadata.get("superseded_by"):
+                    continue
+
                 # Check if renewal is enabled
                 if not cert_metadata.get("renewal_enabled", False):
                     continue
@@ -537,12 +766,35 @@ class ClientCertificateManager:
                     logger.warning(f"Skipping certificate {cert_metadata.get('identifier')}: invalid expires_at format")
                     continue
 
+                # An already-expired certificate is past the point of renewal:
+                # anything relying on it is already broken, and auto-renewing it
+                # would spawn a replacement whose ancestor stays expired, so the
+                # sweep would re-pick it every run. Skip expired certs; only
+                # within-threshold (not-yet-expired) certs are renewed below.
+                if utc_now() >= expires_at:
+                    continue
+
                 # Check expiration date
                 threshold_days = cert_metadata.get("renewal_threshold_days", 30)
                 renewal_date = expires_at - timedelta(days=threshold_days)
 
                 if utc_now() >= renewal_date:
                     identifier = cert_metadata.get("identifier")
+
+                    # CSR-issued identities cannot be renewed server-side
+                    # (#422). Attempting it every tick would write an identical
+                    # audit failure nightly and drown the trail; the operator
+                    # needs a fresh CSR from the holder, and the certificate
+                    # stays visible as expiring in the UI meanwhile.
+                    if cert_metadata.get("csr_required"):
+                        logger.warning(
+                            "Client certificate %s expires on %s and was issued "
+                            "from a client-supplied CSR: it cannot be auto-renewed. "
+                            "Collect a fresh CSR from the holder and issue a new "
+                            "certificate.", identifier, expires_at_str,
+                        )
+                        continue
+
                     success, error, _ = self.renew_certificate(identifier)
 
                     if success:
@@ -560,6 +812,73 @@ class ClientCertificateManager:
         except Exception as e:
             logger.error(f"Error checking renewals: {str(e)}")
             return 0, 0, []
+
+    def reset_certificate_authority(
+        self,
+        subject: Optional[Dict[str, str]] = None,
+        actor: Optional[str] = None,
+    ) -> Tuple[bool, Optional[str], Dict[str, Any]]:
+        """Rebuild the client CA, and remove the certificates it signed (#578).
+
+        Two things that have to happen together. Regenerating the CA alone
+        would leave a directory of client certificates that nothing can verify
+        any more, presented by a UI that still lists them as valid; removing
+        the certificates alone would leave a CA nobody asked to keep.
+
+        What it does NOT touch is the point of the name: server certificates,
+        settings and DNS accounts belong to other parts of the product and are
+        not this action's business.
+
+        The old CA is backed up first. That backup is the only thing that can
+        ever sign a CRL for the certificates it issued, so discarding it would
+        make every one of them permanently unrevocable.
+
+        `subject` is the reason most people will reach for this: the CA is
+        created once, so the only way to change its subject afterwards is to
+        make a new one. It is validated BEFORE anything is backed up, moved or
+        deleted, because a reset that fails halfway is worse than one that
+        refuses.
+
+        Returns (ok, error, summary).
+        """
+        summary: Dict[str, Any] = {'certificates_removed': 0, 'backup': None}
+
+        # Validate first. PrivateCAGenerator raises on a subject that cannot
+        # produce a certificate; catching it here keeps the caller's contract
+        # (ok, error, summary) rather than making every caller handle both.
+        try:
+            PrivateCAGenerator(self.private_ca.ca_dir, subject=subject)._build_subject()
+        except ValueError as error:
+            return False, str(error), summary
+
+        existing = self.list_client_certificates()
+
+        if not self.private_ca.regenerate(subject=subject):
+            return False, 'could not regenerate the certificate authority; see the log', summary
+        summary['backup'] = str(self.private_ca.ca_dir)
+
+        removed = 0
+        for cert_dir in (self.vpn_certs_dir, self.api_certs_dir, self.other_certs_dir):
+            if not cert_dir.exists():
+                continue
+            for entry in sorted(cert_dir.iterdir()):
+                # Only directories holding a metadata.json, which is what
+                # list_client_certificates() counts. A stray file in here is
+                # not ours to delete.
+                if entry.is_dir() and (entry / 'metadata.json').exists():
+                    shutil.rmtree(entry, ignore_errors=True)
+                    removed += 1
+        summary['certificates_removed'] = removed
+        summary['certificates_before'] = len(existing)
+
+        self._ensure_directories()
+
+        self._audit_ca_reset(removed, actor)
+
+        logger.warning(
+            'Client CA regenerated; %d client certificate(s) removed. Any CRL '
+            'published for the previous CA can no longer be verified.', removed)
+        return True, None, summary
 
     def get_statistics(self) -> Dict[str, Any]:
         """

@@ -11,7 +11,9 @@
     var resultsEl = null;
     var selectedIndex = 0;
     var currentResults = [];
-    var certCache = null;
+    var certCache = null;        // server certificates (lazy-fetched)
+    var clientCertCache = null;  // client certificates (lazy-fetched)
+    var lastFocusedBeforeOpen = null;
 
     // Static searchable items
     var staticItems = [
@@ -25,9 +27,15 @@
         { type: 'settings', icon: 'fa-shield-alt', label: 'تنظیمات CA', desc: 'پیکربندی مرجع صدور گواهی', url: '/settings#ca' },
         { type: 'settings', icon: 'fa-sliders-h', label: 'تنظیمات عمومی', desc: 'اعلان‌ها، پیش‌فرض‌ها', url: '/settings#general' },
         { type: 'settings', icon: 'fa-database', label: 'تنظیمات ذخیره‌سازی', desc: 'مسیرهای ذخیره‌سازی گواهی', url: '/settings#storage' },
+        { type: 'settings', icon: 'fa-bell', label: 'تنظیمات اعلان‌ها', desc: 'ایمیل، وب‌هوک‌ها، خلاصه هفتگی', url: '/settings#notifications' },
+        { type: 'settings', icon: 'fa-rocket', label: 'هوک‌های استقرار', desc: 'خودکارسازی استقرار پس از صدور', url: '/settings#deploy' },
+        { type: 'settings', icon: 'fa-network-wired', label: 'پروب‌های استقرار', desc: 'بررسی وضعیت استقرار گواهی', url: '/settings#probe' },
         { type: 'settings', icon: 'fa-users', label: 'مدیریت کاربران', desc: 'مدیریت حساب‌های کاربری', url: '/settings#users' },
+        { type: 'settings', icon: 'fa-key', label: 'کلیدهای API', desc: 'مدیریت کلیدهای API و محدودیت نرخ', url: '/settings#apikeys' },
+        { type: 'settings', icon: 'fa-id-badge', label: 'SSO / OIDC', desc: 'پیکربندی ورود یکپارچه', url: '/settings#oidc' },
         { type: 'settings', icon: 'fa-archive', label: 'پشتیبان و بازیابی', desc: 'پیکربندی پشتیبان و گواهی‌ها', url: '/settings#backup' },
-        { type: 'action', icon: 'fa-plus-circle', label: 'ایجاد گواهی', desc: 'صدور گواهی SSL جدید', url: '/', action: 'focusCreate' },
+        { type: 'action', icon: 'fa-plus-circle', label: 'گواهی سرور جدید', desc: 'صدور گواهی سرور SSL/TLS', action: 'openServerDrawer' },
+        { type: 'action', icon: 'fa-id-card', label: 'گواهی کلاینت جدید', desc: 'صدور گواهی mTLS / هویت کلاینت', action: 'openClientDrawer' },
         { type: 'action', icon: 'fa-moon', label: 'تغییر حالت تاریک', desc: 'تغییر پوسته', action: 'toggleTheme' },
         { type: 'action', icon: 'fa-bell', label: 'اعلان‌ها', desc: 'بررسی هشدارهای گواهی', action: 'toggleNotifs' }
     ];
@@ -38,10 +46,10 @@
         div.className = 'fixed inset-0 z-[100] hidden';
         div.innerHTML =
             '<div class="fixed inset-0 bg-black/50 backdrop-blur-sm" id="cmdPaletteOverlay"></div>' +
-            '<div class="fixed inset-x-4 top-[15vh] sm:inset-x-auto sm:left-1/2 sm:-translate-x-1/2 sm:w-full sm:max-w-lg bg-surface border-border rounded-xl shadow-2xl border overflow-hidden">' +
+            '<div role="dialog" aria-modal="true" aria-label="Command palette" class="fixed inset-x-4 top-[15vh] sm:inset-x-auto sm:left-1/2 sm:-translate-x-1/2 sm:w-full sm:max-w-lg bg-surface border-border rounded-xl shadow-2xl border overflow-hidden">' +
                 '<div class="flex items-center px-4 border-b border-border">' +
-                    '<i class="fas fa-search text-gray-400 mr-3"></i>' +
-                    '<input id="cmdPaletteInput" type="text" placeholder="جستجوی صفحات، تنظیمات، گواهی‌ها..." ' +
+                    '<i class="fas fa-search text-gray-400 mr-3" aria-hidden="true"></i>' +
+                    '<input id="cmdPaletteInput" type="text" aria-label="جستجوی صفحات، تنظیمات، گواهی‌ها" placeholder="جستجوی صفحات، تنظیمات، گواهی‌ها..." ' +
                            'class="flex-1 py-3 bg-transparent text-foreground placeholder-gray-400 outline-none text-sm">' +
                     '<kbd class="hidden sm:inline-flex items-center px-2 py-0.5 text-xs text-gray-400 bg-surface-2 rounded">ESC</kbd>' +
                 '</div>' +
@@ -79,6 +87,8 @@
 
     function openPalette() {
         if (!paletteEl) createPaletteHTML();
+        // Remember what had focus so we can restore it on close (a11y).
+        lastFocusedBeforeOpen = document.activeElement;
         paletteEl.classList.remove('hidden');
         inputEl.value = '';
         selectedIndex = 0;
@@ -87,11 +97,17 @@
         // Delay focus to ensure visible
         setTimeout(function() { inputEl.focus(); }, 50);
         // Prefetch certs if not cached
-        if (!certCache) fetchCerts();
+        if (!certCache || !clientCertCache) fetchCerts();
     }
 
     function closePalette() {
         if (paletteEl) paletteEl.classList.add('hidden');
+        // Restore focus to the element that was active before opening, unless
+        // a result handler intentionally moved focus elsewhere (navigation).
+        if (lastFocusedBeforeOpen && typeof lastFocusedBeforeOpen.focus === 'function') {
+            try { lastFocusedBeforeOpen.focus(); } catch (e) { /* element gone */ }
+        }
+        lastFocusedBeforeOpen = null;
     }
 
     function isOpen() {
@@ -99,28 +115,67 @@
     }
 
     function fetchCerts() {
+        // How a certificate's expiry reads in the palette. Three states, not
+        // two: a certificate whose validity could not be parsed is not an
+        // expired certificate, and telling an operator it is sends them to
+        // renew something that may be perfectly valid.
+        function describeExpiry(c) {
+            if (!c.exists) { return 'یافت نشد'; }
+            // `expired`, not a day count. days_until_expiry truncates, so a
+            // certificate with 23 hours left reports 0, and `days > 0` read
+            // that as Expired -- which is exactly what the comment above says
+            // not to do to an operator (#829).
+            if (c.expired === true) { return 'منقضی شده'; }
+            var days = c.days_until_expiry;
+            if (c.expired !== false || days === null || days === undefined) { return 'انقضا نامشخص'; }
+            return days === 0 ? 'کمتر از یک روز باقی‌مانده' : days + ' روز باقی‌مانده';
+        }
+
+        // Server certificates.
         fetch('/api/certificates', { credentials: 'same-origin' })
             .then(function(r) { return r.ok ? r.json() : []; })
             .then(function(certs) {
-                if (!Array.isArray(certs)) { certCache = []; return; }
-                certCache = certs.map(function(c) {
+                certCache = Array.isArray(certs) ? certs.map(function(c) {
                     return {
                         type: 'cert',
                         icon: 'fa-lock',
                         label: c.domain,
-                        desc: (c.exists ? (c.days_until_expiry > 0 ? c.days_until_expiry + ' روز باقی‌مانده' : 'منقضی شده') : 'یافت نشد'),
-                        url: '/',
+                        // `null > 0` is false, so an unparseable expiry used to
+                        // read as 'Expired' here — the same defect the dashboard
+                        // was fixed for in v2.2.4, in a file written after it.
+                        // Unknown is its own state, as it is in the inventory.
+                        desc: describeExpiry(c),
                         domain: c.domain
                     };
-                });
+                }) : [];
+                if (isOpen()) onSearch();
             })
             .catch(function() { certCache = []; });
+
+        // Client certificates (cross-type search — closes the D1 "triple search").
+        fetch('/api/client-certs', { credentials: 'same-origin' })
+            .then(function(r) { return r.ok ? r.json() : {}; })
+            .then(function(data) {
+                var list = (data && data.certificates) || [];
+                clientCertCache = Array.isArray(list) ? list.map(function(c) {
+                    return {
+                        type: 'clientcert',
+                        icon: 'fa-id-card',
+                        label: c.common_name || '(no CN)',
+                        desc: (c.revoked ? 'Revoked' : (c.cert_usage || 'Client certificate')) + (c.email ? ' · ' + c.email : ''),
+                        cn: c.common_name
+                    };
+                }) : [];
+                if (isOpen()) onSearch();
+            })
+            .catch(function() { clientCertCache = []; });
     }
 
     function onSearch() {
         var query = (inputEl.value || '').toLowerCase().trim();
         var allItems = staticItems.slice();
         if (certCache) allItems = allItems.concat(certCache);
+        if (clientCertCache) allItems = allItems.concat(clientCertCache);
 
         if (!query) {
             currentResults = allItems.slice(0, 8);
@@ -141,7 +196,7 @@
             return;
         }
 
-        var typeLabels = { nav: 'Navigation', settings: 'Settings', action: 'Actions', cert: 'Certificates' };
+        var typeLabels = { nav: 'Navigation', settings: 'Settings', action: 'Actions', cert: 'Server Certificates', clientcert: 'Client Certificates' };
         var lastType = '';
         var html = '';
 
@@ -183,19 +238,103 @@
             return;
         }
         if (item.action === 'toggleNotifs') {
-            if (typeof toggleNotifications === 'function') toggleNotifications();
+            window.location.href = '/notifications';
             return;
         }
-        if (item.action === 'focusCreate') {
-            window.location.href = item.url;
-            setTimeout(function() {
-                var el = document.getElementById('domain');
-                if (el) el.focus();
-            }, 300);
+        // focusCreate kept for back-compat; both open the server creation drawer.
+        if (item.action === 'openServerDrawer' || item.action === 'focusCreate') {
+            openDrawerAction('server');
+            return;
+        }
+        if (item.action === 'openClientDrawer') {
+            openDrawerAction('client');
+            return;
+        }
+        if (item.type === 'cert') {
+            jumpToServerCert(item.domain);
+            return;
+        }
+        if (item.type === 'clientcert') {
+            jumpToClientCert(item.cn);
             return;
         }
         if (item.url) {
-            window.location.href = item.url;
+            navigateTo(item.url);
+        }
+    }
+
+    /**
+     * Navigate to a URL that may be same-page-with-a-different-hash (#425).
+     *
+     * Eleven of the palette's settings entries point at '/settings#<tab>'.
+     * Assigning location.href to a fragment-only change does NOT reload the
+     * page, and settings.html/index.html read location.hash exactly once in
+     * x-data — so choosing "API Keys" while already on /settings changed the
+     * URL and then visibly did nothing.
+     *
+     * Same-page hash changes are dispatched as a hashchange event, which the
+     * pages now listen for; cross-page navigation is unchanged.
+     */
+    function navigateTo(url) {
+        var target = new URL(url, window.location.href);
+        var samePage = target.pathname === window.location.pathname
+            && target.search === window.location.search;
+        if (samePage && target.hash && target.hash !== window.location.hash) {
+            window.location.hash = target.hash;   // fires hashchange
+            return;
+        }
+        if (samePage && target.hash === window.location.hash) {
+            // Already exactly where the entry points: nothing to navigate,
+            // but the panel must still reflect it (the user asked for it).
+            // A plain Event, not new HashChangeEvent(): the constructor is
+            // unsupported in some engines and would throw here, and the
+            // listeners read location.hash rather than the event's
+            // oldURL/newURL, so the generic type carries everything needed.
+            window.dispatchEvent(new Event('hashchange'));
+            return;
+        }
+        window.location.href = url;
+    }
+
+    // Open the creation drawer to the given type. On the dashboard openCertDrawer
+    // is in scope, so open directly; elsewhere stash the intent and navigate
+    // there (index.html reads cm_open_drawer on load).
+    function openDrawerAction(type) {
+        if (typeof window.openCertDrawer === 'function') {
+            window.openCertDrawer(type);
+        } else {
+            try { sessionStorage.setItem('cm_open_drawer', type); } catch (e) { /* storage off */ }
+            window.location.href = '/';
+        }
+    }
+
+    // Jump-and-flash to a server cert: on the dashboard, ensure the server view
+    // is showing and pulse the row in place; otherwise navigate to the dashboard
+    // with ?flash= so it pulses once the list has loaded.
+    function jumpToServerCert(domain) {
+        if (!domain) return;
+        if (window.location.pathname === '/') {
+            var sBtn = document.getElementById('certViewServerBtn');
+            if (sBtn) sBtn.click();
+            setTimeout(function() {
+                if (!(typeof window.flashCertRow === 'function' && window.flashCertRow(domain))) {
+                    window.location.href = '/?flash=' + encodeURIComponent(domain);
+                }
+            }, 60);
+        } else {
+            window.location.href = '/?flash=' + encodeURIComponent(domain);
+        }
+    }
+
+    // Client certs live in the client view; switch to it. (Row-level flash for
+    // client certs lands with the real client table in a later phase.)
+    function jumpToClientCert(cn) {
+        var cBtn = document.getElementById('certViewClientBtn');
+        if (cBtn) {
+            cBtn.click();
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+        } else {
+            navigateTo('/#client');
         }
     }
 

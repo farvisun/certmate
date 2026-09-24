@@ -4,7 +4,15 @@ const {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } = require("@modelcontextprotocol/sdk/types.js");
-const fetch = require("node-fetch");
+// `fetch` is global from Node 18 and package.json requires >= 20, so there is
+// no node-fetch import here. Do not add one back: node-fetch 3.x is ESM-only
+// and this file is CommonJS. See #348 for why bumping it was rejected in
+// favour of removing it.
+//
+// The responses below are read with `.ok`, `.status`, `.json()` and `.text()`
+// only — identical across implementations. `.body` as a Node stream,
+// `.buffer()`, and the `timeout`/`agent` options are where they differ, so
+// reach for any of those and this note stops applying.
 const { randomUUID } = require("crypto");
 
 // Stable id for this agent process, sent on every CertMate call so the audit
@@ -34,7 +42,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "certmate_create_certificate",
-        description: "Create a new TLS certificate for a specified domain.",
+        description: "Create a new TLS certificate for a specified domain. Issuance runs asynchronously: the call returns a job_id (HTTP 202) to poll with certmate_get_job.",
         inputSchema: {
           type: "object",
           properties: {
@@ -48,7 +56,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "certmate_renew_certificate",
-        description: "Force renewal of an existing certificate for a domain.",
+        description: "Force renewal of an existing certificate for a domain. Runs asynchronously: the call returns a job_id (HTTP 202) to poll with certmate_get_job.",
         inputSchema: {
           type: "object",
           properties: {
@@ -91,11 +99,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "certmate_get_job",
-        description: "Poll the status of an asynchronous certificate job. certmate_create_certificate and certmate_renew_certificate may return a job_id (HTTP 202); call this with that job_id until status is completed or failed.",
+        description: "Poll the status of an asynchronous certificate job. certmate_create_certificate, certmate_renew_certificate and certmate_update_certificate return a job_id (HTTP 202); call this with that job_id until status is succeeded or failed (queued and running are not final).",
         inputSchema: {
           type: "object",
           properties: {
-            job_id: { type: "string", description: "The job_id returned by an async create/renew" }
+            job_id: { type: "string", description: "The job_id returned by an async create/renew/update" }
           },
           required: ["job_id"]
         }
@@ -147,6 +155,42 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             limit: { type: "integer", description: "Max entries to return (1-500, default 100)" }
           }
         }
+      },
+      {
+        name: "certmate_delete_certificate",
+        description: "Delete a certificate by domain: removes the certificate files from disk and the domain from settings. Destructive and not reversible — confirm intent before calling. Useful to clean up old or renamed certificates during migrations.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            domain: { type: "string", description: "The primary domain of the certificate to delete" }
+          },
+          required: ["domain"]
+        }
+      },
+      {
+        name: "certmate_update_certificate",
+        description: "Edit an existing certificate's coverage in place by reissuing it (no delete-and-recreate): replace its SAN domains and/or change its DNS-01 alias. Omit sans to keep the current SAN set; pass an empty array to drop all SANs. The primary domain is the certificate's identity and cannot be changed here. Returns a job_id (HTTP 202) to poll with certmate_get_job.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            domain: { type: "string", description: "The primary domain of the certificate to update" },
+            sans: { type: "array", items: { type: "string" }, description: "The full replacement set of SAN domains (omit to keep the current set; [] drops all SANs)" },
+            domain_alias: { type: "string", description: "The DNS-01 alias FQDN (\"\" clears it)" }
+          },
+          required: ["domain"]
+        }
+      },
+      {
+        name: "certmate_get_certificate_file",
+        description: "Download a single file from a certificate's bundle as raw PEM text (not JSON-wrapped or zipped) — e.g. fullchain.pem, privkey.pem, cert.pem, chain.pem — for direct use by web servers like HAProxy or nginx.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            domain: { type: "string", description: "The domain name" },
+            file: { type: "string", description: "The bundle file to fetch, e.g. fullchain.pem, privkey.pem, cert.pem, chain.pem" }
+          },
+          required: ["domain", "file"]
+        }
       }
     ]
   };
@@ -175,6 +219,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     "X-CertMate-Agent-Session": AGENT_SESSION,
     "X-CertMate-Agent-Id": AGENT_ID
   };
+
+  // A tool argument declared boolean in the schema arrives as whatever the
+  // model wrote. "false" is a string, and a string is not a boolean.
+  function requireBoolean(name, value) {
+    if (typeof value !== "boolean") {
+      throw new Error(`${name} must be true or false, not ${JSON.stringify(value)}`);
+    }
+    return value;
+  }
 
   async function makeRequest(method, path, body = null) {
     const url = `${baseUrl.replace(/\/$/, '')}${path}`;
@@ -218,11 +271,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           domain: args.domain,
           dns_provider: args.dns_provider,
           account_id: args.account_id,
-          ca_provider: args.ca_provider
+          ca_provider: args.ca_provider,
+          // Without this the server takes the SYNCHRONOUS branch
+          // (`_wants_async`, modules/api/resources.py) and blocks for the whole
+          // ACME exchange — minutes on a slow DNS provider. The MCP client's
+          // own timeout aborts the tool call while certbot keeps going, and no
+          // job_id is ever produced, so certmate_get_job has nothing to poll.
+          // The documented "create, then poll until done" loop could not run.
+          async: true
         });
         break;
       case "certmate_renew_certificate":
-        result = await makeRequest("POST", `/api/certificates/${encodeURIComponent(args.domain)}/renew`);
+        result = await makeRequest("POST", `/api/certificates/${encodeURIComponent(args.domain)}/renew`, { async: true });
         break;
       case "certmate_deploy_certificate":
         result = await makeRequest("POST", `/api/certificates/${encodeURIComponent(args.domain)}/deploy`);
@@ -243,8 +303,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         result = await makeRequest("GET", `/api/certificates/${encodeURIComponent(args.domain)}/download?format=json`);
         break;
       case "certmate_set_auto_renew":
+        // The tool schema says boolean, but nothing enforces a schema on the
+        // way in: a model that writes "false" would otherwise send a string,
+        // which the server now refuses — and which older servers read as true.
         result = await makeRequest("PUT", `/api/certificates/${encodeURIComponent(args.domain)}/auto-renew`, {
-          enabled: args.enabled
+          enabled: requireBoolean("enabled", args.enabled)
         });
         break;
       case "certmate_list_dns_providers":
@@ -258,6 +321,31 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "certmate_get_activity":
         result = await makeRequest("GET", `/api/activity?limit=${encodeURIComponent(args.limit || 100)}`);
         break;
+      case "certmate_delete_certificate":
+        result = await makeRequest("DELETE", `/api/certificates/${encodeURIComponent(args.domain)}`);
+        break;
+      case "certmate_update_certificate": {
+        // Same reasoning as create/renew: without `async` the server reissues
+        // inline and the tool call outlives the client's patience.
+        const body = { async: true };
+        // Omit san_domains entirely when not provided so the reissue keeps the
+        // current SAN set ([] is a deliberate "drop all").
+        if (Array.isArray(args.sans)) body.san_domains = args.sans;
+        if (args.domain_alias !== undefined) body.domain_alias = args.domain_alias;
+        result = await makeRequest("POST", `/api/certificates/${encodeURIComponent(args.domain)}/reissue`, body);
+        break;
+      }
+      case "certmate_get_certificate_file": {
+        const fileUrl = `${baseUrl.replace(/\/$/, '')}/api/certificates/${encodeURIComponent(args.domain)}/download?file=${encodeURIComponent(args.file)}`;
+        const fileResp = await fetch(fileUrl, { method: "GET", headers });
+        if (!fileResp.ok) {
+          let errText = `HTTP error ${fileResp.status}`;
+          try { const e = await fileResp.json(); errText += `: ${e.error || e.message || JSON.stringify(e)}`; } catch (_) {}
+          throw new Error(errText);
+        }
+        // Return the raw PEM text directly (not JSON-wrapped) so it is pasteable.
+        return { content: [{ type: "text", text: await fileResp.text() }] };
+      }
       default:
         throw new Error(`Unknown tool: ${name}`);
     }

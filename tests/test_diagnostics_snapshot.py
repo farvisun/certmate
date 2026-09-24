@@ -15,7 +15,6 @@ correctness contract is:
 No Docker; runs in-process via Flask's test client.
 """
 
-import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -26,6 +25,9 @@ from flask_restx import Api, Namespace
 from modules.api.models import create_api_models
 from modules.api.resources import create_api_resources
 import modules.api.resources as api_resources_module
+
+
+pytestmark = [pytest.mark.unit]
 
 
 def _passthrough_decorator(_min_role):

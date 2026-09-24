@@ -28,12 +28,32 @@ operate certificates on a schedule.
 - **Independent verification.** A standalone verifier
   (`python -m modules.core.audit_verify`) recomputes the chain and returns
   PASS/FAIL without needing to run or trust CertMate; `GET /api/audit/verify`
-  exposes the same check over the API.
+  exposes the same check over the API and, when signing is enabled, also
+  cross-checks the chain against the latest signed checkpoint — so a tail
+  truncation or rewrite at or below that checkpoint fails verification (see
+  "tail truncation" under Honest limits).
 - **Signed, third-party-verifiable export.** The instance signs the chain head
   (periodic checkpoints) and `GET /api/audit/export` produces an Ed25519-signed
   bundle. An auditor verifies it off the box, pinning the instance's public key
   (`GET /api/audit/public-key`) out of band — proving both that the record was
-  not edited and which instance produced it.
+  written, not edited, and which instance produced it. That endpoint returns
+  JSON, not a PEM file: save its `public_key_pem` field as the `.pem` the
+  verifier's `--pubkey` expects. It answers 404 when the instance has no
+  signing key.
+- **SIEM audit sink (push).** Each audit entry can also be streamed live to an
+  external collector in a standard format — **syslog** (RFC 5424) or **CEF**
+  over UDP/TCP, or **generic HTTP/JSON** — configured under `audit_sink` in
+  settings. Entries pass through the credential/secret sanitizer before they
+  leave the process (a token in a detail field is redacted), and the sink is
+  failure-isolated with a short timeout, like the hash chain: a dead collector
+  never blocks or breaks a certificate operation. Lifecycle coverage includes
+  create / renew / deploy / revoke, and the scheduled summary digest: it is an
+  audit entry, so it reaches the sink like any other. What it records is the
+  outcome, how many recipients it was for, and the counts it reported — **not
+  the recipients themselves**, who are personal data this chain cannot take
+  back out afterwards. A digest skipped because notifications or SMTP are off
+  writes nothing: the settings answer that, and a weekly entry saying so would
+  grow the chain forever to say nothing.
 
 ## Regime mapping
 
@@ -86,18 +106,108 @@ operate certificates on a schedule.
   block a certificate operation; the chain proves the recorded entries are
   authentic and ordered, and a missing interior `seq` proves a deletion, but a
   write that failed before it was recorded leaves no entry to verify.
-- **Tail truncation needs an external reference.** Removing entries from the
-  **end** of a single chain leaves a shorter-but-internally-consistent chain
-  that still verifies as intact. The signed checkpoints and export bundles are
-  the anchors for catching this: a later signed export with fewer entries than
-  an earlier one (or than a checkpoint an auditor holds) reveals the truncation.
-  A single in-place export cannot, on its own, prove nothing was removed from the
-  end — keep successive signed exports, or wait for opt-in external anchoring, if
-  you need that guarantee.
+- **Tail truncation is caught down to the last signed checkpoint.** Removing
+  entries from the **end** of the chain leaves a shorter-but-internally-
+  consistent chain. `GET /api/audit/verify` now cross-checks the chain against
+  the newest signed checkpoint that verifies under the instance key, so any
+  truncation, rewind, or rewrite **at or below** that checkpoint fails
+  verification — the previously write-only checkpoints are now read back. The
+  tail is **sealed on a clean shutdown**: whatever was written since the last
+  checkpoint is signed on the way out, so a container that stops normally
+  leaves nothing unattested. Two gaps remain: (a) a **crash**, a `SIGKILL` or a
+  power loss stops before that, and the entries since the last checkpoint can
+  then still be dropped undetected until the next one seals them — narrowed
+  from "every stop" to "an unclean stop", not closed; and (b) an operator who
+  holds the signing key can re-sign a fresh checkpoint over a rewritten chain.
+  Keep successive signed exports, or wait for opt-in external anchoring, if you
+  need to close those.
 - **The agent-session header is a claim.** It is recorded for correlation but is
   client-supplied; the trustworthy identity is the authenticated API key.
+- **Bootstrap actions are attributed to `setup_user`.** Until setup is complete
+  an instance serves every request as admin, so there is no real identity to
+  record and the chain says so plainly. An entry such as `create` / `user` /
+  `setup_user` means that user was created while anyone who could reach the
+  instance was an admin. On a current version only the first admin can be
+  created that way — a second user or an API key is refused — so exactly one
+  such entry is expected. More than one means the instance was bootstrapped
+  under an older version, and every user beyond the first is worth confirming
+  or removing. API keys minted in that window are badged in the API Keys page
+  and wait for an operator; users are not badged, and the chain is where the
+  answer for them lives.
 - **History boundary.** The chain starts when the feature is first enabled;
   earlier `.log` history is not part of the verifiable chain.
+- **A pruned chain proves less, and says so.** If you have run
+  `audit_prune` (below), verification covers the entries from the anchor
+  forward. The archived prefix is attested by the signed anchor and by the
+  exported bundle you hold off the box — not by the chain file. `verify` reports
+  `anchored` and the anchor seq for exactly this reason; treat a bare "intact"
+  claim about a pruned instance as an overstatement.
+
+## Retention: archiving part of the chain
+
+The chain grows by one line per audited operation — of the order of hundreds of
+kilobytes per year on a busy instance — so most operators never need this. It
+exists for the case where a retention policy requires older records to leave the
+machine.
+
+There is no automatic pruning, and there is no API endpoint for it. Deleting
+audit history is exactly what someone who has just compromised an administrator
+account would want to do, and an operator with a legitimate retention obligation
+has shell access anyway — they have to put the archive somewhere. So it is one
+explicit command, run with CertMate stopped:
+
+```bash
+# 1. Export the prefix you intend to archive (admin token).
+curl -H "Authorization: Bearer $TOKEN" \
+     "https://certmate.example.com/api/audit/export?to_seq=1199" > archive-0-1199.json
+
+# 2. Verify it OFF this box, pinning the instance key.
+python -m modules.core.audit_verify --bundle archive-0-1199.json --pubkey instance.pem
+
+# 3. Store it wherever your policy says. Then, with CertMate stopped:
+python -m modules.core.audit_prune --bundle archive-0-1199.json --data-dir data/audit
+python -m modules.core.audit_prune --bundle archive-0-1199.json --data-dir data/audit --yes
+```
+
+The command without `--yes` is a dry run. It refuses, and removes nothing, if
+the bundle does not verify, is unsigned, is empty, is not a prefix of *this*
+chain, or disagrees with the chain at any seq, or if pruning would leave the
+chain with no entries after the archived prefix — you never delete records
+whose only remaining copy is unverified, and you never end up with a chain that
+has nothing left to verify.
+
+It also refuses if `--key-dir` holds no signing key, or holds one belonging to
+a different instance than the one that exported the bundle. Both are checked
+**before** anything is removed: an anchor signed by the wrong key is one the
+instance's own `verify` rejects, and discovering that after the records are
+gone is too late to be useful.
+
+Point `--key-dir` at the instance's key. It defaults to `data` (relative to the
+directory you run the command from) and must hold the instance's
+`.audit_signing_key`, unless `AUDIT_SIGNING_KEY_FILE` is set the same way the
+instance sets it. The tool never creates a key here: a new key would be a new
+instance identity, not this instance's.
+
+What it then does is the part that matters for compliance:
+
+- **The deletion is recorded in the chain that survives it.** An `archive` entry
+  is appended naming the seq range, the number of entries, their head hash and
+  the SHA-256 of the archive file. A reader of the pruned chain can see that
+  entries were removed, when, and which archive holds them.
+- **The remainder verifies from a signed anchor.** `certificate_audit.anchor.json`
+  states where the chain now starts and what it continues from, signed with the
+  instance key, so a chain that was simply truncated cannot be passed off as a
+  pruned one — the anchor cannot be forged without the key.
+- **It stays honest afterwards.** Verification of a pruned chain never reports a
+  plain "intact": both the API and the standalone verifier say which seq the
+  guarantee starts at.
+
+Two limits worth stating. The anchor describes the **most recent** archive; the
+complete history is the sequence of exported bundles, which is why they must be
+kept and why each one's digest is recorded in the chain. And, as everywhere else
+on this page, the instance key does not bind the operator: someone holding it can
+sign an anchor over a chain they rewrote. Prune only as far back as your archives
+genuinely reach.
 
 Signed exports that an external auditor pins to a published key are available
 today. If your obligations require binding the operator *themselves* — so that

@@ -33,6 +33,8 @@ from urllib.parse import urlparse, urlencode
 
 from flask import session as flask_session
 
+from .auth import active_admin_count, validate_username
+from .secret_refs import SecretReferenceError, resolve_field
 from .settings import _strip_masked_values
 from .utils import utc_now
 
@@ -75,6 +77,11 @@ def _normalize_oidc_config(raw: dict) -> dict:
         cfg['default_role'] = 'viewer'
     cfg.setdefault('auto_create_users', True)
     cfg.setdefault('link_by_email', True)
+    # Re-derive the role from the IdP claims on EVERY login, not just at JIT
+    # provisioning (#408): otherwise removing someone from an admin group in
+    # the IdP never demotes them here. Flip off when roles are managed inside
+    # CertMate and the IdP only authenticates.
+    cfg.setdefault('sync_role_on_login', True)
     # Refuse to link an IdP identity onto an existing local user unless
     # the IdP attests that the user controls the email. Defaults to True
     # because the alternative is an account-takeover vector on any IdP
@@ -116,6 +123,7 @@ class OIDCManager:
         self._audit_logger = audit_logger
         self._oauth = None  # cached OAuth registry (Authlib)
         self._cached_issuer = None  # invalidate cache if issuer changes
+        self._cached_client_key = None
 
     # ----------------------------------------------------------------- config
 
@@ -181,11 +189,11 @@ class OIDCManager:
 
         normalized = _normalize_oidc_config(merged)
 
-        # Drop the cached OAuth client — if issuer/client_id changed, the
-        # next login must rediscover.
-        if normalized.get('issuer_url') != self._cached_issuer:
-            self._oauth = None
-            self._cached_issuer = None
+        # Drop the cached OAuth client whenever anything that shapes it
+        # changes — issuer, client id, secret or scopes. Keyed on the issuer
+        # alone, a rotated secret was silently ignored until a restart (#647).
+        if self._client_fingerprint(normalized) != self._cached_client_key:
+            self._invalidate_client()
 
         def _mutate(settings):
             settings['oidc'] = normalized
@@ -236,6 +244,72 @@ class OIDCManager:
 
     # ----------------------------------------------------------- Authlib glue
 
+    def _advertised_signing_algorithms(self):
+        """What the cached discovery document says the IdP signs with.
+
+        Read for the error message only: it is the single fact that turns
+        "Algorithm of 'RS256' is not allowed" from a dead end into something
+        an operator can act on.
+        """
+        try:
+            client = self._oauth.create_client('certmate_oidc') if self._oauth else None
+            metadata = getattr(client, 'server_metadata', None) or {}
+            return metadata.get('id_token_signing_alg_values_supported')
+        except Exception:
+            return None
+
+    def _invalidate_client(self):
+        """Forget the cached Authlib client and its discovery document."""
+        self._oauth = None
+        self._cached_issuer = None
+        self._cached_client_key = None
+
+    @staticmethod
+    def _client_fingerprint(cfg):
+        """Everything about the config that changes the Authlib client.
+
+        The cache used to be keyed on issuer_url alone, so rotating the client
+        secret or changing the scopes had no effect until the process
+        restarted — the stale client, and the discovery document cached inside
+        it, were handed back unchanged (#647).
+
+        The secret is hashed rather than kept: this value lives on the manager
+        and ends up in comparisons and, one day, in somebody's debug print.
+        """
+        import hashlib
+
+        # OIDCManager, not self: _client_fingerprint is a staticmethod.
+        secret = OIDCManager._client_secret(cfg)
+        return (
+            cfg.get('issuer_url'),
+            cfg.get('client_id'),
+            hashlib.sha256(secret.encode()).hexdigest(),
+            tuple(cfg.get('scopes') or ()),
+        )
+
+    @staticmethod
+    def _client_secret(cfg: dict) -> str:
+        """The client secret, following ``client_secret_file`` / ``_env``.
+
+        Resolved HERE and not in ``_load_config`` on purpose. ``update_config``
+        loads the config, merges a partial payload onto it and writes the
+        result back; if loading resolved the reference, the first settings save
+        after a config edit would persist the secret into ``settings.json`` —
+        the exact file this mechanism exists to keep it out of.
+
+        An unresolvable reference returns '' rather than raising, and the
+        caller then fails the way a blank secret already fails. Raising here
+        would turn a missing mount into a 500 on the login page for every
+        user, including the local admin who needs to get in and fix it.
+        """
+        try:
+            return resolve_field(cfg, 'client_secret') or ''
+        except SecretReferenceError as exc:
+            logger.error(
+                "OIDC client_secret names %r, which %s — SSO will be refused "
+                "until it resolves", exc.reference, exc.reason)
+            return ''
+
     def _build_oauth_client(self, app):
         """Return a cached Authlib client bound to ``app``.
 
@@ -247,7 +321,8 @@ class OIDCManager:
         if not (cfg['enabled'] and cfg['issuer_url'] and cfg['client_id']):
             raise RuntimeError('OIDC is not enabled or fully configured')
 
-        if self._oauth is not None and self._cached_issuer == cfg['issuer_url']:
+        fingerprint = self._client_fingerprint(cfg)
+        if self._oauth is not None and self._cached_client_key == fingerprint:
             return self._oauth
 
         # Lazy import so units tests that don't exercise the flow don't
@@ -262,7 +337,7 @@ class OIDCManager:
         oauth.register(
             name='certmate_oidc',
             client_id=cfg['client_id'],
-            client_secret=cfg['client_secret'] or None,
+            client_secret=self._client_secret(cfg) or None,
             server_metadata_url=f"{issuer}/.well-known/openid-configuration",
             client_kwargs={
                 'scope': ' '.join(cfg['scopes']),
@@ -272,6 +347,7 @@ class OIDCManager:
         )
         self._oauth = oauth
         self._cached_issuer = cfg['issuer_url']
+        self._cached_client_key = fingerprint
         return oauth
 
     def _client(self, app):
@@ -315,6 +391,31 @@ class OIDCManager:
             client = self._client(current_app)
             token = client.authorize_access_token()
         except Exception as exc:
+            # An algorithm rejection is almost never a code problem: Authlib
+            # restricts the accepted signing algorithms to whatever the
+            # discovery document advertised, and that document is fetched once
+            # and cached for the life of the process. Change the signing
+            # algorithm on the IdP and CertMate keeps enforcing the old list,
+            # rejecting every login with "Algorithm of 'RS256' is not allowed"
+            # and giving the operator nothing to act on (#647).
+            #
+            # So say what the mismatch actually is, and drop the cached client
+            # so the next attempt refetches. One retry costs a discovery
+            # request; not retrying costs an SSO that never works again until
+            # somebody restarts the container.
+            if 'algorithm' in str(exc).lower() or 'alg' in str(exc).lower():
+                advertised = self._advertised_signing_algorithms()
+                logger.warning(
+                    "OIDC token exchange failed on the id_token signing "
+                    "algorithm: %s. The IdP's discovery document advertises "
+                    "%s. If the IdP was reconfigured, this cached document is "
+                    "stale — it has been dropped and the next login will "
+                    "refetch it. If the list is genuinely wrong, fix "
+                    "id_token_signing_alg_values_supported at the IdP.",
+                    str(exc).replace(chr(10), ' ').replace(chr(13), ' '),
+                    advertised or 'nothing')
+                self._invalidate_client()
+                return None, 'token_exchange_algorithm'
             logger.warning(f"OIDC token exchange failed: {exc}")
             return None, 'token_exchange'
 
@@ -376,11 +477,19 @@ class OIDCManager:
 
         Resolution order:
           1. Existing user with matching ``oidc_subject`` + ``oidc_issuer``
-             → reuse, refresh ``last_login``, do NOT change role (an admin
-             may have promoted them manually since first login).
+             → refused when the row is disabled (the same gate the local
+             password path applies — otherwise disabling an SSO user is a
+             no-op), otherwise reuse and refresh ``last_login``. The role
+             is re-derived from the current claims unless
+             ``sync_role_on_login`` is false: an IdP group change must be
+             able to demote, and CertMate is not the source of truth for
+             roles while SSO is on. Set ``sync_role_on_login: false`` to
+             keep roles managed locally (an admin promoting someone by
+             hand then survives the next login).
           2. ``link_by_email`` enabled AND existing local user with
-             matching email → link by writing ``oidc_subject`` +
-             ``oidc_issuer`` onto the existing row, preserve their role.
+             matching email → refused when that row is disabled, else link
+             by writing ``oidc_subject`` + ``oidc_issuer`` onto the
+             existing row, preserving their role.
              Gated on ``require_verified_email`` (default True): an IdP
              that does NOT attest ``email_verified=True`` for the
              authenticated subject cannot link onto an existing row.
@@ -407,6 +516,13 @@ class OIDCManager:
         email_claim = cfg.get('email_claim') or 'email'
         username_value = claims.get(username_claim) or claims.get('preferred_username') \
             or claims.get('email') or sub
+        # This is the one username CertMate does not get from an operator, so
+        # it is the one that has to be checked. A claim carrying control
+        # characters would become a key in settings['users'], a name in the UI
+        # and a value in every audit record written for that session.
+        username_value, username_err = validate_username(username_value)
+        if username_err:
+            return None, 'invalid_username'
         email = claims.get(email_claim) or claims.get('email') or ''
         # OIDC Core §5.1 specifies ``email_verified`` as a boolean. Some
         # IdPs serialise it as the string "true"/"false"; accept either
@@ -416,6 +532,16 @@ class OIDCManager:
             raw_verified is True
             or (isinstance(raw_verified, str) and raw_verified.lower() == 'true')
         )
+        # `email_verified` (OIDC Core §5.1) attests the STANDARD `email` claim
+        # only. When a custom `email_claim` is configured and its value differs
+        # from the standard `email`, email_verified does NOT cover it — an IdP
+        # that lets a user self-set the custom claim (e.g. `mail`) could present
+        # a verified throwaway standard `email` while matching an admin's address
+        # via the custom claim and inherit that row's role at the link seam.
+        # Only treat the address used for the link as verified when it IS the
+        # verified standard email.
+        standard_email = claims.get('email') or ''
+        email_is_verified = email_verified and bool(email) and email == standard_email
         role = self._map_role(claims, cfg)
 
         # Captured outcome — written by the mutator, read after update()
@@ -431,6 +557,49 @@ class OIDCManager:
             existing_by_sub = self._find_by_subject(users, sub, iss)
             if existing_by_sub:
                 username = existing_by_sub
+                # An SSO row is still a CertMate user: honour the same
+                # `enabled` gate the local-password path applies (auth.py).
+                # Without this, disabling a user was a no-op against anyone
+                # who logs in through the IdP — they simply logged back in
+                # and got a fresh session with their old role (#408).
+                if not users[username].get('enabled', True):
+                    outcome['error'] = 'user_disabled'
+                    outcome['audit'] = (
+                        'oidc_login_refused', username, 'failure',
+                        {'issuer': iss, 'reason': 'user disabled'},
+                    )
+                    return
+                # Re-derive the role from the CURRENT claims on every login,
+                # so removing someone from an admin group in the IdP actually
+                # demotes them here. Opt out with sync_role_on_login=false
+                # when roles are managed locally instead.
+                if cfg.get('sync_role_on_login', True):
+                    previous_role = users[username].get('role')
+                    if role != previous_role:
+                        # The same lockout guard update_user applies to a
+                        # demotion. Without it an IdP group edit — or a typo
+                        # in role_mappings — could take the last admin out of
+                        # the admin role, and an SSO-provisioned row has an
+                        # empty password_hash, so no local login remained to
+                        # put it back. The login still succeeds; only the
+                        # demotion is refused, and the refusal is audited so
+                        # it is not a silent disagreement with the IdP.
+                        demoting = previous_role == 'admin' and role != 'admin'
+                        if demoting and active_admin_count(users) <= 1:
+                            outcome['audit'] = (
+                                'oidc_user_role_sync_refused', username,
+                                'failure',
+                                {'issuer': iss, 'from': previous_role,
+                                 'to': role,
+                                 'reason': 'last active admin'},
+                            )
+                        else:
+                            users[username]['role'] = role
+                            outcome['audit'] = (
+                                'oidc_user_role_synced', username, 'success',
+                                {'issuer': iss, 'from': previous_role,
+                                 'to': role},
+                            )
                 users[username]['last_login'] = utc_now().isoformat()
                 outcome['username'] = username
                 return
@@ -444,17 +613,28 @@ class OIDCManager:
             if cfg.get('link_by_email') and email:
                 existing_by_email = self._find_by_email(users, email)
                 if existing_by_email:
-                    if cfg.get('require_verified_email', True) and not email_verified:
+                    if cfg.get('require_verified_email', True) and not email_is_verified:
                         outcome['error'] = 'email_not_verified'
                         outcome['audit'] = (
                             'oidc_user_link_refused',
                             existing_by_email,
                             'failure',
                             {'email': email, 'issuer': iss,
-                             'reason': 'email_verified claim missing or false'},
+                             'reason': 'email not verified (email_verified missing/false, '
+                                       'or a custom email_claim not covered by the standard '
+                                       'email_verified claim)'},
                         )
                         return
                     username = existing_by_email
+                    # Same gate as the subject-match branch: linking must not
+                    # be a way back in for a disabled account (#408).
+                    if not users[username].get('enabled', True):
+                        outcome['error'] = 'user_disabled'
+                        outcome['audit'] = (
+                            'oidc_user_link_refused', username, 'failure',
+                            {'email': email, 'issuer': iss, 'reason': 'user disabled'},
+                        )
+                        return
                     users[username]['oidc_subject'] = sub
                     users[username]['oidc_issuer'] = iss
                     users[username]['last_login'] = utc_now().isoformat()
@@ -550,9 +730,11 @@ class OIDCManager:
         """Sanitize and uniquify a candidate username.
 
         IdP-provided values may contain characters CertMate's existing
-        admin UI doesn't render well (spaces, ``@`` from email
-        fallbacks). Keep alphanumerics, dot, dash, underscore; replace
-        the rest with ``_``. Append numeric suffix on collision.
+        admin UI doesn't render well — a space, most punctuation. Keep
+        alphanumerics, dot, dash, underscore and ``@``; replace the rest
+        with ``_``. ``@`` is kept deliberately: an email fallback is a
+        perfectly good username and rewriting it to ``alice_corp.example``
+        makes it unrecognisable. Append a numeric suffix on collision.
         """
         if not candidate:
             candidate = 'oidc_user'
@@ -587,6 +769,21 @@ class OIDCManager:
             client = self._client(current_app)
             metadata = getattr(client, 'server_metadata', None) or {}
             end_session = metadata.get('end_session_endpoint')
+            if not end_session:
+                # Authlib fills ``server_metadata`` lazily, on the first
+                # authorize/token call. After a process restart a user who
+                # logged in before it has a valid session and an id_token
+                # in their cookie, but the registry is empty — so without
+                # this fetch every logout after a restart degraded to
+                # local-only until somebody logged in again (#564).
+                loader = getattr(client, 'load_server_metadata', None)
+                if callable(loader):
+                    # Some Authlib versions return the dict, others only
+                    # populate client.server_metadata — accept either.
+                    metadata = (loader()
+                                or getattr(client, 'server_metadata', None)
+                                or {})
+                    end_session = metadata.get('end_session_endpoint')
             if not end_session:
                 return None
             cfg = self._load_config()

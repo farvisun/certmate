@@ -6,6 +6,9 @@ Handles self-signed Certificate Authority generation and client certificate sign
 import logging
 import os
 import json
+import tempfile
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
@@ -18,6 +21,65 @@ from cryptography.hazmat.backends import default_backend
 
 logger = logging.getLogger(__name__)
 
+# How far back notBefore is stamped. A certificate valid from exactly "now" is
+# rejected as not-yet-valid by any relying party whose clock runs even a second
+# fast, and client certificates are typically used the instant they are issued.
+# Five minutes is what public CAs allow for the same reason.
+CLOCK_SKEW = timedelta(minutes=5)
+
+
+# Map persisted revocation-reason strings (see ClientCertificateManager
+# metadata `reason_revoked`, which is free-form and may be camelCase from the
+# API or snake_case) onto the x509 CRLReason flags. RFC 5280 says an
+# "unspecified" reason SHOULD be omitted from the CRL entry, so it is
+# deliberately absent here and treated as "no reason extension".
+_REASON_TO_FLAG = {
+    "keycompromise": x509.ReasonFlags.key_compromise,
+    "cacompromise": x509.ReasonFlags.ca_compromise,
+    "affiliationchanged": x509.ReasonFlags.affiliation_changed,
+    "superseded": x509.ReasonFlags.superseded,
+    "cessationofoperation": x509.ReasonFlags.cessation_of_operation,
+    "certificatehold": x509.ReasonFlags.certificate_hold,
+    "privilegewithdrawn": x509.ReasonFlags.privilege_withdrawn,
+    "aacompromise": x509.ReasonFlags.aa_compromise,
+    "removefromcrl": x509.ReasonFlags.remove_from_crl,
+}
+
+
+def _reason_to_flag(reason) -> Optional[x509.ReasonFlags]:
+    """Resolve a persisted reason string to a CRLReason flag, or None when no
+    meaningful reason applies (unknown / empty / 'unspecified')."""
+    if not reason:
+        return None
+    key = str(reason).replace("_", "").replace("-", "").replace(" ", "").lower()
+    return _REASON_TO_FLAG.get(key)
+
+
+def _parse_revoked_at(revoked_at) -> datetime:
+    """Parse a persisted revoked_at timestamp into an aware UTC datetime.
+
+    Metadata stores revoked_at via utc_now().isoformat() (naive, no offset),
+    but callers/tests may also pass a trailing-'Z' form. A naive value is
+    interpreted as UTC. On any parse failure we fall back to now() so a
+    malformed record still lands in the CRL rather than crashing the whole
+    regeneration."""
+    if isinstance(revoked_at, datetime):
+        dt = revoked_at
+    elif revoked_at:
+        try:
+            text = str(revoked_at).strip()
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            dt = datetime.fromisoformat(text)
+        except (ValueError, TypeError):
+            logger.warning("Unparseable revoked_at %r; using now()", revoked_at)
+            return datetime.now(timezone.utc)
+    else:
+        return datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
 
 class PrivateCAGenerator:
     """
@@ -25,7 +87,27 @@ class PrivateCAGenerator:
     Used for issuing client certificates.
     """
 
-    def __init__(self, ca_dir: Path):
+    # The subject the CA has always had. Kept exactly as it was so an install
+    # that configures nothing sees no change: this CA signs client
+    # certificates, and a different issuer name on a renewal would surprise
+    # anything pinning it.
+    DEFAULT_SUBJECT = {
+        'country': 'CH',
+        'state': 'Switzerland',
+        'organization': 'CertMate',
+        'organizational_unit': 'Certificate Authority',
+        'common_name': 'CertMate CA',
+    }
+
+    _SUBJECT_OIDS = (
+        ('country', NameOID.COUNTRY_NAME),
+        ('state', NameOID.STATE_OR_PROVINCE_NAME),
+        ('organization', NameOID.ORGANIZATION_NAME),
+        ('organizational_unit', NameOID.ORGANIZATIONAL_UNIT_NAME),
+        ('common_name', NameOID.COMMON_NAME),
+    )
+
+    def __init__(self, ca_dir: Path, subject: Optional[Dict[str, str]] = None):
         """
         Initialize Private CA Generator.
 
@@ -33,6 +115,11 @@ class PrivateCAGenerator:
             ca_dir: Directory to store CA private key and certificate
         """
         self.ca_dir = Path(ca_dir)
+        # Read when the CA is created and never again. initialize() returns
+        # early when both files are present, so editing this later cannot
+        # regenerate the CA and invalidate every certificate it has signed;
+        # that is what the deliberate reset action is for (#578).
+        self._subject = dict(subject) if subject else None
         self.ca_key_path = self.ca_dir / "ca.key"
         self.ca_cert_path = self.ca_dir / "ca.crt"
         self.ca_metadata_path = self.ca_dir / "ca_metadata.json"
@@ -41,6 +128,77 @@ class PrivateCAGenerator:
         self._ca_key = None
         self._ca_cert = None
         self._ca_loaded = False
+        # One lock per ca_dir for the whole CRL read-modify-write. generate_crl
+        # rebuilds crl.pem from the ENTIRE revoked set, and its callers
+        # (ClientCertificateManager.revoke_certificate, CRLManager.update_crl)
+        # each read that set and then regenerate. The per-identifier lock on a
+        # revocation does NOT serialise this global rebuild: two revocations of
+        # different certs take different identifier locks, so A can read the
+        # revoked set before B commits and A's crl.pem write can land after B's,
+        # dropping B's serial from the signed CRL even though both metadata files
+        # say revoked and both calls returned success. Relying parties then
+        # accept B's leaf until next_update. Hold this lock around
+        # "list revoked -> generate_crl" in every caller so the rebuild is atomic.
+        #
+        # Keyed on the resolved ca_dir in a class-level registry, not stored per
+        # instance: the factory makes one PrivateCAGenerator, but nothing stops a
+        # second instance for the same ca_dir in the same process, and a per-
+        # instance lock would let those two race the same crl.pem. Sharing by
+        # path makes the guarantee actually process-wide for a given CA.
+        self._crl_lock = self._crl_lock_for(self.ca_dir)
+
+    # ca_dir (resolved, as str) -> the shared CRL lock for that CA.
+    _crl_locks: Dict[str, "threading.Lock"] = {}
+    _crl_locks_mutex = threading.Lock()
+
+    @classmethod
+    def _crl_lock_for(cls, ca_dir: Path) -> "threading.Lock":
+        key = str(Path(ca_dir).resolve())
+        with cls._crl_locks_mutex:
+            lock = cls._crl_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                cls._crl_locks[key] = lock
+            return lock
+
+    @contextmanager
+    def crl_lock(self):
+        """Serialise the whole CRL read-modify-write (list revoked ->
+        generate_crl -> write crl.pem). Callers hold it around BOTH the read of
+        the revoked set and the generate_crl call, so a concurrent rebuild
+        cannot interleave and drop a serial."""
+        with self._crl_lock:
+            yield
+
+    @staticmethod
+    def _atomic_write_bytes(path: Path, content: bytes, mode: int) -> None:
+        """Write bytes atomically at the given mode: create a temp sibling
+        (mkstemp creates it 0600, before any content is written), set the final
+        mode, fsync, then rename over the destination.
+
+        The previous open()-write-then-chmod pattern had two defects for the CA
+        private key: a crash / SIGKILL / disk-full mid-write left a truncated,
+        unrecoverable ca.key (corrupting the root of trust); and the file
+        existed under the process umask (often 0644) for the window between
+        create and chmod, briefly exposing the root CA private key to any local
+        user. mkstemp is 0600 from the first byte and the rename is atomic, so a
+        reader sees either the whole old file or the whole new one — never a
+        partial write, and never a world-readable key. Mirrors
+        LocalFileSystemBackend._atomic_write_bytes."""
+        fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".tmp-", suffix=path.name)
+        try:
+            os.chmod(tmp_name, mode)
+            with os.fdopen(fd, "wb") as f:
+                f.write(content)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_name, path)
+        except Exception:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
 
     def initialize(self, force: bool = False) -> bool:
         """
@@ -51,17 +209,55 @@ class PrivateCAGenerator:
 
         Returns:
             True if CA was initialized/exists, False if error
+
+        Raises:
+            ValueError: the configured CA subject cannot produce a valid
+                certificate. Deliberately not swallowed into a False return:
+                the caller ignores that, so a mistyped country code would
+                leave the instance with no CA at all and the confusing error
+                would surface later, when someone tried to issue a client
+                certificate.
         """
+        # Before the try, and before anything touches the disk.
+        self._build_subject()
+
         try:
             # Create CA directory if it doesn't exist
             self.ca_dir.mkdir(parents=True, exist_ok=True)
 
+            cert_exists = self.ca_cert_path.exists()
+            key_exists = self.ca_key_path.exists()
+
             # Check if CA already exists
-            if self.ca_cert_path.exists() and self.ca_key_path.exists() and not force:
+            if cert_exists and key_exists and not force:
                 logger.info("CA already exists, loading from disk")
                 return self._load_ca()
 
-            # Generate new CA
+            # Exactly one of the two present, and not a deliberate force: this is
+            # a partial/damaged CA — a masked restore that brought back ca.crt
+            # without ca.key (key material is excluded from share-safe backups),
+            # a failed extraction, a file-level backup of one file, operator
+            # error. Falling through to _generate_ca() would overwrite the
+            # surviving half with a brand-new CA and NO backup (the backup is
+            # gated on force below), silently destroying either the ca.crt every
+            # deployed client already trusts, or the ONLY copy of the signing key
+            # (after which no CRL can ever be signed for the old CA again — every
+            # outstanding client cert becomes permanently unrevocable). Refuse,
+            # and tell the operator to restore the missing half.
+            if (cert_exists or key_exists) and not force:
+                present = 'ca.crt' if cert_exists else 'ca.key'
+                missing = 'ca.key' if cert_exists else 'ca.crt'
+                logger.error(
+                    "Partial CA on disk: %s is present but %s is missing. "
+                    "Refusing to regenerate — that would destroy the surviving "
+                    "%s with no backup. Restore %s from your backup and "
+                    "restart. To deliberately discard this CA and generate a "
+                    "new one, start once with force regeneration (which backs "
+                    "up the existing files first).",
+                    present, missing, present, missing)
+                return False
+
+            # Generate new CA (first run, or a forced regeneration).
             if force:
                 logger.warning("Force regenerating CA - backing up existing CA")
                 self._backup_existing_ca()
@@ -72,6 +268,58 @@ class PrivateCAGenerator:
         except Exception as e:
             logger.error(f"Error initializing CA: {e}")
             return False
+
+    def regenerate(self, subject: Optional[Dict[str, str]] = None) -> bool:
+        """Back up the current CA and generate a new one.
+
+        The only supported way to change the subject of a CA that already
+        exists, because `initialize()` deliberately will not: re-reading the
+        subject on every start would mean a settings edit silently replacing
+        the CA, and every certificate it had signed would stop verifying.
+
+        This does NOT remove the certificates the old CA signed. They become
+        unverifiable the moment the key changes, so leaving them behind is not
+        a kindness; ClientCertificateManager.reset_certificate_authority()
+        does both halves together and is what callers should use.
+        """
+        if subject is not None:
+            self._subject = dict(subject)
+        return self.initialize(force=True)
+
+    def _build_subject(self) -> x509.Name:
+        """The CA's subject, from configuration or from the default.
+
+        A field left empty is omitted rather than written as an empty string:
+        not every organisation has a state, and a subject carrying `ST=` with
+        nothing after it is worse than one that does not mention it. The
+        common name is the exception, because a CA with no CN is legal and
+        unreadable in every certificate viewer, so it falls back.
+        """
+        configured = self._subject
+        if configured is None:
+            configured = self.DEFAULT_SUBJECT
+
+        country = str(configured.get('country') or '').strip()
+        if country and (len(country) != 2 or not country.isalpha()):
+            # cryptography refuses this at signing time with a message about
+            # attribute lengths, which is not something an operator can act
+            # on. Refuse here, before anything is written, and say what to
+            # type: X.509 `C` is an ISO 3166-1 alpha-2 code.
+            raise ValueError(
+                f"CA subject country must be a two-letter ISO country code "
+                f"(for example 'IT', 'CH', 'US'), got {country!r}"
+            )
+
+        attributes = []
+        for field, oid in self._SUBJECT_OIDS:
+            value = str(configured.get(field) or '').strip()
+            if field == 'common_name' and not value:
+                value = self.DEFAULT_SUBJECT['common_name']
+            if field == 'country' and value:
+                value = value.upper()
+            if value:
+                attributes.append(x509.NameAttribute(oid, value))
+        return x509.Name(attributes)
 
     def _generate_ca(self) -> bool:
         """
@@ -90,13 +338,7 @@ class PrivateCAGenerator:
             )
 
             # Create CA subject and issuer (same for self-signed)
-            subject = issuer = x509.Name([
-                x509.NameAttribute(NameOID.COUNTRY_NAME, "CH"),
-                x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, "Switzerland"),
-                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "CertMate"),
-                x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Certificate Authority"),
-                x509.NameAttribute(NameOID.COMMON_NAME, "CertMate CA"),
-            ])
+            subject = issuer = self._build_subject()
 
             # Build CA certificate
             cert_builder = x509.CertificateBuilder()
@@ -105,9 +347,12 @@ class PrivateCAGenerator:
             cert_builder = cert_builder.public_key(private_key.public_key())
             cert_builder = cert_builder.serial_number(x509.random_serial_number())
 
-            # Validity: 10 years for CA
-            not_valid_before = datetime.now(timezone.utc)
-            not_valid_after = not_valid_before + timedelta(days=3650)
+            # Validity: 10 years for CA. Backdated like the leaves it
+            # signs — a CA that is not yet valid invalidates the whole chain,
+            # so this is the one that matters most on a fresh install.
+            not_valid_before = datetime.now(timezone.utc) - CLOCK_SKEW
+            not_valid_after = (datetime.now(timezone.utc)
+                               + timedelta(days=3650))
             cert_builder = cert_builder.not_valid_before(not_valid_before)
             cert_builder = cert_builder.not_valid_after(not_valid_after)
 
@@ -142,26 +387,32 @@ class PrivateCAGenerator:
                 backend=default_backend()
             )
 
-            # Save private key (PEM format)
+            # Save private key (PEM format) atomically at 0600. The key is
+            # 0600 from the first byte on disk (never world-readable under the
+            # umask) and a crash mid-write cannot corrupt the root of trust.
             logger.debug(f"Saving CA private key to {self.ca_key_path}")
-            with open(self.ca_key_path, 'wb') as f:
-                f.write(private_key.private_bytes(
+            self._atomic_write_bytes(
+                self.ca_key_path,
+                private_key.private_bytes(
                     encoding=serialization.Encoding.PEM,
                     format=serialization.PrivateFormat.TraditionalOpenSSL,
                     encryption_algorithm=serialization.NoEncryption()
-                ))
+                ),
+                0o600,
+            )
+            logger.debug("Wrote CA private key at 0600 (atomic)")
 
-            # Restrict permissions on private key (Unix-like systems)
-            try:
-                os.chmod(self.ca_key_path, 0o600)
-                logger.debug("Set CA private key permissions to 0600")
-            except Exception as e:
-                logger.warning(f"Could not set key permissions: {e}")
-
-            # Save certificate (PEM format)
+            # Save certificate (PEM format) atomically so a crash never leaves a
+            # half-written CA cert. 0600: the CA cert is served over HTTP by
+            # certmate, not read off disk by other local users, so there is no
+            # reason to make the CA's own directory world-readable (defence in
+            # depth; also unlike leaf certs which a co-located web server reads).
             logger.debug(f"Saving CA certificate to {self.ca_cert_path}")
-            with open(self.ca_cert_path, 'wb') as f:
-                f.write(ca_cert.public_bytes(serialization.Encoding.PEM))
+            self._atomic_write_bytes(
+                self.ca_cert_path,
+                ca_cert.public_bytes(serialization.Encoding.PEM),
+                0o600,
+            )
 
             # Save metadata
             self._save_ca_metadata(ca_cert, private_key)
@@ -206,6 +457,33 @@ class PrivateCAGenerator:
                     backend=default_backend()
                 )
 
+            # The key and the certificate are loaded from two separate files,
+            # and nothing guarantees they are the same generation. A share-safe
+            # backup carries ca.crt but not ca.key (key material is excluded),
+            # so restoring one over a node whose ca.key was regenerated leaves
+            # a matched-by-filename, mismatched-by-content pair. Loading it and
+            # signing anyway is silent corruption: leaf certs then fail
+            # `verify_directly_issued_by(published_ca_cert)`, and a CRL signed
+            # with the wrong key is discarded as unauthentic — revocation fails
+            # open. Refuse the pair unless the public keys actually match.
+            cert_pub = self._ca_cert.public_key().public_bytes(
+                serialization.Encoding.PEM,
+                serialization.PublicFormat.SubjectPublicKeyInfo)
+            key_pub = self._ca_key.public_key().public_bytes(
+                serialization.Encoding.PEM,
+                serialization.PublicFormat.SubjectPublicKeyInfo)
+            if cert_pub != key_pub:
+                logger.error(
+                    "CA private key does not match CA certificate — the pair is "
+                    "from different generations (e.g. a share-safe backup "
+                    "restored ca.crt without ca.key). Refusing to load: signing "
+                    "with a mismatched key silently produces certificates and "
+                    "CRLs that no relying party will accept.")
+                self._ca_loaded = False
+                self._ca_key = None
+                self._ca_cert = None
+                return False
+
             # Check CA certificate expiry
             if datetime.now(timezone.utc) > self._ca_cert.not_valid_after_utc:
                 logger.error("CA certificate has expired — cannot sign new certificates")
@@ -243,15 +521,29 @@ class PrivateCAGenerator:
                 "expires_at": cert.not_valid_after_utc.isoformat(),
                 "serial_number": str(cert.serial_number),
                 "key_size": key.key_size,
+                # Read off the certificate, not retyped. These were hardcoded
+                # to CH / CertMate, which was true only while the subject was,
+                # and would have started lying the moment it became
+                # configurable (#578).
                 "issuer": {
-                    "country": "CH",
-                    "organization": "CertMate",
-                    "common_name": common_name
+                    field: (
+                        cert.subject.get_attributes_for_oid(oid)[0].value
+                        if cert.subject.get_attributes_for_oid(oid) else None
+                    )
+                    for field, oid in self._SUBJECT_OIDS
                 }
             }
 
-            with open(self.ca_metadata_path, 'w') as f:
-                json.dump(metadata, f, indent=2)
+            # Non-secret metadata, but the whole CA dir is certmate-internal
+            # (certmate is the only on-disk reader; the CA cert is served over
+            # HTTP, not read off disk by other users), so keep it 0600 like the
+            # rest of the CA material. Written atomically so a crash never
+            # leaves a truncated / unparseable JSON file behind.
+            self._atomic_write_bytes(
+                self.ca_metadata_path,
+                json.dumps(metadata, indent=2).encode("utf-8"),
+                0o600,
+            )
 
             logger.debug(f"Saved CA metadata to {self.ca_metadata_path}")
             return True
@@ -268,7 +560,12 @@ class PrivateCAGenerator:
             True if successful
         """
         try:
-            if not self.ca_cert_path.exists():
+            # Nothing to back up only when BOTH files are absent. Guarding on
+            # ca.crt alone skipped the backup for a key-only partial CA, so a
+            # force=True regeneration from that state would overwrite the only
+            # copy of ca.key with no backup. The per-file copies below already
+            # handle whichever files are present.
+            if not self.ca_cert_path.exists() and not self.ca_key_path.exists():
                 return True
 
             # Create backup directory
@@ -384,18 +681,51 @@ class PrivateCAGenerator:
             cert_builder = cert_builder.public_key(csr.public_key())
             cert_builder = cert_builder.serial_number(x509.random_serial_number())
 
-            # Validity
-            not_valid_before = datetime.now(timezone.utc)
-            not_valid_after = not_valid_before + timedelta(days=days_valid)
+            # Validity. Backdated by CLOCK_SKEW: a certificate stamped
+            # notBefore=now is not yet valid to any relying party whose clock
+            # is a second fast, and a client certificate is routinely used
+            # the moment it is issued. Public CAs backdate for the same
+            # reason. The window only widens, so nothing that accepted a
+            # certificate before stops accepting one.
+            not_valid_before = datetime.now(timezone.utc) - CLOCK_SKEW
+            not_valid_after = (datetime.now(timezone.utc)
+                               + timedelta(days=days_valid))
             cert_builder = cert_builder.not_valid_before(not_valid_before)
             cert_builder = cert_builder.not_valid_after(not_valid_after)
 
-            # Copy extensions from CSR
-            for extension in csr.extensions:
-                cert_builder = cert_builder.add_extension(
-                    extension.value,
-                    critical=extension.critical
+            # Do NOT copy BasicConstraints / KeyUsage verbatim from the CSR.
+            # A CSR carrying BasicConstraints(ca=True) + KeyUsage(keyCertSign)
+            # would otherwise mint a CA-capable certificate under CertMate's
+            # root, letting the holder issue trusted certs for any name. Pin a
+            # leaf profile instead: ca=False (critical) and a fixed leaf
+            # KeyUsage. Only SubjectAlternativeName is carried over from the CSR.
+            cert_builder = cert_builder.add_extension(
+                x509.BasicConstraints(ca=False, path_length=None),
+                critical=True,
+            )
+            cert_builder = cert_builder.add_extension(
+                x509.KeyUsage(
+                    digital_signature=True,
+                    content_commitment=False,
+                    key_encipherment=True,
+                    data_encipherment=False,
+                    key_agreement=False,
+                    key_cert_sign=False,
+                    crl_sign=False,
+                    encipher_only=False,
+                    decipher_only=False,
+                ),
+                critical=True,
+            )
+            try:
+                san = csr.extensions.get_extension_for_oid(
+                    ExtensionOID.SUBJECT_ALTERNATIVE_NAME
                 )
+                cert_builder = cert_builder.add_extension(
+                    san.value, critical=san.critical
+                )
+            except x509.ExtensionNotFound:
+                pass
 
             # Add extended key usage if specified
             if extended_key_usage:
@@ -459,7 +789,18 @@ class PrivateCAGenerator:
         Generate a Certificate Revocation List (CRL).
 
         Args:
-            revoked_serials: List of serial numbers to revoke
+            revoked_serials: List of revoked entries. Each entry may be either:
+                * an int serial number (revocation_date defaults to now, no
+                  reason) — the legacy shape, kept for backward compatibility;
+                * a dict carrying the persisted revocation record, e.g.
+                  ``{"serial_number": <int|str>, "revoked_at": <iso str>,
+                  "reason_revoked": <str>}`` (the ``reason`` key is also
+                  accepted). The entry's revocation_date is taken from
+                  ``revoked_at`` and a CRLReason extension is added when a
+                  meaningful reason is present. Threading the persisted date
+                  through is what keeps a later regeneration from rewriting
+                  every older entry's revocation_date to "now" (which breaks
+                  date-sensitive validation).
 
         Returns:
             CRL as PEM bytes or None if error
@@ -475,13 +816,38 @@ class PrivateCAGenerator:
             crl_builder = crl_builder.last_update(datetime.now(timezone.utc))
             crl_builder = crl_builder.next_update(datetime.now(timezone.utc) + timedelta(days=7))
 
-            # Add revoked certificates
+            # Add revoked certificates, preserving each entry's persisted
+            # revocation date and reason.
+            count = 0
             if revoked_serials:
-                for serial in revoked_serials:
+                for entry in revoked_serials:
+                    if isinstance(entry, dict):
+                        raw_serial = entry.get("serial_number", 0)
+                        revoked_at = entry.get("revoked_at")
+                        reason = entry.get("reason_revoked", entry.get("reason"))
+                    else:
+                        raw_serial = entry
+                        revoked_at = None
+                        reason = None
+
+                    try:
+                        serial = int(raw_serial)
+                    except (ValueError, TypeError):
+                        logger.warning("Skipping unparseable revoked serial %r", raw_serial)
+                        continue
+                    if serial <= 0:
+                        continue
+
                     revoked_cert = x509.RevokedCertificateBuilder()
                     revoked_cert = revoked_cert.serial_number(serial)
-                    revoked_cert = revoked_cert.revocation_date(datetime.now(timezone.utc))
+                    revoked_cert = revoked_cert.revocation_date(_parse_revoked_at(revoked_at))
+                    flag = _reason_to_flag(reason)
+                    if flag is not None:
+                        revoked_cert = revoked_cert.add_extension(
+                            x509.CRLReason(flag), critical=False
+                        )
                     crl_builder = crl_builder.add_revoked_certificate(revoked_cert.build())
+                    count += 1
 
             # Sign CRL
             crl = crl_builder.sign(
@@ -490,12 +856,14 @@ class PrivateCAGenerator:
                 backend=default_backend()
             )
 
-            # Save CRL
+            # Save CRL atomically so a crash mid-write cannot leave relying
+            # parties fetching a truncated CRL. 0600: certmate serves the CRL
+            # over HTTP (get_crl_pem reads it as its own user), so the CA dir
+            # stays fully non-world-readable.
             crl_pem = crl.public_bytes(serialization.Encoding.PEM)
-            with open(self.crl_path, 'wb') as f:
-                f.write(crl_pem)
+            self._atomic_write_bytes(self.crl_path, crl_pem, 0o600)
 
-            logger.info(f"Generated CRL with {len(revoked_serials or [])} revoked certificates")
+            logger.info(f"Generated CRL with {count} revoked certificates")
             return crl_pem
 
         except Exception as e:

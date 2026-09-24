@@ -149,7 +149,7 @@
             revokeKey: function (keyId, keyName) {
                 var self = this;
                 CertMate.confirm(
-                    'آیا مطمئن هستید که می‌خواهید کلید API "' + CertMate.escapeHtml(keyName) + '" را لغو کنید؟ این عمل غیرقابل بازگشت است.',
+                    'آیا مطمئن هستید که می‌خواهید کلید API "' + keyName + '" را لغو کنید؟ این عمل غیرقابل بازگشت است.',
                     'لغو کلید API'
                 ).then(function (confirmed) {
                     if (!confirmed) return;
@@ -171,16 +171,116 @@
                 });
             },
 
+            // A key created during setup mode stays valid but is flagged: only
+            // an operator who made it can vouch for it (see auth.py).
+            confirmKey: function (keyId, keyName) {
+                var self = this;
+                CertMate.confirm(
+                    // CertMate.confirm escapes the message itself; escaping here too
+                    // would show "&amp;" for a key named "a&b".
+                    'Confirm that you created API key "' + keyName + '". '
+                    + 'It was created while this instance was in setup mode, when anyone who could '
+                    + 'reach it was served as admin. If you do not recognise it, revoke it instead.',
+                    'Confirm API key'
+                ).then(function (confirmed) {
+                    if (!confirmed) { return; }
+                    fetch('/api/keys/' + encodeURIComponent(keyId), {
+                        method: 'PATCH', credentials: 'same-origin',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ confirmed: true })
+                    })
+                        .then(function (r) {
+                            return r.json().then(function (data) {
+                                if (r.ok) {
+                                    showMessage('API key confirmed', 'success');
+                                    self.loadKeys();
+                                } else {
+                                    showMessage(data.error || 'Failed to confirm key', 'error');
+                                }
+                            });
+                        })
+                        .catch(function () { showMessage('Failed to confirm API key', 'error'); });
+                });
+            },
+
             copyToken: function () {
                 var self = this;
-                if (navigator.clipboard && self.createdToken) {
-                    navigator.clipboard.writeText(self.createdToken).then(function () {
+                if (!self.createdToken) return;
+                // Shared helper with a non-secure-context fallback (#427).
+                // navigator.clipboard is undefined over plain HTTP, which is
+                // how CertMate is commonly run on a LAN: this used to do
+                // nothing at all, silently, and the token is shown exactly
+                // once — so it was gone for good.
+                CertMate.copyText(self.createdToken).then(function (ok) {
+                    if (ok) {
                         showMessage('توکن در کلیپ‌بورد کپی شد', 'success');
-                    });
-                }
+                    } else {
+                        showMessage('کپی خودکار ممکن نشد — توکن بالا را انتخاب کرده و همین حالا کپی کنید، این توکن فقط یک بار نمایش داده می‌شود.', 'error');
+                    }
+                });
             }
         };
     }
 
     window.apiKeyManager = apiKeyManager;
+
+    // Configurable API rate limits (#319). Self-contained: reads/writes the
+    // dedicated /api/settings/rate-limits endpoint, independent of the main
+    // settings form.
+    function rateLimitManager() {
+        return {
+            enabled: true,
+            limits: {},
+            keys: [],
+            loading: true,
+            saving: false,
+            load: function () {
+                var self = this;
+                fetch('/api/settings/rate-limits', { credentials: 'same-origin' })
+                    .then(function (r) { return r.json(); })
+                    .then(function (d) {
+                        self.enabled = d.enabled !== false;
+                        self.keys = Object.keys(d.defaults || {});
+                        self.limits = Object.assign({}, d.defaults || {}, d.limits || {});
+                        self.loading = false;
+                    })
+                    .catch(function () {
+                        self.loading = false;
+                        showMessage('Failed to load rate limits', 'error');
+                    });
+            },
+            save: function () {
+                var self = this;
+                self.saving = true;
+                var limits = {};
+                self.keys.forEach(function (k) {
+                    var v = parseInt(self.limits[k], 10);
+                    if (!isNaN(v)) limits[k] = v;
+                });
+                fetch('/api/settings/rate-limits', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify({ enabled: self.enabled, limits: limits })
+                })
+                    .then(function (r) {
+                        return r.json().then(function (b) { return { ok: r.ok, b: b }; });
+                    })
+                    .then(function (res) {
+                        self.saving = false;
+                        if (res.ok) showMessage('Rate limits saved', 'success');
+                        else showMessage((res.b && res.b.error) || 'Failed to save rate limits', 'error');
+                    })
+                    .catch(function () {
+                        self.saving = false;
+                        showMessage('Failed to save rate limits', 'error');
+                    });
+            },
+            label: function (k) {
+                return k.replace(/_/g, ' ').replace(/\b\w/g, function (c) { return c.toUpperCase(); });
+            }
+        };
+    }
+
+    window.rateLimitManager = rateLimitManager;
 })();

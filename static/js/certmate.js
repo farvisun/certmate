@@ -53,7 +53,14 @@
         if (toastContainer && document.body.contains(toastContainer)) return toastContainer;
         toastContainer = document.createElement('div');
         toastContainer.id = 'cm-toasts';
-        toastContainer.className = 'fixed top-4 right-4 z-[9999] flex flex-col gap-3 max-w-sm w-full pointer-events-none';
+        // Anchor top-right on desktop; on mobile span the viewport (left-4 +
+        // right-4) instead of `right-4 w-full`, which pushed the left edge to
+        // -16px and clipped content on screens narrower than the max width.
+        toastContainer.className = 'fixed top-4 right-4 left-4 sm:left-auto z-[9999] flex flex-col gap-3 sm:max-w-sm pointer-events-none';
+        // Announce async results to assistive tech. Individual error toasts
+        // additionally get role="alert" (assertive) below.
+        toastContainer.setAttribute('aria-live', 'polite');
+        toastContainer.setAttribute('aria-atomic', 'false');
         document.body.appendChild(toastContainer);
         return toastContainer;
     }
@@ -99,6 +106,11 @@
 
         var toast = document.createElement('div');
         toast.className = 'pointer-events-auto relative border rounded-lg shadow-lg p-4 flex flex-col gap-2 transform translate-x-full opacity-0 transition-all duration-300 overflow-hidden ' + (TOAST_COLORS[type] || TOAST_COLORS.info);
+        // Errors are assertive (interrupt the screen reader); the polite
+        // container handles success/info without interrupting.
+        if (type === 'error') {
+            toast.setAttribute('role', 'alert');
+        }
 
         var headerHtml =
             '<div class="flex items-start gap-3">' +
@@ -193,15 +205,48 @@
         return overlay;
     }
 
-    function createDialogBox(title, bodyHtml) {
+    var dialogSeq = 0;
+    function createDialogBox(title, bodyHtml, role) {
         var box = document.createElement('div');
+        var titleId = 'cm-dialog-title-' + (++dialogSeq);
+        // Dialog semantics so assistive tech announces this as a modal dialog
+        // and scopes the user inside it. 'alertdialog' for confirm (a decision
+        // is required), 'dialog' for prompt/info.
+        box.setAttribute('role', role || 'dialog');
+        box.setAttribute('aria-modal', 'true');
+        box.setAttribute('aria-labelledby', titleId);
+        box.setAttribute('tabindex', '-1');
         box.className = 'relative bg-surface rounded-xl shadow-2xl w-full max-w-md border border-border transform scale-95 opacity-0 transition-all duration-200';
         box.innerHTML =
             '<div class="px-6 py-4 border-b border-border">' +
-                '<h3 class="text-lg font-semibold text-foreground">' + CM.escapeHtml(title) + '</h3>' +
+                '<h3 id="' + titleId + '" class="text-lg font-semibold text-foreground">' + CM.escapeHtml(title) + '</h3>' +
             '</div>' +
             '<div class="px-6 py-4">' + bodyHtml + '</div>';
         return box;
+    }
+
+    // Trap Tab focus inside a dynamically-created overlay and restore focus to
+    // the previously-focused element when it closes. Mirrors the [data-modal-
+    // root] machinery below, for the JS-built confirm/prompt overlays that
+    // aren't static modal roots.
+    function trapOverlayFocus(overlay) {
+        var prevFocus = document.activeElement;
+        overlay.addEventListener('keydown', function (e) {
+            if (e.key !== 'Tab') return;
+            var f = overlay.querySelectorAll(FOCUSABLE_SELECTOR);
+            if (!f.length) { e.preventDefault(); return; }
+            var first = f[0], last = f[f.length - 1];
+            if (e.shiftKey && document.activeElement === first) {
+                e.preventDefault(); last.focus();
+            } else if (!e.shiftKey && document.activeElement === last) {
+                e.preventDefault(); first.focus();
+            }
+        });
+        return function restoreFocus() {
+            if (prevFocus && typeof prevFocus.focus === 'function') {
+                try { prevFocus.focus(); } catch (e) { /* element gone */ }
+            }
+        };
     }
 
     function animateIn(overlay, box) {
@@ -240,8 +285,9 @@
                     '<button data-action="confirm" class="' + (danger ? BTN_DANGER : BTN_PRIMARY) + '">' + CM.escapeHtml(options.confirmText || 'تایید') + '</button>' +
                 '</div>';
 
-            var box = createDialogBox(title, bodyHtml);
+            var box = createDialogBox(title, bodyHtml, 'alertdialog');
             overlay.appendChild(box);
+            var restoreFocus = trapOverlayFocus(overlay);
             animateIn(overlay, box);
 
             var confirmBtn = box.querySelector('[data-action="confirm"]');
@@ -249,6 +295,7 @@
 
             function close(result) {
                 animateOut(overlay);
+                restoreFocus();
                 resolve(result);
             }
 
@@ -256,8 +303,10 @@
             cancelBtn.addEventListener('click', function() { close(false); });
             overlay.querySelector('.absolute').addEventListener('click', function() { close(false); });
 
-            // Focus confirm button, handle Escape
-            setTimeout(function() { confirmBtn.focus(); }, 50);
+            // Focus the safe choice (Cancel) for destructive prompts so an
+            // inadvertent Enter doesn't confirm a delete/revoke before the
+            // message is read; focus Confirm for non-destructive ones.
+            setTimeout(function() { (danger ? cancelBtn : confirmBtn).focus(); }, 50);
             overlay.addEventListener('keydown', function(e) {
                 if (e.key === 'Escape') close(false);
             });
@@ -283,6 +332,7 @@
 
             var box = createDialogBox(title, bodyHtml);
             overlay.appendChild(box);
+            var restoreFocus = trapOverlayFocus(overlay);
             animateIn(overlay, box);
 
             var input = box.querySelector('input');
@@ -291,6 +341,7 @@
 
             function close(value) {
                 animateOut(overlay);
+                restoreFocus();
                 resolve(value);
             }
 
@@ -300,6 +351,10 @@
 
             input.addEventListener('keydown', function(e) {
                 if (e.key === 'Enter') close(input.value);
+            });
+            // Escape at the overlay level so it works regardless of which
+            // control (input or button) currently holds focus.
+            overlay.addEventListener('keydown', function(e) {
                 if (e.key === 'Escape') close(null);
             });
 
@@ -548,6 +603,48 @@
         });
     }
 
+
+    /**
+     * Copy text to the clipboard, with a fallback for non-secure contexts.
+     *
+     * navigator.clipboard is undefined over plain HTTP, which is how CertMate
+     * is commonly run on a LAN. Callers that only used the async API silently
+     * did nothing there — and for a one-time API key that means the token is
+     * gone for good (#427).
+     *
+     * Returns a Promise<boolean>: true when the text reached the clipboard.
+     * Never rejects, so callers can decide what to tell the user.
+     */
+    CM.copyText = function(text) {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            return navigator.clipboard.writeText(text)
+                .then(function() { return true; })
+                .catch(function() { return CM._copyTextFallback(text); });
+        }
+        return Promise.resolve(CM._copyTextFallback(text));
+    };
+
+    CM._copyTextFallback = function(text) {
+        var textarea = document.createElement('textarea');
+        textarea.value = text;
+        // Off-screen but focusable: execCommand needs a real selection.
+        textarea.style.position = 'fixed';
+        textarea.style.top = '0';
+        textarea.style.left = '0';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        var ok = false;
+        try {
+            ok = document.execCommand('copy');
+        } catch (err) {
+            ok = false;
+        }
+        document.body.removeChild(textarea);
+        return ok;
+    };
+
     CM.copyDiagnosticsSnapshot = function(buttonEl) {
         var originalText = buttonEl ? buttonEl.innerHTML : '';
         if (buttonEl) {
@@ -557,27 +654,13 @@
         return CM.api('GET', '/api/diagnostics/snapshot')
             .then(function(data) {
                 var text = JSON.stringify(data, null, 2);
-                if (navigator.clipboard && navigator.clipboard.writeText) {
-                    return navigator.clipboard.writeText(text).then(function() {
+                return CM.copyText(text).then(function(ok) {
+                    if (ok) {
                         CM.toast('اسنپ‌شات عیب‌یابی در کلیپ‌بورد کپی شد!', 'success');
-                    });
-                } else {
-                    // Fallback using temporary textarea
-                    var textarea = document.createElement('textarea');
-                    textarea.value = text;
-                    textarea.style.position = 'fixed';
-                    textarea.style.opacity = '0';
-                    document.body.appendChild(textarea);
-                    textarea.select();
-                    try {
-                        document.execCommand('copy');
-                        CM.toast('اسنپ‌شات عیب‌یابی در کلیپ‌بورد کپی شد!', 'success');
-                    } catch (err) {
-                        CM.toast('کپی اسنپ‌شات ناموفق بود. آن را به صورت دستی از کنسول کپی کنید.', 'error');
-                        console.info('[CertMate] clipboard fallback used — snapshot text available in variable');
+                    } else {
+                        CM.toast('کپی اسنپ‌شات ممکن نشد — مرورگر شما دسترسی به کلیپ‌بورد را مسدود کرد.', 'error');
                     }
-                    document.body.removeChild(textarea);
-                }
+                });
             })
             .catch(function(err) {
                 CM.toast('بازیابی اسنپ‌شات عیب‌یابی ناموفق بود: ' + (err.message || err), 'error');
@@ -588,6 +671,22 @@
                     buttonEl.innerHTML = originalText;
                 }
             });
+    };
+
+    // ── Scroll lock (modals) ─────────────────────────────────────
+    // Stop the page behind an open modal from scrolling on wheel/touch. The
+    // page scroller is <html> (base.html sets `overflow-y: scroll`), so we
+    // toggle overflow there; scrollbar-gutter:stable keeps the layout from
+    // shifting when the scrollbar is removed. Counter-based so stacked modals
+    // don't unlock the page prematurely.
+    var _scrollLocks = 0;
+    CM.lockScroll = function () {
+        _scrollLocks++;
+        document.documentElement.style.overflow = 'hidden';
+    };
+    CM.unlockScroll = function () {
+        _scrollLocks = Math.max(0, _scrollLocks - 1);
+        if (_scrollLocks === 0) document.documentElement.style.overflow = '';
     };
 
     // ── Expose globally ──────────────────────────────────────────

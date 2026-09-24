@@ -1,8 +1,35 @@
 <!-- TAB: General Settings -->
-                    <div x-show="tab === 'general'" x-cloak>
+                    <div x-show="tab === 'general'" x-cloak id="settings-panel-general" role="tabpanel" aria-labelledby="settings-tab-general" tabindex="0">
+                    <!-- Appearance Section — client-side display preference (stored in
+                         localStorage, not the server settings form). Auto follows the OS
+                         colour scheme; Light / Dark force an override. Buttons call the
+                         global setTheme() defined in base.html; aria-pressed drives both
+                         the active styling and the screen-reader announcement. -->
+                    <div class="pb-2">
+                        <h4 class="text-base font-semibold text-foreground mb-3">
+                            <i class="fas fa-palette mr-1 text-primary"></i>
+                            ظاهر
+                        </h4>
+                        <label class="block text-xs font-medium text-muted mb-2">پوسته</label>
+                        <div class="inline-flex rounded-lg border border-border bg-surface-2 p-0.5" role="group" aria-label="ترجیح پوسته">
+                            <button type="button" data-theme-option="auto" onclick="setTheme('auto')" aria-pressed="false"
+                                    class="inline-flex items-center px-3 py-1.5 text-sm rounded-md text-muted hover:text-foreground transition aria-pressed:bg-surface aria-pressed:text-foreground aria-pressed:shadow-sm aria-pressed:ring-1 aria-pressed:ring-primary">
+                                <i class="fas fa-circle-half-stroke mr-1.5" aria-hidden="true"></i>خودکار
+                            </button>
+                            <button type="button" data-theme-option="light" onclick="setTheme('light')" aria-pressed="false"
+                                    class="inline-flex items-center px-3 py-1.5 text-sm rounded-md text-muted hover:text-foreground transition aria-pressed:bg-surface aria-pressed:text-foreground aria-pressed:shadow-sm aria-pressed:ring-1 aria-pressed:ring-primary">
+                                <i class="fas fa-sun mr-1.5" aria-hidden="true"></i>روشن
+                            </button>
+                            <button type="button" data-theme-option="dark" onclick="setTheme('dark')" aria-pressed="false"
+                                    class="inline-flex items-center px-3 py-1.5 text-sm rounded-md text-muted hover:text-foreground transition aria-pressed:bg-surface aria-pressed:text-foreground aria-pressed:shadow-sm aria-pressed:ring-1 aria-pressed:ring-primary">
+                                <i class="fas fa-moon mr-1.5" aria-hidden="true"></i>تیره
+                            </button>
+                        </div>
+                        <p class="mt-2 text-xs text-muted">حالت خودکار از تنظیم روشن یا تیره سیستم‌عامل شما پیروی می‌کند.</p>
+                    </div>
                     <!-- General Certificate Settings Section -->
-                    <div class="bg-gray-50 dark:bg-gray-700/50 p-4 rounded-lg">
-                         <h4 class="text-sm font-medium text-label mb-3">
+                    <div class="border-t border-border pt-6 mt-6">
+                        <h4 class="text-base font-semibold text-foreground mb-3">
                             <i class="fas fa-cogs mr-1 text-primary"></i>
                             تنظیمات مدیریت گواهی
                         </h4>
@@ -20,6 +47,29 @@
                                 </p>
                             </div>
                             
+                            <!-- Update check (#855). Off by default and it stays
+                                 off until someone here says otherwise: an
+                                 instance that was never asked to reach the
+                                 internet must not, which is the promise
+                                 docs/ca-providers.md makes to air-gapped
+                                 deployments. This control shipped missing, so
+                                 the only way to turn it on was to edit
+                                 settings.json by hand. -->
+                            <div>
+                                <label class="flex items-center">
+                                    <input type="checkbox" id="update_check_enabled"
+                                           name="update_check_enabled"
+                                           class="rounded border-border text-primary focus:ring-primary focus:ring-offset-0 dark:bg-gray-700">
+                                    <span class="ml-2 text-sm text-label">بررسی نسخه‌های جدید CertMate در GitHub</span>
+                                </label>
+                                <p class="mt-1 text-xs text-muted">
+                                    به‌طور پیش‌فرض خاموش است. در صورت فعال بودن، این نمونه
+                                    روزی یک بار با api.github.com ارتباط می‌گیرد و پانویس صفحه
+                                    وجود نسخه جدیدتر را اعلام می‌کند. بررسی‌ای که به GitHub
+                                    دسترسی نداشته باشد <em>نامشخص</em> گزارش می‌دهد، هرگز &ldquo;به‌روز&rdquo;.
+                                </p>
+                            </div>
+
                             <!-- Renewal Threshold Setting -->
                             <div>
                                  <label class="block text-xs font-medium text-muted mb-2">
@@ -27,8 +77,8 @@
                                 </label>
                                 <input type="number" id="renewal_threshold_days" name="renewal_threshold_days" 
                                        min="1" max="90" value="30"
-                                       class="w-32 px-3 py-2 border border-border rounded-md shadow-sm focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white text-sm">
-                                 <p class="mt-1 text-xs text-muted">
+                                       class="w-32 px-3 py-2 border border-border rounded-md shadow-sm focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground text-sm">
+                                <p class="mt-1 text-xs text-muted">
                                     تمدید گواهی‌ها هنگامی که این تعداد روز تا انقضا باقی مانده باشد (پیش‌فرض: ۳۰ روز)
                                 </p>
                             </div>
@@ -40,8 +90,8 @@
                                 </label>
                                 <input type="number" id="cache_ttl" name="cache_ttl"
                                        min="0" max="86400" value="300"
-                                       class="w-32 px-3 py-2 border border-border rounded-md shadow-sm focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white text-sm">
-                                 <p class="mt-1 text-xs text-muted">
+                                       class="w-32 px-3 py-2 border border-border rounded-md shadow-sm focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground text-sm">
+                                <p class="mt-1 text-xs text-muted">
                                     مدت زمان کش کردن پاسخ‌های DNS (پیش‌فرض: ۳۰۰ ثانیه)
                                 </p>
                             </div>
@@ -53,9 +103,9 @@
                                 </label>
                                 <input type="password" id="pfx_password" name="pfx_password"
                                        autocomplete="new-password"
-                                        placeholder="برای غیرفعال کردن خالی بگذارید / حفظ فعلی"
-                                       class="w-72 px-3 py-2 border border-border rounded-md shadow-sm focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white text-sm">
-                                 <p class="mt-1 text-xs text-muted">
+                                       placeholder="برای غیرفعال کردن خالی بگذارید / حفظ فعلی"
+                                       class="w-72 px-3 py-2 border border-border rounded-md shadow-sm focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground text-sm">
+                                <p class="mt-1 text-xs text-muted">
                                     هنگامی که تنظیم شود، هر گواهی به صورت <code class="text-xs">cert.pfx</code> (PKCS#12) رمزگذاری شده نیز با این رمز نوشته می‌شود، قابل دانلود برای میزبان‌های ویندوز. برای غیرفعال کردن خالی بگذارید. مانند سایر رمزها ذخیره شده و پس از ذخیره دیگر نمایش داده نمی‌شود.
                                 </p>
                             </div>
@@ -74,7 +124,7 @@
                                          <label for="default_key_type" class="block text-xs font-medium text-muted mb-1">نوع کلید</label>
                                         <select id="default_key_type" name="default_key_type"
                                                 onchange="toggleDefaultKeyOptions()"
-                                                class="w-full px-3 py-2 border border-border rounded-md shadow-sm focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white text-sm">
+                                                class="w-full px-3 py-2 border border-border rounded-md shadow-sm focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground text-sm">
                                             <option value="rsa">RSA</option>
                                             <option value="ecdsa">ECDSA</option>
                                         </select>
@@ -82,8 +132,8 @@
                                     <div id="default_key_size_container">
                                          <label for="default_key_size" class="block text-xs font-medium text-muted mb-1">اندازه کلید RSA</label>
                                         <select id="default_key_size" name="default_key_size"
-                                                class="w-full px-3 py-2 border border-border rounded-md shadow-sm focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white text-sm">
-                                             <option value="2048">۲۰۴۸ بیت (پیش‌فرض)</option>
+                                                class="w-full px-3 py-2 border border-border rounded-md shadow-sm focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground text-sm">
+                                            <option value="2048">۲۰۴۸ بیت (پیش‌فرض)</option>
                                             <option value="3072">۳۰۷۲ بیت</option>
                                             <option value="4096">۴۰۹۶ بیت</option>
                                         </select>
@@ -91,8 +141,8 @@
                                     <div id="default_elliptic_curve_container" style="display: none;">
                                          <label for="default_elliptic_curve" class="block text-xs font-medium text-muted mb-1">منحنی ECDSA</label>
                                         <select id="default_elliptic_curve" name="default_elliptic_curve"
-                                                class="w-full px-3 py-2 border border-border rounded-md shadow-sm focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white text-sm">
-                                             <option value="secp256r1">secp256r1 / P-256 (پیش‌فرض)</option>
+                                                class="w-full px-3 py-2 border border-border rounded-md shadow-sm focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground text-sm">
+                                            <option value="secp256r1">secp256r1 / P-256 (پیش‌فرض)</option>
                                             <option value="secp384r1">secp384r1 / P-384</option>
                                         </select>
                                     </div>
@@ -102,8 +152,8 @@
                     </div>
 
                     <!-- API Security Settings Section -->
-                    <div class="bg-gray-50 dark:bg-gray-700/50 p-4 rounded-lg">
-                         <h4 class="text-sm font-medium text-label mb-3">
+                    <div class="border-t border-border pt-6 mt-6">
+                        <h4 class="text-base font-semibold text-foreground mb-3">
                             <i class="fas fa-key mr-1 text-primary"></i>
                             تنظیمات امنیت API
                         </h4>
@@ -116,15 +166,15 @@
                                 </label>
                                 <div class="flex items-center space-x-2">
                                     <input type="password" id="api_bearer_token" name="api_bearer_token" 
-                                            placeholder="یک توکن امن برای احراز هویت API وارد کنید"
-                                           class="flex-1 px-3 py-2 border border-border rounded-md shadow-sm focus:outline-none focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white text-sm">
+                                           placeholder="یک توکن امن برای احراز هویت API وارد کنید"
+                                           class="flex-1 px-3 py-2 border border-border rounded-md shadow-sm focus:outline-none focus:ring-primary focus:border-primary bg-input text-foreground text-sm">
                                     <button type="button" onclick="toggleTokenVisibility()" 
                                             class="px-3 py-2 text-muted hover:text-gray-700 dark:hover:text-gray-200">
                                         <i class="fas fa-eye" id="tokenToggleIcon"></i>
                                     </button>
-                                    <button type="button" onclick="generateToken()" 
-                                            class="px-3 py-2 bg-gray-100 dark:bg-gray-600 text-gray-700 dark:text-gray-200 rounded-md hover:bg-gray-200 dark:hover:bg-gray-500 text-sm">
-                                         <i class="fas fa-random mr-1"></i> تولید
+                                    <button type="button" onclick="generateToken()"
+                                            class="px-3 py-2 border border-primary text-primary rounded-md hover:bg-primary hover:text-white text-sm transition-colors">
+                                        <i class="fas fa-random mr-1"></i> تولید
                                     </button>
                                 </div>
                                  <p class="mt-1 text-xs text-muted">

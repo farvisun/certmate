@@ -1,5 +1,6 @@
 <!-- TAB: API Keys Management -->
         <div x-show="tab === 'apikeys'" x-cloak
+             id="settings-panel-apikeys" role="tabpanel" aria-labelledby="settings-tab-apikeys" tabindex="0"
              x-data="apiKeyManager()" x-init="loadKeys()"
              class="bg-surface border-border rounded-lg shadow-sm border p-6 mt-6">
 
@@ -22,12 +23,12 @@
                     <div>
                          <label class="block text-xs text-muted mb-1">نام کلید</label>
                         <input type="text" x-model="newKey.name" placeholder="e.g., CI/CD Pipeline"
-                               class="w-full px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white" maxlength="64">
+                               class="w-full px-3 py-2 border border-border rounded-md text-sm bg-input text-foreground" maxlength="64">
                     </div>
                     <div>
-                         <label class="block text-xs text-muted mb-1">نقش</label>
-                        <select x-model="newKey.role" title="API key role" class="w-full px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white">
-                             <option value="viewer">مشاهده‌گر (فقط خواندن)</option>
+                        <label class="block text-xs text-muted mb-1">نقش</label>
+                        <select x-model="newKey.role" title="API key role" class="w-full px-3 py-2 border border-border rounded-md text-sm bg-input text-foreground">
+                            <option value="viewer">مشاهده‌گر (فقط خواندن)</option>
                             <option value="operator">اپراتور (خواندن + نوشتن)</option>
                             <option value="admin">مدیر (دسترسی کامل)</option>
                         </select>
@@ -35,7 +36,7 @@
                     <div>
                          <label class="block text-xs text-muted mb-1">تاریخ انقضا (اختیاری)</label>
                         <input type="date" x-model="newKey.expires_at" title="Expiration date"
-                               class="w-full px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white">
+                               class="w-full px-3 py-2 border border-border rounded-md text-sm bg-input text-foreground">
                     </div>
                 </div>
                 <div class="mt-4">
@@ -47,10 +48,10 @@
                     </label>
                     <div class="flex items-center space-x-2">
                         <input type="text" x-model="newKey.allowed_domains" placeholder="example.com, *.foo.org   (empty = unrestricted)"
-                               class="flex-1 px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white">
+                               class="flex-1 px-3 py-2 border border-border rounded-md text-sm bg-input text-foreground">
                         <button type="button" @click="createKey()"
-                                class="px-4 py-2 bg-yellow-600 text-white rounded-md hover:bg-yellow-700 text-sm whitespace-nowrap">
-                             <i class="fas fa-plus mr-1"></i> ایجاد
+                                class="btn btn-primary whitespace-nowrap">
+                            <i class="fas fa-plus mr-1"></i> ایجاد
                         </button>
                     </div>
                      <p class="mt-1 text-xs text-muted">
@@ -114,6 +115,18 @@
                                         <template x-if="keys[keyId].revoked">
                                             <span class="text-xs px-2 py-0.5 rounded-full bg-danger-surface text-danger-strong">revoked</span>
                                         </template>
+                                        <template x-if="keys[keyId].needs_review">
+                                            <span class="text-xs px-2 py-0.5 rounded-full bg-danger-surface text-danger-strong"
+                                                  title="Created while this instance was in setup mode, when every request was served as admin to anyone who could reach it. Nobody can vouch for who created it. Confirm it if you made it; revoke it otherwise.">
+                                                <i class="fas fa-triangle-exclamation mr-1"></i>created during setup: review
+                                            </span>
+                                        </template>
+                                        <template x-if="keys[keyId].created_during_setup && keys[keyId].setup_origin_confirmed_at">
+                                            <span class="text-xs px-2 py-0.5 rounded-full bg-surface-2 text-muted"
+                                                  :title="'Created during setup; confirmed by ' + (keys[keyId].setup_origin_confirmed_by || '?') + ' on ' + new Date(keys[keyId].setup_origin_confirmed_at).toLocaleDateString()">
+                                                created during setup: confirmed
+                                            </span>
+                                        </template>
                                         <template x-if="keys[keyId].is_expired && !keys[keyId].revoked">
                                             <span class="text-xs px-2 py-0.5 rounded-full bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-300">expired</span>
                                         </template>
@@ -141,6 +154,12 @@
                                     </div>
                                 </div>
                             </div>
+                            <template x-if="keys[keyId].needs_review">
+                                <button type="button" @click="confirmKey(keyId, keys[keyId].name)"
+                                        class="p-2 text-success-fg hover:text-green-800 dark:hover:text-green-300" title="Confirm: I created this key">
+                                    <i class="fas fa-check"></i>
+                                </button>
+                            </template>
                             <template x-if="!keys[keyId].revoked">
                                 <button type="button" @click="revokeKey(keyId, keys[keyId].name)"
                                         class="p-2 text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300" title="Revoke key">
@@ -160,6 +179,46 @@
                         توکن API قدیمی (پیکربندی شده در تب عمومی) با دسترسی کامل مدیر به کار خود ادامه می‌دهد. ادغام‌های جدید باید از کلیدهای API محدود شده استفاده کنند.
                     </p>
                 </div>
+            </div>
+        </div>
+
+        <!-- TAB: API Keys — Configurable API rate limits (#319) -->
+        <div x-show="tab === 'apikeys'" x-cloak
+             x-data="rateLimitManager()" x-init="load()"
+             class="bg-surface border-border rounded-lg shadow-sm border p-6 mt-6">
+
+            <div class="flex items-center justify-between mb-4">
+                <h3 class="text-lg font-semibold text-foreground flex items-center">
+                    <i class="fas fa-gauge-high mr-2 text-primary"></i>
+                    API Rate Limits
+                </h3>
+                <label class="inline-flex items-center cursor-pointer text-sm text-muted">
+                    <input type="checkbox" x-model="enabled" class="mr-2" title="Enable API rate limiting">
+                    Enabled
+                </label>
+            </div>
+
+            <p class="text-muted text-sm mb-6">
+                Requests per minute per client &mdash; per API key, or per IP for session and anonymous requests. Raise these if a trusted automation fleet behind one address trips a shared bucket. Turning the toggle off disables API rate limiting entirely.
+            </p>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4" :class="enabled ? '' : 'opacity-50'">
+                <template x-for="k in keys" :key="k">
+                    <div>
+                        <label class="block text-xs text-muted mb-1" x-text="label(k)"></label>
+                        <input type="number" min="1" max="100000" x-model.number="limits[k]" :disabled="!enabled"
+                               :aria-label="label(k) + ' requests per minute'"
+                               class="w-full px-3 py-2 border border-border rounded-md text-sm bg-input text-foreground">
+                    </div>
+                </template>
+            </div>
+
+            <div class="mt-6 flex justify-end">
+                <button type="button" @click="save()" :disabled="saving" title="Save rate limits"
+                        class="px-4 py-2 bg-yellow-600 text-white rounded-md hover:bg-yellow-700 text-sm whitespace-nowrap">
+                    <i class="fas fa-save mr-1"></i>
+                    <span x-text="saving ? 'Saving...' : 'Save Rate Limits'"></span>
+                </button>
             </div>
         </div>
 

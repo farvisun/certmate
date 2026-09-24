@@ -24,7 +24,20 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 
-from modules.api.resources import _tls_probe_timeout_seconds, _probe_https_certificate
+from modules.api.resources import _tls_probe_timeout_seconds, _probe_tls_certificate
+
+
+pytestmark = [pytest.mark.unit]
+
+
+@pytest.fixture(autouse=True)
+def _no_proxy_env(monkeypatch):
+    """These tests exercise the direct-socket probe path. Clear proxy env so a
+    runner that happens to have HTTPS_PROXY set doesn't route the probe through
+    the CONNECT tunnel instead (proxy tunnelling is covered in
+    test_tls_probe_proxy.py)."""
+    for var in ('HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy'):
+        monkeypatch.delenv(var, raising=False)
 
 
 # ---- _tls_probe_timeout_seconds -------------------------------------------
@@ -53,7 +66,7 @@ def test_env_var_clamp_and_fallback(monkeypatch, raw, expected):
     assert _tls_probe_timeout_seconds() == expected
 
 
-# ---- _probe_https_certificate slow-warning -------------------------------
+# ---- _probe_tls_certificate slow-warning -------------------------------
 
 
 def test_slow_probe_logs_warning(caplog):
@@ -67,12 +80,12 @@ def test_slow_probe_logs_warning(caplog):
         raise ConnectionRefusedError("simulated unreachable")
 
     with caplog.at_level(logging.WARNING, logger="modules.api.resources"):
-        with patch('modules.api.resources.socket.create_connection',
+        with patch('modules.api.tls_probe.socket.create_connection',
                    side_effect=slow_create_connection):
             with pytest.raises(ConnectionRefusedError):
-                _probe_https_certificate('example.com', timeout=2)
+                _probe_tls_certificate('example.com', timeout=2)
 
-    warned = [r for r in caplog.records if 'Slow TLS probe' in r.message]
+    warned = [r for r in caplog.records if 'Slow' in r.message and 'probe' in r.message]
     assert len(warned) == 1, (
         f"Expected one 'Slow TLS probe' warning; got {[r.message for r in caplog.records]}"
     )
@@ -94,21 +107,21 @@ def test_fast_probe_does_not_log_warning(caplog):
     mock_context.wrap_socket.return_value = mock_tls_sock
 
     with caplog.at_level(logging.WARNING, logger="modules.api.resources"):
-        with patch('modules.api.resources.socket.create_connection',
+        with patch('modules.api.tls_probe.socket.create_connection',
                    return_value=mock_sock):
-            with patch('modules.api.resources.ssl.create_default_context',
+            with patch('modules.api.tls_probe.ssl.create_default_context',
                        return_value=mock_context):
-                result = _probe_https_certificate('fast.example.com', timeout=2)
+                result = _probe_tls_certificate('fast.example.com', timeout=2)
 
     assert result['reachable'] is True
-    warned = [r for r in caplog.records if 'Slow TLS probe' in r.message]
+    warned = [r for r in caplog.records if 'Slow' in r.message and 'probe' in r.message]
     assert warned == [], (
         f"Fast probe must not log slow warning; got {[r.message for r in warned]}"
     )
 
 
 def test_probe_uses_env_var_when_timeout_not_passed(monkeypatch):
-    """When _probe_https_certificate is called with timeout=None, it must
+    """When _probe_tls_certificate is called with timeout=None, it must
     pick up CERTMATE_TLS_PROBE_TIMEOUT_SECONDS so deployment-time tuning
     actually takes effect."""
     monkeypatch.setenv('CERTMATE_TLS_PROBE_TIMEOUT_SECONDS', '4.5')
@@ -119,10 +132,10 @@ def test_probe_uses_env_var_when_timeout_not_passed(monkeypatch):
         captured_timeout['value'] = timeout
         raise ConnectionRefusedError("simulated")
 
-    with patch('modules.api.resources.socket.create_connection',
+    with patch('modules.api.tls_probe.socket.create_connection',
                side_effect=capturing_create_connection):
         with pytest.raises(ConnectionRefusedError):
-            _probe_https_certificate('example.com')  # timeout=None
+            _probe_tls_certificate('example.com')  # timeout=None
 
     assert captured_timeout['value'] == 4.5
 

@@ -11,8 +11,9 @@ from collections import deque
 from pathlib import Path
 
 from modules import __version__ as _CERTMATE_VERSION
-from .constants import iter_cert_domain_dirs
-from .file_operations import FileOperations
+from .constants import SETTINGS_SCHEMA_VERSION, iter_cert_domain_dirs
+from .domain_entries import normalize_domains, normalize_entry
+from .file_operations import FileOperations, _backup_passphrase
 from .utils import (
     generate_secure_token, validate_email, validate_api_token, validate_domain,
     validate_key_options,
@@ -42,6 +43,17 @@ PUBLIC_SETTINGS_WRITABLE_KEYS = frozenset({
     'certificate_storage',
     'backup_storage',          # off-site backup target (S3-compatible)
     'notifications',
+    'rate_limits',             # configurable API rate limits (#319); no side-effects
+    # Endpoints the operator wants watched for certificate discovery (#469).
+    # Pure config (host[:port] list + toggles); the sweep runs as a scheduled
+    # job, so writing this has no immediate side effects.
+    'monitored_endpoints',
+    # Domains to watch in Certificate Transparency logs (#470). Pure config;
+    # the crt.sh poll runs as a scheduled job.
+    'ct_monitoring',
+    # SIEM audit sink (#474): collector host/port/format for streaming audit
+    # events. No secrets; the sink reads it live.
+    'audit_sink',
     'setup_completed',
     # Per-install "stop nagging me with the first-run wizard" flag. Distinct
     # from setup_completed, which must stay truthful for recovery/downgrade
@@ -65,6 +77,14 @@ PUBLIC_SETTINGS_WRITABLE_KEYS = frozenset({
     # Empty/unset disables the export. Masked on GET and preserved on POST by
     # the generic secret machinery (name matches the secret regex).
     'pfx_password',
+    # Subject of the private CA that signs client certificates. docs/api.md
+    # has said since contract 2.3 that it "comes from client_ca_subject in
+    # settings", and the key was not on this list — so the documented POST
+    # answered 400 "Unknown fields in payload" and the only way to set it was
+    # to hand-edit settings.json. Pure config: factory.py reads it when the
+    # CA is generated, which is also why writing it later has no effect until
+    # POST /api/client-certs/ca/reset.
+    'client_ca_subject',
 })
 
 # Keys whose mutation via the bulk settings endpoint would create a privilege
@@ -91,6 +111,16 @@ SETTINGS_REJECT_KEYS = frozenset({
 
 SECRET_MASK_SENTINEL = '********'
 
+
+class SettingsUnreadableError(RuntimeError):
+    """settings.json is present but unusable, and no backup can replace it.
+
+    Raised instead of silently recreating the file. app.py wraps create_app in
+    try/except and exits 1, so the operator gets one clear line and a container
+    that stops, rather than an instance that came up with every credential set
+    to the mask sentinel.
+    """
+
 # Field-name pattern identifying secret-like keys. Must stay in sync with
 # the masking regex in modules/web/settings_routes.py so a value masked on
 # GET is also recognised on POST. An empty string in one of these fields
@@ -99,18 +129,51 @@ SECRET_MASK_SENTINEL = '********'
 # settings without re-entering a secret the UI deliberately does not
 # repopulate (see loadStorageBackendSettings in static/js/settings.js).
 _SECRET_KEY_RE = re.compile(
-    r'(token|secret|password|key|credential|hmac)',
+    r'(token|secret|password|key|credential|hmac|authorization)',
     re.IGNORECASE,
 )
-# Keys whose name matches the secret regex but whose value is NOT a secret.
-# Mirrors _NON_SECRET_KEYS in modules/web/settings_routes.py: these carry
-# the global default key-options ('rsa', 2048, 'secp256r1'), not credentials,
-# so empty values must NOT be treated as "preserve".
+# Keys whose name matches the secret regex but whose value is NOT a secret:
+# they carry the global default key-options ('rsa', 2048, 'secp256r1'), not
+# credentials, so an empty value must NOT be treated as "preserve".
+#
+# This used to be mirrored by a _NON_SECRET_KEYS list in
+# modules/web/settings_routes.py, and the two could disagree — a value masked
+# on GET but unrecognised on POST is written back as the mask, destroying the
+# secret. The routes now call this module rather than keeping a second copy,
+# so there is one definition; the comment that still pointed at the old one
+# outlived it.
 _NON_SECRET_KEY_NAMES = frozenset({
     'default_key_type',
     'default_key_size',
     'default_elliptic_curve',
 })
+
+
+class SettingsSchemaTooNewError(SettingsUnreadableError):
+    """settings.json declares a schema this build does not understand (#669).
+
+    Subclasses SettingsUnreadableError so app.py stops the process rather than
+    starting an instance that will write a shape it cannot read back. The
+    alternative — logging and continuing — is what the product-version check
+    did, and it leaves an older process free to overwrite fields it does not
+    know about.
+
+    Escapable on purpose: ``CERTMATE_ALLOW_SCHEMA_DOWNGRADE=1`` proceeds
+    anyway, for an operator who has read the release notes and accepts the
+    consequence. Safe by default, deliberate to override.
+    """
+
+
+class BearerTokenUnusableError(SettingsUnreadableError):
+    """The operator configured an API bearer token that cannot be used.
+
+    Subclasses SettingsUnreadableError on purpose: load_settings re-raises that
+    type instead of falling through to "return the defaults in-memory", and the
+    auth layer turns it into a 401 on every request. Both are what we want here.
+    Ignoring an operator-supplied token and generating a random one in its place
+    is the one outcome that must never happen — see the raise sites below.
+    """
+
 
 
 def _is_secret_key(name: str) -> bool:
@@ -131,7 +194,42 @@ def _is_secret_key(name: str) -> bool:
 # behalf of the user's domain. Both must be masked.
 _PROVIDER_SPECIFIC_SECRET_FIELDS = {
     'acme-dns': frozenset({'username', 'subdomain'}),
+    # A webhook's `url` is not a "url" in the harmless sense: for Slack,
+    # Discord, ntfy and Gotify the incoming-webhook URL embeds the bearer
+    # secret in its path, so anyone who reads it can post to the channel. The
+    # name 'url' matches no secret pattern, so without this it was returned in
+    # cleartext to the viewer role by GET /api/web/settings and written into the
+    # share-safe backup ZIP. Masked like any other secret; restored on a save.
+    'webhooks': frozenset({'url'}),
 }
+# Every credential field of every DNS provider must be covered by the regex
+# above or declared here. tests/test_what_counts_as_a_secret_is_declared.py
+# walks _DNS_PROVIDER_CREDENTIALS and fails on one that is neither, so a new
+# provider whose credential happens to be named something the seven words miss
+# cannot be added without someone deciding which it is.
+
+# List keys whose items carry secrets keyed by the LIST name rather than the
+# container's provider context. webhooks[*] is the case: its items live under
+# notifications.channels.webhooks, so the ordinary list-context propagation
+# would hand them parent_key='channels'; we want 'webhooks' so the entry above
+# applies. (acme-dns.accounts[*] deliberately keeps the provider context and is
+# NOT listed here.)
+_LIST_NAME_CONTEXTS = frozenset({'webhooks'})
+
+# Secret-bearing fields on a webhook list item whose names do not match the
+# generic secret regex — currently just `url` (the incoming-webhook URL is the
+# credential). Used by _restore_masked_list_secrets so a masked url survives a
+# round-trip save the same way auth_token does.
+_WEBHOOK_LIST_SECRET_FIELDS = _PROVIDER_SPECIFIC_SECRET_FIELDS['webhooks']
+
+# Parents under which EVERY string value is a credential, whatever the
+# operator named the key. A webhook's custom ``headers`` map is the case:
+# ``X-Auth``, ``X-Hub-Signature``, ``PRIVATE-TOKEN`` are all how someone
+# authenticates to a receiver, and a name heuristic cannot keep up with the
+# names people use (#580 review). The price is that a harmless header such as
+# ``X-Tenant`` is masked on read too; its value survives a round-trip save
+# like any other masked secret.
+_ALL_VALUES_SECRET_PARENTS = frozenset({'headers'})
 
 
 def mask_secrets_in_settings(settings_dict):
@@ -164,20 +262,27 @@ def mask_secrets_in_settings(settings_dict):
     def _walk(node, parent_key=None):
         if isinstance(node, dict):
             provider_extras = _PROVIDER_SPECIFIC_SECRET_FIELDS.get(parent_key, frozenset())
+            all_secret = parent_key in _ALL_VALUES_SECRET_PARENTS
             out = {}
             for key, value in node.items():
                 if isinstance(value, str) and value and (
-                    _is_secret_key(key) or key in provider_extras
+                    all_secret or _is_secret_key(key) or key in provider_extras
                 ):
                     out[key] = SECRET_MASK_SENTINEL
                 else:
                     # For list values, propagate the CURRENT dict's
                     # parent_key down so list items inherit the
                     # provider context (e.g. ``acme-dns.accounts[*]``
-                    # is still acme-dns-context). For dict values,
-                    # the new parent is the key we are descending
-                    # into.
-                    next_parent = parent_key if isinstance(value, list) else key
+                    # is still acme-dns-context) — unless the list key
+                    # opts into its own name as the context
+                    # (``webhooks[*]`` masks by 'webhooks', not the
+                    # 'channels' container). For dict values, the new
+                    # parent is the key we are descending into.
+                    if isinstance(value, list):
+                        next_parent = (key if key in _LIST_NAME_CONTEXTS
+                                       else parent_key)
+                    else:
+                        next_parent = key
                     out[key] = _walk(value, parent_key=next_parent)
             return out
         if isinstance(node, list):
@@ -245,44 +350,73 @@ def _restore_masked_list_secrets(old_list, new_list):
     the literal sentinel — clobbering the real token/secret on disk.
 
     For every dict in ``new_list``, any secret-named field still equal to the
-    sentinel is restored from the matching dict in ``old_list`` — matched first
-    by identity ``(type, url, name)`` (robust to reordering/deletion), then by
-    position. Each prior dict is consumed at most once, so two webhooks sharing
-    an identity keep their own distinct secrets (the Nth new maps to the Nth
-    prior) instead of both collapsing onto the first. With no prior match the
-    masked field is dropped (no value to keep). A blank secret is left as-is, so
-    a deliberately cleared field stays cleared. Mutates and returns ``new_list``.
+    sentinel is restored from the matching dict in ``old_list`` — matched by
+    identity ``(type, name)`` only. Each prior dict is consumed at most once, so
+    two entries sharing an identity keep their own distinct secrets (the Nth new
+    maps to the Nth prior). With no identity match the masked field is dropped
+    (the operator must re-enter it) — there is NO position fallback: matching by
+    list position copied a DIFFERENT entry's credential into the survivor when a
+    save both shifted positions and changed an identity field (e.g. deleting one
+    webhook and fixing another's URL), and then transmitted it to the wrong
+    endpoint. A blank secret is left as-is, so a deliberately cleared field stays
+    cleared. Mutates and returns ``new_list``.
+
+    ``url`` counts as a secret field here (via _WEBHOOK_LIST_SECRET_FIELDS): a
+    Slack/Discord/Gotify incoming-webhook URL is the bearer credential, so it is
+    masked on read and must survive the round-trip too — and, being masked, it
+    can no longer be part of the identity, which is why the identity is
+    (type, name).
     """
     if not isinstance(new_list, list):
         return new_list
     old_list = old_list if isinstance(old_list, list) else []
 
     def _identity(d):
-        return (d.get('type'), d.get('url'), d.get('name'))
+        return (d.get('type'), d.get('name'))
 
-    # Queue prior dicts per identity so duplicate-identity webhooks are matched
-    # one-to-one rather than every duplicate resolving to the first.
+    def _field_is_secret(key):
+        return _is_secret_key(key) or key in _WEBHOOK_LIST_SECRET_FIELDS
+
     by_identity = {}
     for old in old_list:
         if isinstance(old, dict):
             by_identity.setdefault(_identity(old), deque()).append(old)
+    # An identity shared by more than one prior entry is AMBIGUOUS: with no
+    # stable per-webhook id, list order is the only thing left to match on, and
+    # a reorder or a deletion would then restore the wrong entry's secret — the
+    # same cross-endpoint credential leak (type,name) was chosen to avoid. So a
+    # masked secret whose identity is ambiguous is dropped (the operator
+    # re-enters it), never guessed by position.
+    ambiguous = {ident for ident, q in by_identity.items() if len(q) > 1}
 
-    for i, item in enumerate(new_list):
+    for item in new_list:
         if not isinstance(item, dict):
             continue
-        queue = by_identity.get(_identity(item))
-        if queue:
-            prior = queue.popleft()
-        elif i < len(old_list) and isinstance(old_list[i], dict):
-            prior = old_list[i]
-        else:
-            prior = {}
+        ident = _identity(item)
+        queue = by_identity.get(ident)
+        # Unique identity match, or nothing — never a positional guess, and
+        # never an ambiguous duplicate (see above and the docstring).
+        prior = queue.popleft() if (queue and ident not in ambiguous) else {}
         for key in list(item.keys()):
-            if _is_secret_key(key) and item.get(key) == SECRET_MASK_SENTINEL:
+            if _field_is_secret(key) and item.get(key) == SECRET_MASK_SENTINEL:
                 if key in prior:
                     item[key] = prior[key]
                 else:
                     item.pop(key, None)
+            elif isinstance(item.get(key), dict):
+                # One level of nesting: a generic webhook's custom ``headers``
+                # map, whose Authorization / X-API-Key values are masked on
+                # GET like any other credential (#218) and must survive the
+                # round-trip the same way.
+                prior_nested = prior.get(key) if isinstance(prior.get(key), dict) else {}
+                nested = item[key]
+                all_secret = key in _ALL_VALUES_SECRET_PARENTS
+                for sub in list(nested.keys()):
+                    if (all_secret or _is_secret_key(sub)) and nested.get(sub) == SECRET_MASK_SENTINEL:
+                        if sub in prior_nested:
+                            nested[sub] = prior_nested[sub]
+                        else:
+                            nested.pop(sub, None)
     return new_list
 
 
@@ -328,6 +462,16 @@ _DEEP_MERGE_SETTINGS_KEYS = frozenset({
     'backup_storage',
     'ca_providers',
     'notifications',
+    'rate_limits',
+    # Without this a settings POST carrying one provider REPLACED the whole
+    # dns_providers subtree, so configuring a second provider silently deleted
+    # the first — the certificate could still be requested against it and the
+    # issuance then failed for missing credentials (#641).
+    #
+    # Safe to merge because removal has its own path: the UI deletes an account
+    # with DELETE /api/dns/<provider>/accounts/<id>, never by posting a
+    # settings payload that omits it.
+    'dns_providers',
 })
 
 
@@ -433,48 +577,105 @@ def _bearer_token_from_env_or_generate():
     """Return a valid api_bearer_token for the default settings template.
 
     Resolution order (mutually exclusive):
-    1. API_BEARER_TOKEN_FILE — if set, read the token from that file. Any
-       read error or validation failure generates a fresh token immediately;
-       API_BEARER_TOKEN is never consulted (to avoid encouraging both vars).
-    2. API_BEARER_TOKEN — only checked when API_BEARER_TOKEN_FILE is absent.
-       An invalid value (too short, weak pattern, insufficient entropy) is
-       logged and a fresh token is generated instead. This prevents a
-       misconfigured env var (issue #108: docker-compose passing an empty or
-       weak ${API_BEARER_TOKEN}) from poisoning save_settings with a
-       misleading "API token length must be between 32 and 512 characters"
-       rejection.
-    3. generate_secure_token() — fallback when neither variable is set or
-       both fail validation.
+    1. API_BEARER_TOKEN_FILE — if set, read the token from that file. A read
+       error, or a token that fails validation, raises
+       BearerTokenUnusableError; API_BEARER_TOKEN is never consulted as a
+       fallback (to avoid encouraging both vars, and because falling back
+       would defeat the point of the refusal).
+    2. API_BEARER_TOKEN — only checked when API_BEARER_TOKEN_FILE is absent,
+       and stripped first, so an empty or whitespace-only value reads as "not
+       configured" and falls through to (3). That is issue #108's case:
+       docker-compose passing an unexpanded ${API_BEARER_TOKEN}. A non-empty
+       value that fails validation raises BearerTokenUnusableError.
+    3. generate_secure_token() — when neither variable is set.
+
+    Raises:
+        BearerTokenUnusableError: the operator supplied a token that cannot be
+            used. Substituting a generated one would leave the instance with
+            no operator credential at all, which is the failure this refusal
+            exists to prevent; #108's requirement (an unusable value must
+            never reach settings.json) is met by refusing rather than by
+            silently replacing.
     """
+    # An operator who sets API_BEARER_TOKEN or API_BEARER_TOKEN_FILE has said
+    # "this instance is authenticated". If the value turns out unusable we must
+    # NOT quietly substitute a random token: _detect_operator_bearer_token()
+    # then sees no operator credential, is_setup_mode() stays true, and every
+    # gated endpoint answers an anonymous caller as admin. The operator did the
+    # right thing, the log said a fresh token had been generated, and the
+    # instance was open to the network. Fail closed instead.
     token_file = os.getenv('API_BEARER_TOKEN_FILE')
     if token_file:
         try:
             file_token = Path(token_file).read_text().strip()
-            is_valid, reason = validate_api_token(file_token)
-            if is_valid:
-                return file_token
-            logger.warning(
-                "API_BEARER_TOKEN_FILE token is invalid (%s); "
-                "falling back to API_BEARER_TOKEN or a generated token.",
-                reason)
         except Exception as e:
-            logger.warning("Could not read API_BEARER_TOKEN_FILE (%s): %s", token_file, e)
-            return generate_secure_token()
+            raise BearerTokenUnusableError(
+                f"API_BEARER_TOKEN_FILE is set to {token_file!r} but could not "
+                f"be read ({e}). Refusing to serve: ignoring it would leave this "
+                f"instance with NO AUTHENTICATION, answering every endpoint to "
+                f"anonymous callers as admin. Fix the path/permissions, or unset "
+                f"API_BEARER_TOKEN_FILE."
+            ) from e
+        is_valid, reason = validate_api_token(file_token)
+        if is_valid:
+            return file_token
+        raise BearerTokenUnusableError(
+            f"The token in API_BEARER_TOKEN_FILE ({token_file}) is not usable: "
+            f"{reason} Refusing to serve: ignoring it would leave this instance "
+            f"with NO AUTHENTICATION, answering every endpoint to anonymous "
+            f"callers as admin. Replace it with a token that satisfies the "
+            f"requirement above, or unset API_BEARER_TOKEN_FILE."
+        )
 
-    env_token = os.getenv('API_BEARER_TOKEN')
+    # Stripped, so that API_BEARER_TOKEN= (the unexpanded default in
+    # docker-compose.yml, issue #108) and a value that is only whitespace both
+    # read as "not configured" and generate a token, exactly as before. Only a
+    # non-empty value the operator actually meant reaches the refusal below.
+    env_token = (os.getenv('API_BEARER_TOKEN') or '').strip()
     if env_token:
         is_valid, reason = validate_api_token(env_token)
         if is_valid:
             return env_token
-        logger.warning(
-            "API_BEARER_TOKEN environment variable is invalid (%s); "
-            "ignoring it and generating a fresh random bearer token. "
-            "Set a valid token (32-512 chars, no weak patterns, >=12 unique "
-            "chars) in your .env file or unset API_BEARER_TOKEN to silence "
-            "this warning.",
-            reason,
+        raise BearerTokenUnusableError(
+            f"API_BEARER_TOKEN is set but not usable: {reason} Refusing to "
+            f"serve: ignoring it would leave this instance with NO "
+            f"AUTHENTICATION, answering every endpoint to anonymous callers as "
+            f"admin. Set a token that satisfies the requirement above, or "
+            f"unset API_BEARER_TOKEN to let CertMate generate one."
         )
     return generate_secure_token()
+
+
+def backup_can_restore(zf, names, settings):
+    """True iff this backup's secrets are real and not the mask sentinel.
+
+    Module-level rather than a method so the backup LISTING can apply the
+    identical predicate the restore path applies. A listing that presents an
+    archive as a restore point while the restore path refuses it is the
+    specific failure this must make impossible (#655).
+
+    Every AUTOMATIC backup is masked: `save_settings` calls
+    `create_unified_backup(settings, reason)` and `include_secrets`
+    defaults to False, which writes SECRET_MASK_SENTINEL in place of every
+    credential. That default is right — a leaked backup must not also be a
+    credential dump — but it means the newest backup on disk is almost
+    always one that CANNOT restore this instance.
+
+    The manifest has said so since unified backups existed
+    (`secrets_masked` in backup_metadata.json). Nothing read it. Older or
+    hand-made archives may not carry the field, so a missing flag falls
+    back to looking for the sentinel in the settings themselves rather
+    than assuming the archive is usable.
+    """
+    import json
+    if "backup_metadata.json" in names:
+        try:
+            metadata = json.loads(zf.read("backup_metadata.json").decode("utf-8"))
+            if isinstance(metadata, dict) and "secrets_masked" in metadata:
+                return not metadata["secrets_masked"]
+        except (ValueError, KeyError, UnicodeDecodeError):
+            pass                       # fall through to the content check
+    return SECRET_MASK_SENTINEL not in json.dumps(settings)
 
 
 class SettingsManager:
@@ -555,7 +756,8 @@ class SettingsManager:
         callers can react to validation failures.
         """
         with self._lock:
-            settings = self.load_settings()
+            # From disk, never from the request cache — see load_settings.
+            settings = self.load_settings(use_cache=False)
             mutator(settings)
             return self.save_settings(settings, reason)
 
@@ -574,7 +776,11 @@ class SettingsManager:
         credential for the same backend or CA provider.
         """
         with self._lock:
-            existing = self.load_settings()
+            # From disk, never from the request cache — see load_settings.
+            # `protected_keys` below restores users/api_keys from `existing`,
+            # so a cached `existing` made the protection restore a stale copy:
+            # it protected the snapshot, not the file.
+            existing = self.load_settings(use_cache=False)
             merged = {**existing, **incoming}
             for key, value in incoming.items():
                 if (key in _DEEP_MERGE_SETTINGS_KEYS
@@ -596,8 +802,37 @@ class SettingsManager:
                     del merged[key]
             return self.save_settings(merged)
 
+    def _warn_no_restore_point_once(self):
+        """Say once, per process, that automatic backups cannot restore.
+
+        Rate-limited deliberately. `save_settings` runs on nearly every write,
+        and a warning repeated on every write is one an operator learns to
+        scroll past — which is how the condition it describes goes unnoticed
+        for months. Once is a notice; every time is noise.
+        """
+        if getattr(self, '_warned_no_restore_point', False):
+            return
+        self._warned_no_restore_point = True
+        logger.warning(
+            "CERTMATE_BACKUP_PASSPHRASE is not set, so automatic backups are "
+            "taken with secrets masked and CANNOT restore this instance. They "
+            "remain useful as configuration snapshots. Set a passphrase to get "
+            "automatic backups that are complete and encrypted at rest, and "
+            "keep a copy off this node."
+        )
+
     def _try_restore_from_backup(self):
-        """Attempt to restore settings from the most recent unified backup."""
+        """Restore settings from the most recent backup that can actually restore.
+
+        Returns None when every candidate is masked. The caller must not treat
+        that as "no backup found and I may recreate the file": installing a
+        masked archive writes the mask sentinel as every password hash, bearer
+        token, API key hash, OIDC client secret and DNS credential. No local
+        login works, no token works, SSO is broken, every renewal fails at the
+        provider — and `setup_completed` is still True, so the wizard does not
+        reopen. The log line said "Settings restored successfully from backup".
+        """
+        masked_only = []
         try:
             import io, zipfile, json
             from .file_operations import (
@@ -620,18 +855,30 @@ class SettingsManager:
                     with zipfile.ZipFile(zip_source, 'r') as zf:
                         if "settings.json" not in zf.namelist():
                             continue
+                        names = zf.namelist()
                         raw = json.loads(zf.read("settings.json").decode('utf-8'))
                         settings = raw.get('settings') if isinstance(raw, dict) and 'settings' in raw else raw
                         if isinstance(settings, dict) and settings:
+                            if not backup_can_restore(zf, names, settings):
+                                masked_only.append(backup_path.name)
+                                continue
                             logger.info(f"Restored settings from backup: {backup_path.name}")
                             return settings
                 except Exception as e:
                     logger.debug(f"Could not read backup {backup_path.name}: {e}")
         except Exception as e:
             logger.error(f"Backup restore failed: {e}")
+        if masked_only:
+            logger.error(
+                "Found %d recent backup(s) but every one of them has its "
+                "secrets masked, so restoring it would install the mask "
+                "sentinel as every credential and lock this instance out: %s. "
+                "A backup that can restore is made with include_secrets=true "
+                "(POST /api/backups/create).",
+                len(masked_only), ", ".join(masked_only))
         return None
 
-    def load_settings(self):
+    def load_settings(self, use_cache=True):
         """Load settings from file with improved error handling.
 
         Acquires the re-entrant lock so concurrent saves cannot observe a
@@ -641,8 +888,20 @@ class SettingsManager:
         return a deepcopy of the cached parsed dict. The cache is cleared
         on any successful save (atomic_update / save_settings) and lives
         only for the current request. See `_request_cache_*` above.
+
+        ``use_cache=False`` forces a disk read. Every read-modify-write MUST
+        pass it, because the cache is scoped to the request and not to the
+        lock: `update`/`atomic_update` hold `self._lock` for the whole
+        read-modify-write, which stops two writes interleaving, but a cached
+        base makes the "read" a snapshot taken when the request STARTED. On
+        the synchronous issuance path that snapshot is minutes old —
+        cert_service.py loads settings, runs certbot, then writes — so every
+        concurrent write (a user created, a domain registered, a credential
+        saved) was silently rolled back by whichever request finished last.
+        A domain rolled out of `settings['domains']` is never visited by
+        check_renewals again and its certificate expires in silence.
         """
-        cached = self._request_cache_get()
+        cached = self._request_cache_get() if use_cache else None
         if cached is not None:
             # Deepcopy so callers that mutate the returned dict (load →
             # mutate in place → save) don't pollute the request-scoped
@@ -652,6 +911,10 @@ class SettingsManager:
 
         with self._lock:
             default_settings = {
+                # The shape a fresh install writes (#669). Present here as well
+                # as in the stamping below because a fresh install never
+                # reaches that path — it has no file to migrate.
+                'settings_schema_version': SETTINGS_SCHEMA_VERSION,
                 'cloudflare_token': '',
                 'domains': [],
                 'email': '',
@@ -744,6 +1007,9 @@ class SettingsManager:
 
             # Only create full template for first-time setup
             first_time_template = {
+                # Same reason as default_settings: a first boot writes
+                # this dict and never reaches the stamping path (#669).
+                'settings_schema_version': SETTINGS_SCHEMA_VERSION,
                 'cloudflare_token': '',
                 'domains': [],
                 'email': '',
@@ -789,11 +1055,42 @@ class SettingsManager:
                 settings = self.file_ops.safe_file_read(self.settings_file, is_json=True)
                 if not isinstance(settings, dict):
                     logger.warning("Settings file exists but is empty or corrupted, attempting backup restore")
+                    # Empty and unreadable are different cases. The refusal
+                    # below exists to protect CONTENT a text editor could
+                    # repair; a zero-byte file has nothing to lose, so for it
+                    # the first-time template is still the right answer.
+                    # Unreadable (permissions) counts as "has content": we
+                    # cannot tell, and that is precisely where overwriting
+                    # destroys something good.
+                    try:
+                        has_content = bool(self.settings_file.read_text(
+                            encoding='utf-8', errors='replace').strip())
+                    except OSError:
+                        has_content = True
                     settings = self._try_restore_from_backup()
-                    if settings is None:
-                        logger.warning("No usable backup found, recreating settings with defaults")
+                    if settings is None and not has_content:
+                        logger.warning("Settings file is empty and no usable backup exists; "
+                                       "recreating it with the first-time template")
                         self.save_settings(first_time_template)
                         return first_time_template
+                    if settings is None:
+                        # Do NOT recreate the file. safe_file_read returns the
+                        # default for a JSON typo, a PermissionError and an
+                        # empty read alike, and settings.json is written
+                        # atomically (mkstemp + fsync + rename), so the
+                        # application never produces this state itself —
+                        # something outside it did. Overwriting with the
+                        # first-time template destroys the operator's only
+                        # copy of a file a text editor could have repaired,
+                        # and leaves the instance in setup mode, which is
+                        # world-open on the network.
+                        raise SettingsUnreadableError(
+                            f"{self.settings_file} exists but could not be "
+                            f"read as JSON, and no backup on disk can restore "
+                            f"it (see the log above). Refusing to overwrite "
+                            f"it. Fix the file, or restore a backup made with "
+                            f"include_secrets=true, then restart."
+                        )
                     logger.info("Settings restored successfully from backup")
 
                 # Downgrade detection: warn loudly if settings.json was saved
@@ -824,6 +1121,36 @@ class SettingsManager:
                             "settings.json has unexpected certmate_version %s "
                             "(running %s).",
                             disk_version, _CERTMATE_VERSION
+                        )
+
+                # Schema gate (#669). `certmate_version` above is the PRODUCT
+                # version: it moves on every release, so it cannot say whether
+                # the shape changed. This one moves only when it does.
+                #
+                # A file from the future is refused rather than read. The
+                # shape-sniffing migrations below still run at every version —
+                # they are not only migrations, they are also the defence
+                # against a stale settings tab POSTing an old payload shape and
+                # reintroducing a retired field.
+                disk_schema = settings.get('settings_schema_version')
+                if isinstance(disk_schema, int) and disk_schema > SETTINGS_SCHEMA_VERSION:
+                    if os.getenv('CERTMATE_ALLOW_SCHEMA_DOWNGRADE') == '1':
+                        logger.error(
+                            "settings.json declares schema v%s and this build "
+                            "understands v%s. Continuing because "
+                            "CERTMATE_ALLOW_SCHEMA_DOWNGRADE=1 — this process "
+                            "may overwrite fields it does not know about.",
+                            disk_schema, SETTINGS_SCHEMA_VERSION)
+                    else:
+                        raise SettingsSchemaTooNewError(
+                            f"settings.json declares schema v{disk_schema} but "
+                            f"this build understands v{SETTINGS_SCHEMA_VERSION}. "
+                            f"Refusing to start: an older process writing this "
+                            f"file can drop fields it cannot read. Run the "
+                            f"newer version, restore a matching backup from "
+                            f"{self.file_ops.backup_dir / 'unified'}, or set "
+                            f"CERTMATE_ALLOW_SCHEMA_DOWNGRADE=1 to proceed "
+                            f"anyway."
                         )
 
                 # Apply migrations for backward compatibility
@@ -903,6 +1230,12 @@ class SettingsManager:
                 if settings.get('certmate_version') != _CERTMATE_VERSION:
                     settings['certmate_version'] = _CERTMATE_VERSION
                     was_migrated = True
+                # Stamp the schema too. A file that predates versioning has
+                # just been through the shape migrations above, so it is now v1
+                # whatever it was before.
+                if settings.get('settings_schema_version') != SETTINGS_SCHEMA_VERSION:
+                    settings['settings_schema_version'] = SETTINGS_SCHEMA_VERSION
+                    was_migrated = True
 
                 # If the save fails (disk full, permission denied, validation
                 # rejection of a field migrated up from an older format),
@@ -939,8 +1272,11 @@ class SettingsManager:
                             # produced seconds ago by this boot and don't help
                             # the operator recover from pre-existing data loss.
                             backups = [b for b in backups if '_migration' not in b]
-                    except Exception:
-                        pass
+                    except OSError as e:
+                        # A failure here makes the message say "no backups
+                        # found", which is what an operator reads as "there is
+                        # nothing to restore from".
+                        logger.warning("Could not list unified backups: %s", e)
                     if backups:
                         logger.error(
                             "CRITICAL: settings.json has no users. If this is "
@@ -960,8 +1296,11 @@ class SettingsManager:
                     if cert_dir and cert_dir.exists():
                         try:
                             cert_domains = [d.name for d in iter_cert_domain_dirs(cert_dir)]
-                        except Exception:
-                            pass
+                        except OSError as e:
+                            # Same shape: silence here turns "I could not look"
+                            # into "there is nothing there".
+                            logger.warning(
+                                "Could not enumerate certificate directories: %s", e)
                     if cert_domains:
                         logger.warning(
                             "settings.json has no domains but certificates exist "
@@ -1009,6 +1348,17 @@ class SettingsManager:
                     return _copy.deepcopy(settings)
                 return settings
 
+            except SettingsUnreadableError:
+                # Must not be swallowed by the handler below. Returning the
+                # defaults in-memory leaves setup_completed False, which makes
+                # is_setup_mode() true and serves every gated endpoint to
+                # anonymous callers as admin — an instance that cannot read
+                # its own credentials must not come up world-open instead.
+                # Nothing catches this above: it reaches the auth layer,
+                # which logs the reason and answers 401. The container keeps
+                # running and serves nothing, which is the safe end of the
+                # trade — verified in a container, not assumed.
+                raise
             except Exception as e:
                 logger.error(f"Error loading settings: {e}")
                 logger.warning("Returning default settings in-memory (existing file preserved on disk)")
@@ -1034,10 +1384,26 @@ class SettingsManager:
                 # API key last_used_at updates).
                 if backup_reason is not None and self.settings_file.exists():
                     try:
-                        result = self.file_ops.create_unified_backup(settings, backup_reason)
+                        # An automatic backup is complete — and therefore able
+                        # to restore this instance — only when a passphrase is
+                        # configured to encrypt it (#655).
+                        #
+                        # `include_secrets` and encryption are independent in
+                        # create_unified_backup: complete WITHOUT a passphrase
+                        # writes a plaintext credential dump to disk on every
+                        # settings save. Masked WITH one is merely a wasted
+                        # opportunity. So the two are tied together here, and
+                        # this path never produces the dangerous combination.
+                        # A manual backup can still opt into plaintext; that is
+                        # a deliberate, audit-logged operator choice.
+                        can_encrypt = bool(_backup_passphrase())
+                        result = self.file_ops.create_unified_backup(
+                            settings, backup_reason, include_secrets=can_encrypt)
                         if not result:
                             logger.warning("Pre-save backup failed (disk full or permission error?). "
                                            "Proceeding with save, but no restore point was created.")
+                        elif not can_encrypt:
+                            self._warn_no_restore_point_once()
                     except Exception as backup_err:
                         logger.warning("Pre-save backup raised an exception: %s. "
                                        "Proceeding with save.", backup_err)
@@ -1046,6 +1412,17 @@ class SettingsManager:
                 if not isinstance(settings, dict):
                     logger.error("Settings must be a dictionary")
                     return False
+
+                # Every write declares the schema it wrote (#669).
+                #
+                # Stamping only on load is not enough: a caller that hands over
+                # a payload without the key — which POST /api/settings does,
+                # and which any future route may do — drops it from the file,
+                # and a file with no declared schema is one an older build
+                # reads happily. The gate in load_settings can only refuse what
+                # is written down, so it is written here, where every write
+                # passes.
+                settings['settings_schema_version'] = SETTINGS_SCHEMA_VERSION
 
                 # Validate critical settings before saving
                 if 'email' in settings and settings['email']:
@@ -1090,7 +1467,7 @@ class SettingsManager:
                 # Validate dns_provider against supported set.
                 # IMPORTANT: when adding a provider, also update tests/test_provider_wiring_consistency.py
                 # which extracts this literal via inspect.getsource.
-                supported_providers = {'cloudflare','route53','azure','google','powerdns','digitalocean','linode','edgedns','gandi','ovh','namecheap','vultr','dnsmadeeasy','nsone','rfc2136','hetzner','hetzner-cloud','porkbun','godaddy','he-ddns','dynudns','arvancloud','infomaniak','acme-dns','duckdns','desec','scaleway','custom-script'}
+                supported_providers = {'cloudflare','route53','azure','google','powerdns','digitalocean','linode','edgedns','gandi','ovh','namecheap','vultr','dnsmadeeasy','nsone','rfc2136','hetzner','hetzner-cloud','porkbun','godaddy','he-ddns','dynudns','arvancloud','infomaniak','acme-dns','duckdns','desec','scaleway','solidserver','custom-script'}
                 if 'dns_provider' in settings and settings['dns_provider'] not in supported_providers:
                     logger.error(f"Invalid dns_provider: {settings['dns_provider']}")
                     return False
@@ -1123,22 +1500,25 @@ class SettingsManager:
                         return False
 
                 # Validate domains
+                # Emit the same shape load_settings returns, so normalising
+                # is a fixed point. This used to write a validated string
+                # entry straight back as a string, which meant the migration
+                # above could be undone by the very next save and the mixed
+                # list could never be retired.
                 if 'domains' in settings:
                     validated_domains = []
                     for domain_entry in settings['domains']:
-                        if isinstance(domain_entry, str):
-                            is_valid, domain_or_error = validate_domain(domain_entry)
-                            if is_valid:
-                                validated_domains.append(domain_or_error)
-                            else:
-                                logger.warning(f"Invalid domain skipped: {domain_or_error}")
-                        elif isinstance(domain_entry, dict) and 'domain' in domain_entry:
-                            is_valid, domain_or_error = validate_domain(domain_entry['domain'])
-                            if is_valid:
-                                domain_entry['domain'] = domain_or_error
-                                validated_domains.append(domain_entry)
-                            else:
-                                logger.warning(f"Invalid domain in object skipped: {domain_or_error}")
+                        entry = normalize_entry(domain_entry)
+                        if entry is None:
+                            logger.warning(
+                                "Skipped a domain entry that named no domain")
+                            continue
+                        is_valid, domain_or_error = validate_domain(entry['domain'])
+                        if not is_valid:
+                            logger.warning(f"Invalid domain skipped: {domain_or_error}")
+                            continue
+                        entry['domain'] = domain_or_error
+                        validated_domains.append(entry)
                     settings['domains'] = validated_domains
 
                 # Ensure required fields exist (but don't fail on missing fields, just warn).
@@ -1196,44 +1576,30 @@ class SettingsManager:
                 return False
 
     def migrate_domains_format(self, settings):
-        """Migrate old domain format (string) to new format (object with dns_provider)"""
-        try:
-            if 'domains' not in settings:
-                return settings
+        """Normalise ``settings['domains']`` in place and return *settings*.
 
-            domains = settings['domains']
-            default_provider = settings.get('dns_provider', 'cloudflare')
-            migrated_domains = []
+        Kept as a method because four call sites and a good deal of the test
+        suite reach for it by name, but it is now exactly the boundary
+        normalisation: string entries become objects and nothing else changes.
 
-            for domain_entry in domains:
-                if isinstance(domain_entry, str):
-                    # Old format: just domain string
-                    migrated_domains.append({
-                        'domain': domain_entry,
-                        'dns_provider': default_provider,
-                        'account_id': 'default'
-                    })
-                elif isinstance(domain_entry, dict):
-                    # New format: already has structure
-                    if 'domain' in domain_entry:
-                        # Ensure required fields exist
-                        if 'dns_provider' not in domain_entry:
-                            domain_entry['dns_provider'] = default_provider
-                        if 'account_id' not in domain_entry:
-                            domain_entry['account_id'] = 'default'
-                        migrated_domains.append(domain_entry)
-                    else:
-                        logger.warning(f"Invalid domain entry format: {domain_entry}")
-                else:
-                    logger.warning(f"Unexpected domain entry type: {type(domain_entry)}")
-
-            settings['domains'] = migrated_domains
+        It used to fill in ``dns_provider`` and ``account_id`` from the global
+        defaults. Two of its callers invoke it INSIDE a settings mutator, so
+        those injected values were persisted — and an entry that named no
+        provider had meant "follow the global setting", while one that names a
+        provider is pinned to it. The observable consequence was that after any
+        such operation, changing the global DNS provider stopped taking effect
+        for every existing domain: they all went on resolving to whatever had
+        been frozen in. Nothing ever read the injected fields.
+        """
+        if not isinstance(settings, dict) or 'domains' not in settings:
             return settings
-
-        except Exception as e:
-            logger.error(f"Error during domain format migration: {e}")
-            return settings
-
+        entries, dropped = normalize_domains(settings['domains'])
+        if dropped:
+            logger.warning(
+                "Ignored %d domain entr%s that named no domain",
+                dropped, 'y' if dropped == 1 else 'ies')
+        settings['domains'] = entries
+        return settings
     def migrate_dns_providers_to_multi_account(self, settings):
         """Migrate old single-account DNS provider configurations to multi-account format"""
         try:
@@ -1390,24 +1756,33 @@ class SettingsManager:
             settings = settings['settings']
             migrated = True
 
-        # Migration 2: Handle domains format transition (string array <-> object array)
+        # Migration 2: every domain entry is an object.
+        #
+        # This used to convert only when EVERY entry was a string, so a list
+        # that held both spellings — which is what any instance that added a
+        # domain after the object format arrived actually has — was left mixed
+        # forever, and seven modules were each written to cope with that.
+        # It now normalises per entry, so the union ends at this boundary.
+        #
+        # It also used to fill in dns_provider and account_id from the global
+        # defaults, which is not a shape change but a MEANING change: a string
+        # entry follows the global provider, and an entry naming a provider is
+        # pinned to it. See modules/core/domain_entries.py. Nothing reads
+        # either field off the entry — the provider is resolved by
+        # get_domain_dns_provider and the account comes from the certificate's
+        # metadata — so the injection is dropped rather than preserved.
         if 'domains' in settings:
-            domains = settings['domains']
-            if domains and all(isinstance(d, str) for d in domains):
-                # Convert simple string array to object array for new multi-account support
-                logger.info("Migrating domains from string array to object array format")
-                default_provider = settings.get('dns_provider', 'cloudflare')
-                default_accounts = settings.get('default_accounts', {})
-                default_account = default_accounts.get(default_provider, 'default')
-
-                new_domains = []
-                for domain in domains:
-                    new_domains.append({
-                        'domain': domain,
-                        'dns_provider': default_provider,
-                        'account_id': default_account
-                    })
-                settings['domains'] = new_domains
+            entries, dropped = normalize_domains(settings['domains'])
+            if entries != settings['domains']:
+                logger.info(
+                    "Normalising %d domain entr%s to the object format",
+                    len(entries), 'y' if len(entries) == 1 else 'ies')
+                settings['domains'] = entries
+                migrated = True
+            if dropped:
+                logger.warning(
+                    "Dropped %d settings domain entr%s that named no domain",
+                    dropped, 'y' if dropped == 1 else 'ies')
                 migrated = True
 
         # Migration 4 (#279): the letsencrypt 'environment' field is retired —

@@ -27,10 +27,10 @@ Usage:
 import json
 import logging
 import time
-import threading
 import os
 import re
-from datetime import datetime
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from .utils import utc_now
 from typing import Any, Dict, Optional
 from contextvars import ContextVar
@@ -38,6 +38,93 @@ from functools import wraps
 
 # Context variable for request-scoped data
 _log_context: ContextVar[Dict[str, Any]] = ContextVar('log_context', default={})
+
+
+_PEM_BEGIN = '-----BEGIN'
+
+
+def _redact_pem_blocks(s: str, placeholder: str = '[PEM REDACTED]') -> str:
+    """Replace every PEM block in ``s``, in linear time.
+
+    Semantically identical to ``PEM_RE.sub(placeholder, s)`` — verified by
+    differential fuzzing over PEM-shaped token soup — but it cannot be made
+    to backtrack.
+
+    Why not a single regex: ``-----BEGIN[^-]+-----.*?-----END[^-]+-----``
+    restarts the ``.*?`` forward scan at EVERY ``-----BEGIN`` occurrence. On
+    input that opens blocks it never closes, that is O(anchors x length):
+    quadratic. Measured on the old pattern, ``("-----BEGIN" + "A"*20) * n``
+    cost 0.4 s at n=2000 and 6.6 s at n=8000 — and this function sanitises
+    UNBOUNDED deploy-hook output (deployer.py) on a gunicorn worker thread,
+    so one hostile blob stalls a thread out of the eight the process has.
+    CodeQL flags the same shape as py/polynomial-redos.
+
+    The scanner is linear because a failed search for the closing marker ends
+    the whole pass: if no ``-----END`` follows this ``-----BEGIN``, none
+    follows any later one either, so there is nothing left to redact.
+    """
+    out = []
+    pos = 0
+    n = len(s)
+    while True:
+        begin = s.find(_PEM_BEGIN, pos)
+        if begin < 0:
+            break
+        # Header is `[^-]+-----`: the maximal non-dash run (at least one
+        # character) has to be followed immediately by five dashes. Because
+        # the run cannot contain a dash, a shorter match can never reach the
+        # dashes either — so this single check is exactly what the regex's
+        # backtracking would conclude.
+        run = begin + len(_PEM_BEGIN)
+        cur = run
+        while cur < n and s[cur] != '-':
+            cur += 1
+        if cur == run or not s.startswith('-----', cur):
+            # Not a well-formed header. Resume one character in, matching
+            # re.sub's leftmost scan, which can find a later BEGIN inside.
+            out.append(s[pos:begin + 1])
+            pos = begin + 1
+            continue
+        end = JSONFormatter.PEM_END_RE.search(s, cur + 5)
+        if end is None:
+            break
+        out.append(s[pos:begin])
+        out.append(placeholder)
+        pos = end.end()
+    out.append(s[pos:])
+    return ''.join(out)
+
+
+def sanitize_text(s: str) -> str:
+    """Replace PEM blocks and sensitive key=value assignments in unstructured
+    text. Module-level so choke points that PERSIST free-form command output
+    (deploy hooks: history, audit log, immutable hash chain) can redact it
+    before it is stored — the JSON log formatter reuses the same rules."""
+    if not isinstance(s, str):
+        return s
+    s = _redact_pem_blocks(s)
+    s = JSONFormatter.SENSITIVE_KV_RE.sub(r'\1"[REDACTED]"', s)
+    return s
+
+
+def scrub_log_value(value):
+    """Strip CR/LF from an attacker-influenced value bound into a log message,
+    so it cannot forge a second log record (CodeQL py/log-injection).
+
+    Lives here, in the logging module, because it was previously an idiom
+    copy-pasted inline at a dozen call sites — and the one denial path that did
+    not receive the copy is exactly the one code scanning flagged.
+
+    Note this is NOT made unnecessary by the JSON formatter. JSON escapes a
+    newline inside a string, so the default configuration is immune; but
+    ``CERTMATE_LOG_JSON=false`` (app.py) selects a plain line formatter where a
+    newline in a username produces a fully attacker-chosen log line, timestamp
+    and level included. The defence has to sit at the call site, not in one of
+    the two formatters.
+    """
+    if value is None:
+        return value
+    return str(value).replace('\r', '').replace('\n', '')
 
 
 class JSONFormatter(logging.Formatter):
@@ -57,18 +144,36 @@ class JSONFormatter(logging.Formatter):
 
     # Sensitive keywords to match in field names (case-insensitive)
     SENSITIVE_FIELD_PATTERNS = {
-        'password', 'token', 'secret', 'api_key', 'api_token', 'private_key',
+        'password', 'token', 'secret', 'api_key', 'api-key', 'api_token', 'private_key',
         'privkey', 'key_pem', 'encryption_key', 'credentials', 'bearer_token',
-        'auth', 'jwt'
+        'auth', 'jwt', 'cookie'
     }
 
-    # Matches any PEM block structure
+    # Matches any PEM block structure.
+    #
+    # Kept as a compiled attribute because it is part of this class's public
+    # surface, but redaction goes through the linear scanner in
+    # ``_redact_pem_blocks`` — see the note there for why a single regex is
+    # not safe on unbounded input.
     PEM_RE = re.compile(r'-----BEGIN[^-]+-----.*?-----END[^-]+-----', re.DOTALL)
 
+    # The closing marker, searched for on its own by the scanner.
+    PEM_END_RE = re.compile(r'-----END[^-]+-----', re.DOTALL)
+
     # Matches key-value assignments containing sensitive keywords (double-quoted, single-quoted, or bare words)
+    # The value alternation tries an HTTP credential scheme first
+    # (``Authorization: Bearer <token>``): the bare-token class excludes
+    # whitespace, so without it the scheme word was redacted and the token
+    # survived — the one part that mattered. The name class deliberately
+    # stays hyphen-free (a hyphen-admitting prefix turns a long dashed run
+    # into quadratic backtracking — see the PEM test below); ``X-Api-Key``
+    # is caught through the ``api-key`` pattern instead. A quote right after
+    # the name (``'Authorization': 'Basic …'`` — a dict or JSON rendered into
+    # a log line) is accepted so the quoted value that follows is redacted.
     SENSITIVE_KV_RE = re.compile(
-        r'(\b[a-zA-Z0-9_]*(?:' + '|'.join(SENSITIVE_FIELD_PATTERNS) + r')[a-zA-Z0-9_]*\b\s*[:=]\s*)'
-        r'(?:"[^"\\]*(?:\\.[^"\\]*)*"|\'[^\'\\]*(?:\\.[^\'\\]*)*\'|[a-zA-Z0-9_\-\.\+\/\=\*@#\$%\|\^&\(\)\[\]\{\}]+)',
+        r'(\b[a-zA-Z0-9_]*(?:' + '|'.join(sorted(SENSITIVE_FIELD_PATTERNS)) + r')[a-zA-Z0-9_]*\b["\']?\s*[:=]\s*)'
+        r'(?:(?:Bearer|Basic|Digest|Token|ApiKey|Negotiate)\s+[^\s"\']+'
+        r'|"[^"\\]*(?:\\.[^"\\]*)*"|\'[^\'\\]*(?:\\.[^\'\\]*)*\'|[a-zA-Z0-9_\-\.\+\/\=\*@#\$%\|\^&\(\)\[\]\{\}]+)',
         re.IGNORECASE
     )
     
@@ -81,13 +186,7 @@ class JSONFormatter(logging.Formatter):
 
     def _sanitize_string(self, s: str) -> str:
         """Replace PEM blocks and key-value secrets in unstructured text"""
-        if not isinstance(s, str):
-            return s
-        # Redact PEM blocks
-        s = self.PEM_RE.sub('[PEM REDACTED]', s)
-        # Redact inline key-value secrets
-        s = self.SENSITIVE_KV_RE.sub(r'\1"[REDACTED]"', s)
-        return s
+        return sanitize_text(s)
 
     def sanitize_data(self, data: Any, key_context: Optional[str] = None) -> Any:
         """Recursively sanitize keys and values in data structures"""
@@ -216,6 +315,50 @@ class LogContext:
         _log_context.set(current)
 
 
+# A correlation id is written into logs and echoed back in a response header,
+# and on the request path it can come from the caller. Bound in length and
+# restricted to characters that cannot break a log line or a header: an id is
+# an opaque token, and anything that is not one is not worth carrying.
+_SAFE_CORRELATION_ID = re.compile(r'^[A-Za-z0-9._:-]{1,64}$')
+
+
+def new_correlation_id() -> str:
+    """A fresh id for one unit of work.
+
+    Short on purpose: it exists to be grepped out of a log and pasted into
+    another query, not to be globally unique across the internet. Sixteen hex
+    characters is 64 bits, which is far past collision for the number of
+    operations one CertMate instance performs in the time anyone would look
+    at a log.
+    """
+    import uuid
+    return uuid.uuid4().hex[:16]
+
+
+def clean_correlation_id(value) -> Optional[str]:
+    """A caller-supplied id, if it is safe to carry; otherwise None.
+
+    The value reaches a log line and a response header. An unbounded or
+    newline-carrying one would let a caller write its own log entries and
+    split the header — so a rejected id is replaced by a generated one rather
+    than sanitised into something the caller did not send and cannot match.
+    """
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value if _SAFE_CORRELATION_ID.match(value) else None
+
+
+def current_correlation_id() -> Optional[str]:
+    """The id of the work being done on this thread, if any.
+
+    Reads the same contextvar LogContext writes, so anything that wants to
+    HAND the id to another thread — the event bus does — asks here rather than
+    threading a parameter through every call in between.
+    """
+    return _log_context.get().get('request_id')
+
+
 def set_context(**kwargs):
     """Set context fields for current scope"""
     current = _log_context.get().copy()
@@ -263,18 +406,34 @@ def timed(logger: StructuredLogger, operation: str):
     return decorator
 
 
+# File-logging defaults (#431). Rotation is not optional: the only way to
+# enable a log file is through this function, and it always rotates. An
+# unbounded log on a mounted volume is a slow outage — and the audit chain,
+# which must NOT be rotated naively, lives in the same directory, so the app
+# log filling the volume takes the tamper-evident record down with it.
+DEFAULT_LOG_MAX_BYTES = 10 * 1024 * 1024   # 10 MB per file
+DEFAULT_LOG_BACKUP_COUNT = 5               # ~60 MB ceiling for the app log
+
+
 def configure_structured_logging(
     level: int = logging.INFO,
     json_output: bool = True,
-    log_file: Optional[str] = None
+    log_file: Optional[str] = None,
+    max_bytes: int = DEFAULT_LOG_MAX_BYTES,
+    backup_count: int = DEFAULT_LOG_BACKUP_COUNT,
 ):
     """
     Configure structured logging for the application.
-    
+
     Args:
         level: Logging level (default: INFO)
         json_output: Use JSON format (default: True)
-        log_file: Optional file path for log output
+        log_file: Optional file path for log output. Off by default: the
+            container logs to stdout, which is what `docker logs` and every
+            log shipper expect. Set it when you want a file on the mounted
+            volume as well — the web UI's log stream reads it.
+        max_bytes: Rotate once the active file reaches this size (#431).
+        backup_count: How many rotated files to keep.
     """
     root_logger = logging.getLogger()
     root_logger.setLevel(level)
@@ -297,11 +456,28 @@ def configure_structured_logging(
     console_handler.setFormatter(formatter)
     root_logger.addHandler(console_handler)
     
-    # File handler (optional)
+    # File handler (optional) — always rotating, never plain (#431).
     if log_file:
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setFormatter(formatter)
-        root_logger.addHandler(file_handler)
+        path = Path(log_file)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            file_handler = RotatingFileHandler(
+                str(path),
+                maxBytes=max_bytes,
+                backupCount=backup_count,
+                encoding='utf-8',
+            )
+            file_handler.setFormatter(formatter)
+            root_logger.addHandler(file_handler)
+        except OSError as e:
+            # Never let an unwritable log path stop the application from
+            # starting: stdout logging is already configured above, and a
+            # certificate manager that refuses to boot because it cannot
+            # write a *log* has failed at the wrong thing.
+            root_logger.warning(
+                "Could not open log file %s (%s); continuing with console "
+                "logging only", log_file, e,
+            )
     
     # Reduce noise from third-party libraries
     logging.getLogger('werkzeug').setLevel(logging.WARNING)

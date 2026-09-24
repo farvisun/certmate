@@ -50,7 +50,7 @@
                     </label>
                     <input type="text" id="username" name="username" required
                            autocomplete="username"
-                           class="w-full px-4 py-3 border border-border rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                           class="w-full px-4 py-3 border border-border rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary bg-input text-foreground"
                            placeholder="نام کاربری خود را وارد کنید">
                 </div>
 
@@ -62,7 +62,7 @@
                     <div class="relative">
                         <input type="password" id="password" name="password" required
                                autocomplete="current-password"
-                               class="w-full px-4 py-3 border border-border rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary dark:bg-gray-700 dark:text-white"
+                               class="w-full px-4 py-3 border border-border rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary bg-input text-foreground"
                                placeholder="رمز عبور خود را وارد کنید">
                         <button type="button" id="passwordToggleBtn" onclick="togglePassword()"
                                 aria-label="Show password" aria-pressed="false" aria-controls="password"
@@ -154,7 +154,12 @@
             try {
                 var raw = new URLSearchParams(window.location.search).get('next');
                 if (!raw || typeof raw !== 'string') return '/';
-                if (!raw.startsWith('/') || raw.startsWith('//')) return '/';
+                // Must be a same-origin absolute path. Reject protocol-relative
+                // ("//host") AND backslash variants ("/\host", "\\host") that
+                // browsers normalize to "//host" and would bounce the user to an
+                // external origin after login.
+                if (!raw.startsWith('/')) return '/';
+                if (raw.length > 1 && (raw[1] === '/' || raw[1] === '\\')) return '/';
                 return raw;
             } catch (e) { return '/'; }
         }
@@ -253,6 +258,20 @@
             try {
                 var err = new URLSearchParams(window.location.search).get('error');
                 if (!err) return;
+                // One code gets a real sentence, because the generic
+                // rendering ("token exchange algorithm") tells an operator
+                // nothing and this failure is almost always a stale discovery
+                // document rather than a broken login (#647).
+                if (err === 'oidc_token_exchange_algorithm') {
+                    showError('Single sign-on failed: the identity provider ' +
+                        'signed the token with an algorithm its discovery ' +
+                        'document does not advertise. CertMate has dropped ' +
+                        'the cached document — try again. If it keeps ' +
+                        'failing, check id_token_signing_alg_values_supported ' +
+                        'at the identity provider. The server log names both ' +
+                        'the algorithm and the advertised list.');
+                    return;
+                }
                 var label = err.replace(/^oidc_/, '').replace(/_/g, ' ');
                 showError('ورود تک‌نامه‌ای ناموفق بود: ' + label);
             } catch (e) { /* no-op */ }

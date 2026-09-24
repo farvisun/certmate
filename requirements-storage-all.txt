@@ -2,19 +2,35 @@
 # Install with: pip install -r requirements-storage-all.txt
 
 # Azure Key Vault
-azure-keyvault-secrets>=4.7.0
-azure-keyvault-certificates>=4.7.0
-azure-identity>=1.12.0
+azure-keyvault-secrets>=4.11.2
+azure-keyvault-certificates>=4.11.2
+azure-identity>=1.25.3
 
-# Needed by the Azure KV Certificate-object code path
-# (`load_pem_x509_certificates` + PKCS12 builder).
-cryptography>=41.0.0
+# Floor: the Azure Key Vault Certificate-object path uses
+# `load_pem_x509_certificates` (plural, added in 36.0) and the PKCS12 builder,
+# so a layered install onto a stripped-down base should fail with a clear
+# constraint error rather than an opaque ImportError at runtime.
+#
+# Ceiling: the ACME stack holds cryptography below 47 (pyopenssl==26.0.0
+# requires cryptography>=46.0.0,<47; above it, `certbot --version` dies). This
+# file is documented as installable on its own, and standalone nothing else
+# constrains cryptography — it would resolve to the newest release and break
+# issuance. Until now that only held by accident of Docker's install order.
+# The authoritative reason for the hold lives beside the pin in
+# requirements.txt; raise this ceiling only when that moves (#103).
+cryptography>=41.0.0,<47
 
 # AWS Secrets Manager
-boto3>=1.26.0
+boto3>=1.43.98
 
 # HashiCorp Vault
-hvac>=1.1.0
+hvac>=2.4.0
 
 # Infisical
-infisical-python>=2.0.0
+# Pinned, and not to the latest. infisical-python 2.3.6 ships no
+# manylinux x86_64 wheel and no sdist — only aarch64, macOS and Windows —
+# so `>=2.3.6` cannot be installed on the amd64 image at all, while the
+# arm64 image installs it fine. 2.3.5 is the last release with complete
+# platform coverage. This is the only compiled dependency in the storage
+# extras; the rest ship pure-Python wheels and are architecture-neutral.
+infisical-python==2.3.5

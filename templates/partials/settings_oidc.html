@@ -1,5 +1,6 @@
 <!-- TAB: OIDC / SSO -->
         <div x-show="tab === 'oidc'" x-cloak
+             id="settings-panel-oidc" role="tabpanel" aria-labelledby="settings-tab-oidc" tabindex="0"
              x-data="oidcSettings()" x-init="load()"
              class="bg-surface border-border rounded-lg shadow-sm border p-6 mt-6">
 
@@ -24,20 +25,46 @@
                 </div>
             </template>
 
-            <template x-if="!loading">
+            <!-- Load failed: show the reason and a retry, never the empty
+                 form — saving the blank defaults would wipe a working SSO
+                 configuration (#424). -->
+            <template x-if="!loading && loadFailed">
+                <div class="rounded-md border border-danger-line bg-danger-surface p-4">
+                    <p class="text-sm text-danger-strong flex items-center">
+                        <i class="fas fa-exclamation-triangle mr-2"></i>
+                        Could not load the SSO configuration: <span class="font-mono ml-1" x-text="loadError"></span>
+                    </p>
+                    <p class="text-xs text-danger-fg mt-2">
+                        The form is hidden on purpose: saving now would overwrite your current SSO settings with empty values.
+                    </p>
+                    <button type="button" @click="load()"
+                            class="mt-3 px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white text-sm font-semibold rounded-md">
+                        <i class="fas fa-rotate-right mr-1"></i> Retry
+                    </button>
+                </div>
+            </template>
+
+            <template x-if="!loading && !loadFailed">
                 <div class="space-y-6">
 
                     <!-- Enable toggle + provider name -->
                     <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                        <label class="flex items-center space-x-2">
-                            <input type="checkbox" x-model="cfg.enabled"
-                                   class="h-4 w-4 text-primary focus:ring-primary border-border rounded">
-                             <span class="text-sm font-medium text-label">فعال‌سازی OIDC/SSO</span>
-                        </label>
+                        <div>
+                            <label class="flex items-center space-x-2">
+                                <input type="checkbox" x-model="cfg.enabled"
+                                       class="h-4 w-4 text-primary focus:ring-primary border-border rounded">
+                                <span class="text-sm font-medium text-label">فعال‌سازی OIDC/SSO</span>
+                            </label>
+                            <p class="text-xs text-muted mt-1">
+                                در نمونه‌ای که فقط از SSO استفاده می‌کند، این تنها چیزی است که نمونه را
+                                بسته نگه می‌دارد. ذخیره با غیرفعال بودن آن رد می‌شود، مگر اینکه ابتدا
+                                احراز هویت محلی یا یک توکن bearer برای API پیکربندی شده باشد.
+                            </p>
+                        </div>
                         <div>
                              <label class="block text-xs text-muted mb-1">نام نمایشی ارائه‌دهنده</label>
                             <input type="text" x-model="cfg.provider_name" placeholder="SSO"
-                                   class="w-full px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white">
+                                   class="w-full px-3 py-2 border border-border rounded-md text-sm bg-input text-foreground">
                         </div>
                     </div>
 
@@ -47,19 +74,19 @@
                             <label class="block text-xs text-muted mb-1">Issuer URL</label>
                             <input type="url" x-model="cfg.issuer_url"
                                    placeholder="https://idp.example.com/realms/main"
-                                   class="w-full px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white">
-                             <p class="mt-1 text-xs text-muted">URL پایه IdP؛ سند discovery از <code class="font-mono">{issuer}/.well-known/openid-configuration</code> دریافت می‌شود.</p>
+                                   class="w-full px-3 py-2 border border-border rounded-md text-sm bg-input text-foreground">
+                            <p class="mt-1 text-xs text-muted">URL پایه IdP؛ سند discovery از <code class="font-mono">{issuer}/.well-known/openid-configuration</code> دریافت می‌شود.</p>
                         </div>
                         <div>
                              <label class="block text-xs text-muted mb-1">شناسه کلاینت</label>
                             <input type="text" x-model="cfg.client_id"
-                                   class="w-full px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white">
+                                   class="w-full px-3 py-2 border border-border rounded-md text-sm bg-input text-foreground">
                         </div>
                         <div class="md:col-span-2">
                              <label class="block text-xs text-muted mb-1">رمز کلاینت</label>
                             <input type="password" x-model="cfg.client_secret"
                                    autocomplete="new-password"
-                                   class="w-full px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white">
+                                   class="w-full px-3 py-2 border border-border rounded-md text-sm bg-input text-foreground">
                             <p class="mt-1 text-xs text-muted">Leave the <code class="font-mono">********</code> placeholder unchanged to keep the existing secret.</p>
                         </div>
                     </div>
@@ -70,15 +97,15 @@
                              <label class="block text-xs text-muted mb-1">بازنویسی Redirect URI (اختیاری)</label>
                             <input type="url" x-model="cfg.redirect_uri_override"
                                    :placeholder="redirectUriHint"
-                                   class="w-full px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white">
-                             <p class="mt-1 text-xs text-muted">فقط در صورتی تنظیم کنید که IdP شما به URL مطلقی نیاز داشته باشد که با هاست درخواست متفاوت است (مثلاً پشت CDN).</p>
+                                   class="w-full px-3 py-2 border border-border rounded-md text-sm bg-input text-foreground">
+                            <p class="mt-1 text-xs text-muted">فقط در صورتی تنظیم کنید که IdP شما به URL مطلقی نیاز داشته باشد که با هاست درخواست متفاوت است (مثلاً پشت CDN).</p>
                         </div>
                         <div>
                              <label class="block text-xs text-muted mb-1">Scopes (جدا شده با فاصله یا کاما)</label>
                             <input type="text" x-model="scopesString"
                                    placeholder="openid email profile groups"
-                                   class="w-full px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white">
-                             <p class="mt-1 text-xs text-muted"><code class="font-mono">openid</code> الزامی است؛ بقیه به IdP شما بستگی دارند.</p>
+                                   class="w-full px-3 py-2 border border-border rounded-md text-sm bg-input text-foreground">
+                            <p class="mt-1 text-xs text-muted"><code class="font-mono">openid</code> الزامی است؛ بقیه به IdP شما بستگی دارند.</p>
                         </div>
                     </div>
 
@@ -87,17 +114,17 @@
                         <div>
                              <label class="block text-xs text-muted mb-1">claim نام کاربری</label>
                             <input type="text" x-model="cfg.username_claim"
-                                   class="w-full px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white">
+                                   class="w-full px-3 py-2 border border-border rounded-md text-sm bg-input text-foreground">
                         </div>
                         <div>
                              <label class="block text-xs text-muted mb-1">claim ایمیل</label>
                             <input type="text" x-model="cfg.email_claim"
-                                   class="w-full px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white">
+                                   class="w-full px-3 py-2 border border-border rounded-md text-sm bg-input text-foreground">
                         </div>
                         <div>
                              <label class="block text-xs text-muted mb-1">claim نقش</label>
                             <input type="text" x-model="cfg.role_claim"
-                                   class="w-full px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white">
+                                   class="w-full px-3 py-2 border border-border rounded-md text-sm bg-input text-foreground">
                         </div>
                     </div>
 
@@ -123,10 +150,10 @@
                                 <div class="flex items-center space-x-2">
                                     <input type="text" x-model="m.claim_value"
                                            placeholder="e.g. certmate-admins"
-                                           class="flex-1 px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white">
+                                           class="flex-1 px-3 py-2 border border-border rounded-md text-sm bg-input text-foreground">
                                     <select x-model="m.role"
                                             title="Role mapped to the claim value above"
-                                            class="px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white">
+                                            class="px-3 py-2 border border-border rounded-md text-sm bg-input text-foreground">
                                         <option value="viewer">viewer</option>
                                         <option value="operator">operator</option>
                                         <option value="admin">admin</option>
@@ -147,7 +174,7 @@
                              <label class="block text-xs text-muted mb-1">نقش پیش‌فرض</label>
                             <select x-model="cfg.default_role"
                                     title="Role assigned when no mapping rule matches"
-                                    class="w-full px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white">
+                                    class="w-full px-3 py-2 border border-border rounded-md text-sm bg-input text-foreground">
                                 <option value="viewer">viewer</option>
                                 <option value="operator">operator</option>
                                 <option value="admin">admin</option>
@@ -165,13 +192,45 @@
                         </label>
                     </div>
 
+                    <!-- Two settings the API has always accepted and the form
+                         never showed. One of them is the account-takeover gate
+                         described in modules/core/oidc.py: leaving it reachable
+                         only by curl meant an operator could not see, let alone
+                         change, the thing protecting them. -->
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <label class="flex items-start space-x-2">
+                            <input type="checkbox" x-model="cfg.require_verified_email"
+                                   class="mt-1 h-4 w-4 text-primary focus:ring-primary border-border rounded">
+                            <span class="text-sm font-medium text-label">
+                                Require a verified email before linking
+                                <span class="block text-xs text-muted font-normal">
+                                    Off means an IdP account claiming an
+                                    existing user's address inherits that
+                                    user's role. Leave on unless the IdP
+                                    verifies addresses itself.
+                                </span>
+                            </span>
+                        </label>
+                        <label class="flex items-start space-x-2">
+                            <input type="checkbox" x-model="cfg.sync_role_on_login"
+                                   class="mt-1 h-4 w-4 text-primary focus:ring-primary border-border rounded">
+                            <span class="text-sm font-medium text-label">
+                                Re-derive the role from claims on every login
+                                <span class="block text-xs text-muted font-normal">
+                                    Off when roles are managed inside CertMate
+                                    and the IdP only authenticates.
+                                </span>
+                            </span>
+                        </label>
+                    </div>
+
                     <!-- Post-logout redirect -->
                     <div>
                          <label class="block text-xs text-muted mb-1">Redirect URI پس از خروج (اختیاری)</label>
                         <input type="url" x-model="cfg.post_logout_redirect_uri"
                                placeholder="https://example.com/"
-                               class="w-full px-3 py-2 border border-border rounded-md text-sm dark:bg-gray-700 dark:text-white">
-                         <p class="mt-1 text-xs text-muted">مکان ارسال کاربر پس از endpoint پایان نشست IdP. توسط برخی ارائه‌دهندگان برای SLO الزامی است.</p>
+                               class="w-full px-3 py-2 border border-border rounded-md text-sm bg-input text-foreground">
+                        <p class="mt-1 text-xs text-muted">مکان ارسال کاربر پس از endpoint پایان نشست IdP. توسط برخی ارائه‌دهندگان برای SLO الزامی است. همین URI دقیق را در IdP نیز ثبت کنید (Keycloak: گزینهٔ <em>Valid post logout redirect URIs</em> در کلاینت)، در غیر این صورت IdP خروج را با <code>invalid_redirect_uri</code> رد می‌کند.</p>
                     </div>
 
                     <!-- Save button -->

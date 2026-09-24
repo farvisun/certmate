@@ -1,0 +1,423 @@
+#!/usr/bin/env bash
+#
+# CertMate release - the single, gated path to a release. Fail-closed: any gate
+# that does not pass aborts the release. No step depends on remembering to run
+# it. Mirrors the process the repo already enforces (fresh branch off main,
+# squash-merge, tag, GH release) and the real-cert policy (path-aware, with an
+# explicit, logged override for non-issuance patches only).
+#
+# Usage:
+#   scripts/release.sh prepare X.Y.Z [--skip-real-cert "reason"] [--dry-run]
+#       Validate + run every gate, then (unless --dry-run) branch off main,
+#       bump the version, commit, push and open the release PR.
+#   scripts/release.sh publish X.Y.Z
+#       After that PR is merged to main: tag vX.Y.Z and create the GH release
+#       from docs/releases/vX.Y.Z.md. Run this only once CI is green.
+#
+# Gates (prepare): flake8 (syntax/undefined), bandit, unit+integration suite,
+# UI (Playwright), real-cert E2E (LE staging via Cloudflare from .env), Docker
+# build. The unit suite includes the version-consistency and CI-marker-coverage
+# guards. Docker must be running for the UI and real-cert gates.
+#
+set -euo pipefail
+
+# --- setup --------------------------------------------------------------------
+cd "$(dirname "$0")/.."
+ROOT="$(pwd)"
+PY="${ROOT}/.venv/bin/python"
+[ -x "$PY" ] || PY="python3"
+# macOS: Docker Desktop's CLI is not always on PATH.
+if ! command -v docker >/dev/null 2>&1 && [ -x /Applications/Docker.app/Contents/Resources/bin/docker ]; then
+  export PATH="/Applications/Docker.app/Contents/Resources/bin:$PATH"
+fi
+
+# Paths whose change makes the real-cert E2E MANDATORY (issuance pipeline).
+#
+# FAIL-CLOSED BY DESIGN. This used to be an allowlist of prefixes —
+# `modules/core/(certificate|client_cert|deployer|acme|storage)|modules/dns|...`
+# — and it had rotted badly by 2026-08-08:
+#
+#   * `modules/dns` matched nothing at all. There is no such directory; the DNS
+#     code lives at modules/core/dns_*.py. The branch was dead, so a change to
+#     dns_providers.py, dns_strategies.py, dns_alias_hook.py or
+#     dns_zone_discovery.py did NOT make the real cert mandatory — in the gate
+#     written precisely because two DNS providers had each shipped in a state
+#     where they had never worked in any release.
+#   * Sixteen issuance-critical files were uncovered in total, including
+#     modules/core/shell.py, which is how certbot is invoked at all.
+#
+# The lesson is not "add the missing prefixes" — the next rename breaks it
+# again, silently, and nobody reads a regex this long closely enough to notice.
+# So the rule is inverted: everything that can reach a certificate is sensitive,
+# and the escape hatch exists only for changes that provably cannot (docs, CI,
+# the site, static assets, tests other than the issuance ones).
+#
+# The asymmetry justifies it. A false positive costs one Let's Encrypt staging
+# issuance, about four minutes, which is already the default behaviour. A false
+# negative ships a DNS provider that cannot issue.
+#
+# tests/test_release_gate.py asserts every branch below matches a real path, so
+# a dead branch fails the suite instead of silently disarming the gate.
+SENSITIVE_RE='^(modules/|app\.py$|requirements.*\.txt|Dockerfile|docker-compose\.yml|charts/|tests/(e2e_support|test_cert_lifecycle|test_async_issuance|test_health_ready))'
+
+die()  { echo "ERROR: $*" >&2; exit 1; }
+info() { echo ">>> $*"; }
+gate() { echo; echo "[GATE] $1"; shift; "$@"; }
+
+emoji_scan() {  # fail on emoji (arrows / em-dash allowed) in the given file
+  "$PY" - "$1" <<'PY'
+import re, sys, pathlib
+EMOJI = re.compile("[\U0001F000-\U0001FAFF\U00002600-\U000026FF"
+                   "\U00002700-\U000027BF\U00002B50\U00002B55\U0000FE0F]")
+p = pathlib.Path(sys.argv[1])
+bad = [(n, l.strip()) for n, l in enumerate(p.read_text(encoding="utf-8").splitlines(), 1)
+       if EMOJI.search(l)]
+if bad:
+    for n, l in bad:
+        print(f"  {p}:{n}: {l}", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+# Each release owns a file. This used to awk a section out of one 4,780-line
+# RELEASE_NOTES.md, stopping at the next `---` rule, which meant a stray
+# horizontal rule inside a section silently truncated the GitHub release body.
+# A file has ends of its own.
+NOTES_DIR="docs/releases"
+notes_file() { echo "${NOTES_DIR}/v$1.md"; }
+notes_section() {  # print the release notes for vX.Y.Z
+  local f; f="$(notes_file "$1")"
+  [ -f "$f" ] && cat "$f"
+}
+
+semver_ok() { [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
+version_gt() {  # $1 > $2 ?
+  [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ]
+}
+
+# --- prepare ------------------------------------------------------------------
+cmd_prepare() {
+  local version="" skip_reason="" dry=0
+  version="${1:-}"; shift || true
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --skip-real-cert) skip_reason="${2:-}"; shift 2 || die "--skip-real-cert needs a reason";;
+      --dry-run) dry=1; shift;;
+      *) die "unknown flag: $1";;
+    esac
+  done
+  [ -n "$version" ] || die "usage: release.sh prepare X.Y.Z [--skip-real-cert \"reason\"] [--dry-run]"
+  semver_ok "$version" || die "not a semver X.Y.Z: $version"
+
+  info "Preconditions"
+  [ -f modules/__init__.py ] || die "run from the repo root"
+  [ -z "$(git status --porcelain)" ] || die "working tree is dirty - commit or stash first"
+  git fetch origin --quiet
+  git rev-parse --verify origin/main >/dev/null 2>&1 || die "no origin/main"
+  # The gates below run against the CHECKED-OUT tree, but the real-cert policy
+  # is computed from origin/main and the release branch is cut from origin/main
+  # (see below). If the local checkout is behind origin/main — the ordinary
+  # state right after merging a PR on GitHub — the tree that is gated and the
+  # tree that is released are different: a commit on origin/main that is not in
+  # the local checkout is never seen by flake8/bandit/pytest/the real-cert E2E,
+  # and "ALL GATES PASSED" would then vouch for a tree no gate examined. Refuse
+  # unless HEAD is exactly origin/main so the gated tree IS the released tree.
+  local head_sha origin_sha
+  head_sha="$(git rev-parse HEAD)"
+  origin_sha="$(git rev-parse origin/main)"
+  [ "$head_sha" = "$origin_sha" ] || die "local HEAD ($head_sha) is not origin/main ($origin_sha).
+The gates run against the checked-out tree but the release is cut from origin/main,
+so they would test a different tree than the one released. Align first:
+  git checkout main && git pull --ff-only
+then re-run prepare."
+  local cur; cur="$("$PY" -c 'from modules import __version__; print(__version__)')"
+  version_gt "$version" "$cur" || die "version $version is not greater than current $cur"
+
+  info "$(notes_file "$version") must exist"
+  [ -f "$(notes_file "$version")" ] || die "no $(notes_file "$version") - write the notes first"
+  [ -n "$(notes_section "$version")" ] || die "$(notes_file "$version") is empty"
+  emoji_scan "$(notes_file "$version")" || die "emoji in $(notes_file "$version") (arrows/em-dash are fine)"
+  info "the generated index is current"
+  "$PY" scripts/build_release_index.py --check || die "RELEASE_NOTES.md is stale - run scripts/build_release_index.py and commit it"
+
+  info "Real-cert policy (path-aware)"
+  local last_tag changed touches=0
+  # --match 'v*' is load-bearing, not tidiness. The clients publish from their
+  # own `clients-v*` tags, and one of those is usually the most recent tag on
+  # main. Without the filter this resolved to `clients-v0.1.3`, the diff was
+  # computed from there instead of from the last RELEASE, and a release that
+  # HAD changed modules/api/resources.py was reported as "no issuance-pipeline
+  # change" — which would have let --skip-real-cert bypass a MANDATORY gate.
+  # Caught while cutting v2.25.0; the gate ran anyway only because real-cert is
+  # the default when no skip reason is given. A fail-open gate is the exact
+  # thing this script exists to prevent.
+  last_tag="$(git describe --tags --abbrev=0 --match 'v*' origin/main 2>/dev/null || true)"
+  if [ -n "$last_tag" ]; then
+    changed="$(git diff --name-only "$last_tag..origin/main")"
+  else
+    changed=""; touches=1  # no tag reachable -> be safe, require real-cert
+  fi
+  if [ -n "$changed" ] && echo "$changed" | grep -Eq "$SENSITIVE_RE"; then touches=1; fi
+  local run_real_cert=1
+  if [ "$touches" = 1 ]; then
+    [ -z "$skip_reason" ] || die "real-cert is MANDATORY (release touches the issuance pipeline); --skip-real-cert is not allowed here. Changed:
+$(echo "$changed" | grep -E "$SENSITIVE_RE" | sed 's/^/  /')"
+    info "  issuance pipeline changed since ${last_tag:-<no tag>} -> real-cert MANDATORY"
+  elif [ -n "$skip_reason" ]; then
+    run_real_cert=0
+    info "  no issuance-pipeline change; real-cert SKIPPED (logged): $skip_reason"
+  else
+    info "  no issuance-pipeline change; real-cert still run by default (use --skip-real-cert to override)"
+  fi
+
+  # --- gates (fail-closed) ---
+  docker info >/dev/null 2>&1 || die "Docker daemon is not running (needed for UI + real-cert gates)"
+  export FLASK_ENV=testing TESTING=true
+
+  gate "flake8 (syntax, undefined names, dead code, bare excepts)" bash -c '
+    "'"$PY"'" -m flake8 . --count --select=E9,F63,F7,F82,F811,F632,E711,E712,E713,E714,F401,F841,E722 --show-source --statistics'
+  gate "bandit (medium+)" bash -c '"'"$PY"'" -m bandit -r modules/ app.py --severity-level medium -q'
+  gate "unit + integration suite (incl. version + marker-coverage guards)" \
+    "$PY" -m pytest -q -m "not ui and not e2e" -p no:cacheprovider
+  gate "UI suite (Playwright)" "$PY" -m pytest -q -m ui -p no:cacheprovider
+  if [ "$run_real_cert" = 1 ]; then
+    [ -f .env ] || die "real-cert gate needs .env with CLOUDFLARE_API_TOKEN / CERTMATE_TEST_DOMAIN"
+    gate "real-cert E2E (LE staging via Cloudflare)" bash -c '
+      set -a; . ./.env; set +a
+      [ -n "${CLOUDFLARE_API_TOKEN:-}" ] || { echo "CLOUDFLARE_API_TOKEN empty in .env" >&2; exit 1; }
+      CERTMATE_E2E_CA_PROVIDER=letsencrypt_staging "'"$PY"'" -m pytest -q -m e2e \
+        tests/test_health_ready_e2e.py tests/test_cert_lifecycle.py tests/test_async_issuance_e2e.py \
+        -p no:cacheprovider'
+  fi
+  gate "Docker build" docker build -t certmate:release-check .
+
+  echo; info "ALL GATES PASSED for v$version"
+  if [ "$dry" = 1 ]; then info "--dry-run: stopping before any branch/commit/push"; return 0; fi
+
+  # --- orchestration ---
+  local branch="release-v$version"
+  git rev-parse --verify "$branch" >/dev/null 2>&1 && die "branch $branch already exists"
+  info "Branch $branch off origin/main"
+  git checkout -q -b "$branch" origin/main
+  "$PY" - "$version" <<'PY'
+import hashlib, json, pathlib, re, sys
+v = sys.argv[1]
+init = pathlib.Path("modules/__init__.py")
+init.write_text(re.sub(r"__version__ = '[^']+'", f"__version__ = '{v}'", init.read_text()), encoding="utf-8")
+pkg = pathlib.Path("package.json"); d = json.loads(pkg.read_text())
+d["version"] = v
+pkg.write_text(json.dumps(d, indent=2) + "\n", encoding="utf-8")
+# package-lock.json carries the same version twice. npm rewrites both from
+# package.json on any install, so leaving them stale means a permanent noisy
+# diff and a lockfile that misreports its release — it had drifted two
+# releases behind before a review caught it. Rewritten textually so npm's
+# key order and formatting survive; a full `npm install --package-lock-only`
+# would also re-resolve dependencies, which a release must not do.
+lock = pathlib.Path("package-lock.json")
+if lock.exists():
+    text = lock.read_text(encoding="utf-8")
+    text = re.sub(r'(^\{\s*\n\s*"name":\s*"[^"]+",\s*\n\s*"version":\s*")[^"]+(")',
+                  rf"\g<1>{v}\g<2>", text, count=1)
+    text = re.sub(r'("":\s*\{\s*\n\s*"name":\s*"[^"]+",\s*\n\s*"version":\s*")[^"]+(")',
+                  rf"\g<1>{v}\g<2>", text, count=1)
+    lock.write_text(text, encoding="utf-8")
+# The /health example in the Docker Hub README prints a version. Bump it here
+# rather than by hand: an example that has to be remembered is an example that
+# goes stale, and test_version_consistency pins it.
+dh = pathlib.Path("README.dockerhub.md")
+dh.write_text(
+    re.sub(r'("version": ")[0-9]+\.[0-9]+\.[0-9]+(")', rf"\g<1>{v}\g<2>", dh.read_text()),
+    encoding="utf-8",
+)
+# Same reasoning for the "Current Version" line on every docs landing page, in
+# every language. These were bumped by hand for v2.24.0 and then AGAIN for
+# v2.24.1 (#483, #487) because the script did not own them. Globbed, so a
+# translation added later is picked up without editing this script;
+# test_version_consistency fails the build if one is ever missed.
+# The Helm chart carries the release number twice, and BOTH are bumped: the
+# chart versions with the application on purpose (see charts/certmate/Chart.yaml).
+# `version` must move for a publish to be a new artifact rather than a rejected
+# duplicate; `appVersion` is the image tag the chart deploys by default.
+# SECURITY.md names the supported MINOR line, not the full version, so it only
+# actually moves on a x.y.0 — but it moves without anyone remembering, which is
+# the point. It had gone four minor releases stale saying 2.21.x while 2.25.0
+# shipped: a researcher reading that concludes the current version is out of
+# scope, or that the project is abandoned.
+sec = pathlib.Path("SECURITY.md")
+if sec.exists():
+    major, minor, _ = v.split(".")
+    line = f"{major}.{minor}"
+    text = sec.read_text(encoding="utf-8")
+    text = re.sub(r"`[0-9]+\.[0-9]+\.x`", f"`{line}.x`", text)
+    text = re.sub(r"`< [0-9]+\.[0-9]+`", f"`< {line}`", text)
+    sec.write_text(text, encoding="utf-8")
+
+chart = pathlib.Path("charts/certmate/Chart.yaml")
+if chart.exists():
+    text = chart.read_text(encoding="utf-8")
+    # Both: the chart versions with the application on purpose (see Chart.yaml).
+    text = re.sub(r'(?m)^(appVersion:\s*")[^"]+(")', rf"\g<1>{v}\g<2>", text)
+    text = re.sub(r'(?m)^(version:\s*)[0-9]+\.[0-9]+\.[0-9]+\s*$', rf"\g<1>{v}", text)
+    chart.write_text(text, encoding="utf-8")
+# README.md, not index.md: `docs/index.md` was never a documentation index —
+# it was the client-certificate launch write-up wearing that filename, and it
+# only carried the version stamp because of the name. The index is README.md,
+# which is also what GitHub renders when you browse to `docs/`.
+english_readme = pathlib.Path("docs/README.md")
+before = hashlib.sha256(english_readme.read_bytes()).hexdigest()[:16]
+
+docs = sorted(pathlib.Path("docs").glob("README.md")) + sorted(pathlib.Path("docs").glob("*/README.md"))
+for page in docs:
+    text = page.read_text(encoding="utf-8")
+    bumped = re.sub(
+        r"(?m)^(\*\*[^*]+\*\*\s*:?[ \t]*)[0-9]+\.[0-9]+\.[0-9]+[ \t]*$",
+        rf"\g<1>{v}",
+        text,
+    )
+    if bumped != text:
+        page.write_text(bumped, encoding="utf-8")
+
+# Re-stamp the translations that were in step before this bump.
+#
+# scripts/check_translation_freshness.py asks every translated page which
+# English page it was made from, by recording the first 16 hex of that page's
+# sha256. Bumping the version changes docs/README.md, so every translated
+# README is reported as behind by a release that just edited all five files
+# with the same one-line change. That is the gate describing the release
+# process rather than the translations, and it failed the v2.33.0 release PR.
+#
+# Only pages whose recorded hash matched BEFORE the bump are re-stamped. A
+# translation that was already behind stays behind: the release must not be
+# able to declare a stale translation fresh by touching a version number in it.
+after = hashlib.sha256(english_readme.read_bytes()).hexdigest()[:16]
+if after != before:
+    marker = "CERTMATE-TRANSLATED-FROM"
+    for page in sorted(pathlib.Path("docs").glob("*/README.md")):
+        text = page.read_text(encoding="utf-8")
+        if f"{marker} {before}" not in text:
+            continue
+        page.write_text(
+            text.replace(f"{marker} {before}", f"{marker} {after}"),
+            encoding="utf-8",
+        )
+        print(f"    re-stamped {page} -> {after}")
+PY
+  [ "$("$PY" -c 'import json;from modules import __version__;print(json.load(open("package.json"))["version"]==__version__)')" = "True" ] \
+    || die "version files disagree after bump"
+  local body="chore(release): v$version"
+  [ "$run_real_cert" = 0 ] && body="$body
+
+real-cert E2E skipped (non-issuance change): $skip_reason"
+  # README.dockerhub.md too: the bump above rewrites it, and leaving it out of
+  # the commit produced a release PR whose own CI failed on the version-
+  # consistency test — a gate the local run cannot catch, because the bump
+  # happens after the gates.
+  git add modules/__init__.py package.json package-lock.json README.dockerhub.md charts/certmate/Chart.yaml SECURITY.md docs/README.md docs/*/README.md
+  # No co-author trailer. This commit is generated by this script — it bumps
+  # version strings from a template — so attributing it to whoever or whatever
+  # happened to type `release.sh prepare` states something that is not true,
+  # and states it in the permanent record. It named a model that had not been
+  # used for months, which is how it was noticed.
+  git commit -q -m "$body"
+  info "Push + open PR"
+  git push -u origin "$branch" --quiet
+  local pr_body; pr_body="$(notes_section "$version")
+$( [ "$run_real_cert" = 1 ] && echo "Gates: unit+integration, UI, real-cert E2E (LE staging), Docker build - all green locally." \
+     || echo "Gates: unit+integration, UI, Docker build - all green locally. Real-cert E2E skipped (non-issuance): $skip_reason." )"
+  gh pr create --base main --head "$branch" \
+    --title "v$version - $(notes_section "$version" | head -1 | sed -E 's/^## v[0-9.]+ \(?//; s/\)?$//')" \
+    --body "$pr_body"
+  echo; info "PR opened. When CI is green and it is merged, run: scripts/release.sh publish $version"
+}
+
+# --- publish ------------------------------------------------------------------
+cmd_publish() {
+  local version="${1:-}"
+  [ -n "$version" ] || die "usage: release.sh publish X.Y.Z"
+  semver_ok "$version" || die "not a semver X.Y.Z: $version"
+  git fetch origin --quiet
+  git checkout -q main
+  git pull --ff-only origin main --quiet
+  local head_v; head_v="$("$PY" -c 'from modules import __version__; print(__version__)')"
+  [ "$head_v" = "$version" ] || die "main is at v$head_v, not v$version - is the release PR merged?"
+  git log -1 --format='%s' | grep -q "v$version" || die "main HEAD is not the v$version release commit"
+  git rev-parse --verify "v$version" >/dev/null 2>&1 && die "tag v$version already exists"
+  emoji_scan "$(notes_file "$version")" || die "emoji in $(notes_file "$version")"
+  local notes; notes="$(notes_section "$version")"
+  [ -n "$notes" ] || die "no $(notes_file "$version") for v$version"
+  local title; title="$(echo "$notes" | head -1 | sed 's/^## //')"
+
+  # CI status on the exact commit being released (#413). Every other gate
+  # here checks the *contents* of the release; none checked whether main
+  # actually builds. A Dependabot bump landing between `prepare` and
+  # `publish` was enough to tag and push a broken tree — and the tag push
+  # is what publishes :latest.
+  info "CI status on the release commit"
+  local sha; sha="$(git rev-parse HEAD)"
+  # --limit 100: the default page size is 20, and reruns plus the
+  # non-required workflows can push a required one off the first page —
+  # which would read as MISSING and block a perfectly good release.
+  local runs; runs="$(gh run list --commit "$sha" --limit 100 \
+    --json name,conclusion,status,workflowName,createdAt 2>/dev/null || echo '')"
+  [ -n "$runs" ] || die "could not read CI status for $sha (is gh authenticated?)"
+  local verdict; verdict="$(printf '%s' "$runs" | "$PY" -c '
+import json, sys
+
+# Only the workflows behind the REQUIRED branch-protection checks gate the
+# release. UI tests and E2E (staging) run on the self-hosted runner and are
+# deliberately not required: if that box is offline their runs sit queued
+# forever, and a release must not hang on it. They are still reported.
+REQUIRED = {"CI", "Build Multi-Platform Docker Images", "CodeQL", "Lint (emoji)"}
+runs = json.load(sys.stdin)
+
+# Keep only the most recent run per workflow: a rerun creates a second run,
+# and judging the older attempt would fail a release whose rerun is green.
+latest = {}
+for r in sorted(runs, key=lambda r: r.get("createdAt") or ""):
+    latest[r.get("workflowName")] = r
+runs = list(latest.values())
+
+pending, bad, other = set(), set(), []
+for r in runs:
+    name = r.get("workflowName", "?")
+    state = r.get("conclusion") or r.get("status")
+    if name not in REQUIRED:
+        other.append(name + "=" + str(state))
+        continue
+    if r.get("status") != "completed":
+        pending.add(name)
+    # cancelled counts as failed: a cancelled required check is exactly how
+    # a broken build slipped through before (see the v2.21.4 release).
+    elif r.get("conclusion") not in ("success", "skipped", "neutral"):
+        bad.add(name + "=" + str(r.get("conclusion")))
+missing = REQUIRED - {r.get("workflowName") for r in runs}
+if pending:
+    print("PENDING " + ", ".join(sorted(pending)))
+elif bad:
+    print("FAILED " + ", ".join(sorted(bad)))
+elif missing:
+    print("MISSING " + ", ".join(sorted(missing)))
+else:
+    print("OK " + ("; not-required: " + ", ".join(sorted(other)) if other else ""))')"
+  case "$verdict" in
+    OK*)      info "  ${verdict}" ;;
+    PENDING*) die "CI still running on $sha (${verdict#PENDING }) - wait for it" ;;
+    FAILED*)  die "CI is not green on $sha: ${verdict#FAILED }" ;;
+    MISSING*) die "no CI run found on $sha for: ${verdict#MISSING } - push the commit and let CI run" ;;
+    *)        die "could not interpret CI status for $sha: $verdict" ;;
+  esac
+
+  info "Tag + push v$version"
+  git tag -a "v$version" -m "$title" HEAD
+  git push origin "v$version" --quiet
+  info "GH release"
+  printf '%s\n' "$notes" | gh release create "v$version" --title "$title" --notes-file - --latest
+  info "Released v$version"
+}
+
+# --- dispatch -----------------------------------------------------------------
+case "${1:-}" in
+  prepare) shift; cmd_prepare "$@";;
+  publish) shift; cmd_publish "$@";;
+  *) die "usage: release.sh {prepare|publish} X.Y.Z [...]";;
+esac

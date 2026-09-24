@@ -5,7 +5,9 @@ Handles certificate creation, renewal, and information retrieval
 
 import os
 import copy
+import hashlib
 import json
+import re
 import shlex
 import subprocess
 import sys
@@ -13,17 +15,36 @@ import tempfile
 import time
 import logging
 import shutil
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+
+try:  # POSIX only; the lock degrades to a no-op without it
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX
+    fcntl = None
 import threading
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from datetime import datetime, timedelta
 from cryptography import x509
 from .shell import ShellExecutor
-from .dns_strategies import DNSStrategyFactory, HTTP01Strategy, acme_webroot_dir, check_certbot_plugin_installed
-from .constants import CERTIFICATE_FILES, get_domain_name
-from .utils import DeploymentStatusCache, validate_domain, utc_now, utc_now_iso, validate_key_options
+from .dns_strategies import (DNSStrategyFactory, HTTP01Strategy, acme_webroot_dir,
+                             check_certbot_plugin_installed, clamp_propagation_seconds)
+from .constants import (METADATA_SCHEMA_VERSION, CERTIFICATE_FILES,
+                        DEFAULT_RENEWAL_THRESHOLD_DAYS)
+from .inventory_sources import collect_domain_sources
+from .domain_entries import entry_auto_renew, entry_domain
+from .structured_logging import LogContext, new_correlation_id
+from .csr_issuance import (
+    CSR_OUTPUT_DIRNAME, CSR_OUTPUT_FILES, CSRError, csr_domains,
+    csr_fingerprint, read_csr, to_csr_command,
+)
+from .domain_paths import reject_unsafe_domain, validate_domain_path
+from .utils import (
+    DeploymentStatusCache, validate_domain, utc_now, utc_now_iso, validate_key_options,
+    repair_certbot_lineage_symlinks,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +64,7 @@ DNS_ALIAS_SUPPORTED_PROVIDERS = {
     'infomaniak',
     'acme-dns',
     'duckdns',
+    'rfc2136',
 }
 
 DNS_ALIAS_REQUIRED_FIELDS = {
@@ -61,6 +83,7 @@ DNS_ALIAS_REQUIRED_FIELDS = {
     'infomaniak': ('api_token',),
     'acme-dns': ('api_url', 'username', 'password', 'subdomain'),
     'duckdns': ('api_token',),
+    'rfc2136': ('nameserver', 'tsig_key', 'tsig_secret'),
 }
 
 
@@ -70,6 +93,285 @@ class DomainOperationInProgress(RuntimeError):
     def __init__(self, domain):
         self.domain = domain
         super().__init__(f"A certificate operation for {domain} is already in progress")
+
+
+# Metadata keys a reissue (create_certificate(replace=True)) is authoritative
+# for: they are rebuilt from the issuance parameters on every reissue, and the
+# alias pair must be *cleared* when the reissue drops the alias. Every other
+# key on disk — the deployment probe config written by PATCH, deployment_status,
+# renewed_at, and anything a future version adds — belongs to the certificate,
+# not to this issuance, and survives (#421).
+_REISSUE_OWNED_METADATA_KEYS = frozenset({
+    'domain', 'san_domains', 'dns_provider', 'challenge_type', 'created_at',
+    'email', 'staging', 'account_id', 'ca_provider', 'ca_account_id',
+    'domain_alias', 'alias_dns_provider', 'storage_warning',
+})
+
+# Every key CertMate itself writes into metadata.json. Used as an allowlist
+# when a corrupt file is quarantined and the log names what it still carried:
+# intersecting with this set means no identifier-shaped VALUE found in the
+# debris ('{"ca_provider": "private_ca": ' matches "private_ca" as a key)
+# can reach the log — by construction, not by luck.
+_KNOWN_METADATA_KEYS = _REISSUE_OWNED_METADATA_KEYS | frozenset({
+    'renewed_at', 'deployment_host', 'deployment_port', 'deployment_protocol',
+    'deployment_status', 'key_type', 'key_size', 'elliptic_curve',
+})
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Persist a directory entry, so a rename into it survives a power loss.
+
+    Syncing the file only persists its contents. The link between the name and
+    those contents lives in the directory, and until the directory is synced a
+    crash can replay as "the rename never happened" — or, worse on some
+    filesystems, as the new name pointing at nothing.
+
+    Never raises. Some filesystems refuse to open a directory for this
+    (Windows, a few network mounts); the write has already succeeded and
+    degrading to the old, weaker guarantee is better than failing an issuance
+    over the sync of an entry.
+    """
+    try:
+        fd = os.open(str(directory), os.O_RDONLY)
+    except OSError as error:
+        logger.debug("Cannot open %s to fsync it: %s", directory, error)
+        return
+    try:
+        os.fsync(fd)
+    except OSError as error:
+        logger.debug("Cannot fsync %s: %s", directory, error)
+    finally:
+        os.close(fd)
+
+
+def _remove_temp_files(artifacts):
+    """Delete every temp file an issuance or renewal created.
+
+    Never raises: a cleanup failure must not turn a successful issuance into a
+    reported error, and must not mask the real exception on the failure path.
+    """
+    for path in artifacts.temp_paths():
+        if not path:
+            continue
+        try:
+            os.unlink(path)
+        except (FileNotFoundError, OSError):
+            pass
+
+
+def _propagation_seconds(settings, dns_provider, strategy):
+    """How long to wait for a DNS-01 TXT record to propagate, in seconds.
+
+    One formula with one home (#666). It existed twice — once in
+    ``create_certificate`` for every provider, once in ``renew_certificate``
+    narrowed to ``custom-script`` — with identical arithmetic and a comment on
+    the second saying "Mirror the create path". Two copies that must agree, one
+    of which announces that it is a copy, is the shape this issue is about.
+
+    Falls back to the strategy default when the settings map has no entry, when
+    the entry will not parse, or when settings cannot be read at all, and
+    clamps to 1 second .. 1 hour so a typo cannot make an issuance hang or
+    return before the record is visible.
+    """
+    try:
+        propagation_map = (settings or {}).get('dns_propagation_seconds', {}) or {}
+    except Exception as e:
+        logger.debug("Failed to read dns_propagation_seconds: %s", e)
+        propagation_map = {}
+
+    default_seconds = strategy.default_propagation_seconds
+    # The bound lives in dns_strategies now, because the account-level field
+    # needs the same one and was exported unbounded.
+    return clamp_propagation_seconds(
+        propagation_map.get(dns_provider, default_seconds), default_seconds)
+
+
+class _LazySettings:
+    """Load settings at most once, and only if something asks.
+
+    A fully-specified HTTP-01 request needs none of it and this is the issuance
+    hot path, so the original code threaded ``if settings is None: settings =
+    ...load_settings()`` through five branches of one 230-line method.
+    Splitting that method into four would have meant threading it through four
+    signatures instead; this keeps the property in one object.
+
+    ``value`` is None when nothing ever asked, which is what
+    ``_PreparedIssuance.settings`` carries downstream.
+    """
+
+    def __init__(self, loader):
+        self._loader = loader
+        self._value = None
+        self._loaded = False
+
+    def get(self):
+        if not self._loaded:
+            self._value = self._loader()
+            self._loaded = True
+        return self._value
+
+    @property
+    def value(self):
+        """What was loaded, or None if it never was."""
+        return self._value
+
+
+def _resolve_all_domains(domain, san_domains, challenge_type):
+    """The -d list: the primary domain plus its validated, de-duplicated SANs.
+
+    Pure, and split out from the rest of preparation because it is the only
+    part with no dependency on settings, the CA, or the filesystem — which is
+    also what makes it worth testing exhaustively.
+    """
+    # Same reasoning as the other units in this file: the value ends up as a
+    # certbot -d argument and in a log line, so this enforces its own
+    # precondition rather than trusting whichever caller it acquires next.
+    _reject_path_escaping_domain(domain)
+    all_domains = [domain]
+    if san_domains:
+        # Filter and validate SAN domains. validate_domain returns the
+        # normalised name (URL netloc extracted, lowercased) as its
+        # second value; append THAT, not the raw entry, so a SAN never
+        # reaches certbot's -d as a URL form or a case variant. De-dup
+        # is against the normalised value and the already-normalised
+        # primary, so "Example.com" as a SAN of "example.com" collapses
+        # instead of producing a duplicate -d.
+        for san in san_domains:
+            san = san.strip()
+            if not san:
+                continue
+            is_valid, san_normalized = validate_domain(san)
+            if not is_valid:
+                raise ValueError(
+                    f"Invalid SAN domain '{san}': {san_normalized}")
+            if san_normalized != domain and san_normalized not in all_domains:
+                all_domains.append(san_normalized)
+        logger.info(f"Creating SAN certificate with domains: {', '.join(all_domains)}")
+
+    # HTTP-01 does not support wildcard domains
+    if challenge_type == 'http-01':
+        for d in all_domains:
+            if d.startswith('*.'):
+                raise ValueError("HTTP-01 challenge does not support wildcard domains. Use DNS-01 instead.")
+    return all_domains
+
+
+def _reject_path_escaping_domain(domain):
+    """Refuse a domain that could escape ``cert_dir`` when used as a path.
+
+    ``domain`` becomes a directory name under the certificate root, the certbot
+    ``--config-dir``, and the key of the per-domain lock. A URL-form value whose
+    netloc passed ``validate_domain`` but was kept raw ("https://x/../y") would
+    escape ``cert_dir`` and drop the ACME account private key under the public
+    ``/.well-known/acme-challenge`` webroot.
+
+    Reject rather than normalise: normalisation is the source's job, and
+    reaching this sink with path characters means something upstream failed, so
+    the request must not proceed.
+
+    Module-level and called from every entry point rather than written inline
+    once (#666). While it lived at the top of ``create_certificate`` it
+    protected the code below it by position; extracting that code into
+    ``_prepare_issuance`` produced a unit that did not enforce its own
+    precondition, which is exactly the shape CodeQL flags — and it was right.
+    """
+    reject_unsafe_domain(domain)
+
+
+@dataclass
+class _IssuanceArtifacts:
+    """Temp files an issuance creates, which its caller must remove.
+
+    Mutable on purpose, and populated as each file appears rather than handed
+    back at the end: the builder can raise after writing a credentials file,
+    and a live cloud private key must not outlive the operation because the
+    failure came one line too early.
+    """
+    ca_extra_env: dict = field(default_factory=dict)
+    credentials_file: str | None = None
+    extra_credential_files: list = field(default_factory=list)
+    alias_hook_config: str | None = None
+
+    def temp_paths(self):
+        """Every path whose file must be removed when the operation ends.
+
+        One list with one owner. Create and renew each had their own deletion
+        loop over their own set of locals, and the sets had already diverged:
+        renew tracked the DNS-alias hook config separately while create folded
+        it into ``credentials_file``, and only renew knew about the CA bundle
+        as a path rather than as an environment value. A file that one path
+        removes and the other forgets is a secret left on disk.
+        """
+        return [
+            self.credentials_file,
+            self.alias_hook_config,
+            *self.extra_credential_files,
+            self.ca_extra_env.get('REQUESTS_CA_BUNDLE'),
+        ]
+
+
+@dataclass(frozen=True)
+class _PreparedIssuance:
+    """Everything ``create_certificate`` resolves before it builds a command.
+
+    A frozen record rather than fourteen locals threaded through a 517-line
+    function: the point of splitting the phases is that what crosses between
+    them is visible and cannot be reassigned halfway down.
+    """
+    settings: dict | None
+    ca_provider: str
+    staging: bool
+    ca_account_config: dict | None
+    used_ca_account_id: str | None
+    challenge_type: str
+    dns_provider: str | None
+    dns_config: dict | None
+    strategy: object
+    all_domains: list
+    cert_dir: Path
+    cert_output_dir: Path
+    key_type: str | None
+    key_size: int | None
+    elliptic_curve: str | None
+
+
+def _private_key_present(key_state):
+    """Was a private key found beside the certificate?
+
+    Four states, three answers, so it is written out rather than derived from a
+    comparison. `'unknown'` means nobody looked — the storage-backend listing
+    path fetches the certificate without the key on purpose. `'external'` means
+    we looked and there is none, deliberately: the appliance holds it (#599).
+    """
+    if key_state == 'unknown':
+        return None
+    return key_state not in ('missing', 'external')
+
+
+def _usable(key_state):
+    """Can this instance complete a TLS handshake with this certificate?
+
+    `'external'` is None rather than False: the certificate IS usable, on the
+    appliance that holds the key. Reporting False would put a CSR-only
+    certificate in the same bucket as one whose key was lost, which is the
+    distinction the state exists to draw.
+    """
+    if key_state in ('unknown', 'external'):
+        return None
+    return key_state == 'present'
+
+
+class MetadataWriteRefused(RuntimeError):
+    """The metadata write was refused by design, not by a failure.
+
+    RuntimeError so the existing route arm keeps working unchanged; the API
+    layer narrows it to 409, because a guard doing its job is not a server
+    error and telling an operator "500" sends them looking for one.
+    """
+
+
+class MetadataWriteFailed(RuntimeError):
+    """The metadata write was attempted and could not be completed."""
 
 
 class CertificateManager:
@@ -86,15 +388,70 @@ class CertificateManager:
         # Per-domain locks to prevent concurrent create/renew on the same domain
         self._domain_locks: dict[str, threading.Lock] = {}
         self._domain_locks_mutex = threading.Lock()
+        # domain -> (key digest, cert digest, answer) for private_key_state.
+        # One entry per domain, like _domain_locks above and bounded the same
+        # way: by how many certificates this instance manages. See
+        # private_key_state for why the answer is worth remembering at all.
+        self._key_state_cache: dict[str, tuple[bytes, bytes, str]] = {}
+        self._key_state_mutex = threading.Lock()
         # Optional audit logger, injected by the factory so unattended renewals
         # produce an attributed (actor.kind='scheduler') audit record. None in
         # standalone/unit contexts, where emission is simply skipped.
         self._audit_logger = None
         self._renewal_job_id = 'certificate_renewal_check'
+        # Optional event bus, injected by the factory. The manual/API renewal
+        # path publishes 'certificate_renewed' via the IssuanceExecutor; the
+        # scheduler calls renew_certificate() directly, so without this the
+        # deploy hooks never fire after a background renewal (#329). None in
+        # standalone/unit contexts, where publishing is simply skipped.
+        self._event_bus = None
 
     def set_audit_logger(self, audit_logger):
         """Wire an AuditLogger so scheduled renewals are recorded. Optional."""
         self._audit_logger = audit_logger
+
+    def set_event_bus(self, event_bus):
+        """Wire an EventBus so scheduled renewals notify the deploy pipeline
+        (#329). Optional — publishing is skipped when unset."""
+        self._event_bus = event_bus
+
+    def _publish_renewed_event(self, domain):
+        """Publish the same 'certificate_renewed' event the manual/API path
+        emits, so deploy hooks fire after an unattended renewal too (#329).
+
+        No-op when no event bus is wired; never raises — a notification
+        failure must not turn a successful renewal into a reported failure.
+        The payload mirrors IssuanceExecutor's: {'domain': domain}."""
+        if self._event_bus is None:
+            return
+        try:
+            self._event_bus.publish('certificate_renewed', {'domain': domain})
+        except Exception:  # pragma: no cover - defensive
+            logger.exception(
+                "Failed to publish certificate_renewed for %s", domain
+            )
+
+    def _publish_failed_event(self, domain, error):
+        """Publish 'certificate_failed' for an unattended renewal failure (#417).
+
+        The manual/API path (resources.py) and the async executor
+        (cert_jobs.py) both emit this; the scheduler did not, so a nightly
+        renewal that failed for 30 days straight produced audit records and
+        log lines but never an email or a Slack message — the two channels
+        the operator actually watches.
+
+        Same contract as _publish_renewed_event: no-op without an event bus,
+        never raises."""
+        if self._event_bus is None:
+            return
+        try:
+            self._event_bus.publish(
+                'certificate_failed', {'domain': domain, 'error': str(error)}
+            )
+        except Exception:  # pragma: no cover - defensive
+            logger.exception(
+                "Failed to publish certificate_failed for %s", domain
+            )
 
     def _audit_scheduled_renew(self, domain, status, error=None):
         """Emit an attributed audit record for an unattended renewal. No-op
@@ -115,6 +472,83 @@ class CertificateManager:
         except Exception:  # pragma: no cover - defensive
             logger.debug("Failed to emit scheduled-renew audit for a domain")
 
+    def _record_renewal_metrics(self, domain, cert_info, success, duration,
+                                error=None):
+        """Emit renewal outcome + duration to the Prometheus collector.
+
+        The collector has always exposed certmate_certificate_renewals_total
+        and the renewal duration histogram, but nothing incremented them, so
+        every renewal series was permanently empty: a scheduler that had
+        silently stopped renewing looked exactly like one that was working.
+        Recording here — where check_renewals already knows the outcome —
+        keeps it out of the issuance hot path and off its many return points.
+
+        Never raises: telemetry must not be the reason a renewal run aborts.
+        """
+        try:
+            from .metrics import metrics_collector
+            provider = (cert_info or {}).get('dns_provider') or 'unknown'
+            metrics_collector.record_certificate_renewal(
+                domain, provider, success)
+            metrics_collector.record_certificate_renewal_time(
+                provider, duration)
+            if not success:
+                metrics_collector.record_acme_error(
+                    type(error).__name__ if error else 'unknown',
+                    domain, provider)
+                self._record_rate_limit_hit(error, provider, 'renewal')
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("Failed to record renewal metrics for a domain")
+
+    def _record_creation_metrics(self, domain, dns_provider, success, duration,
+                                 error=None):
+        """Emit issuance outcome + duration to the Prometheus collector.
+
+        The renewal path has recorded its outcome since #417; the creation path
+        recorded nothing, so certmate_certificate_requests_total and the
+        creation duration histogram were exported empty at every scrape while
+        the renewal series next to them moved. An operator could not answer
+        'how many certificates did we issue this week, and how many attempts
+        failed' from /metrics at all, and a Let's Encrypt outage during a burst
+        of new issuance registered as zero ACME errors — because the only
+        record_acme_error call site was the renewal one.
+
+        Never raises: telemetry must not be the reason an issuance that already
+        obtained a certificate is reported as failed.
+        """
+        try:
+            from .metrics import metrics_collector
+            provider = dns_provider or 'unknown'
+            metrics_collector.record_certificate_request(
+                domain, provider, success)
+            metrics_collector.record_certificate_creation_time(
+                provider, duration)
+            if not success:
+                metrics_collector.record_acme_error(
+                    type(error).__name__ if error else 'unknown',
+                    domain, provider)
+                self._record_rate_limit_hit(error, provider, 'issuance')
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("Failed to record issuance metrics for a domain")
+
+    @staticmethod
+    def _record_rate_limit_hit(error, provider, limit_type):
+        """Count a CA refusal that was a rate limit rather than a fault.
+
+        certmate_acme_rate_limit_hits_total is the one series an operator of
+        this software would alert on first, and it could never fire: the metric
+        was declared and no code path incremented it — monitoring/prometheus-alerts.yml
+        says so, and omits the alert for that reason. It is separated from the
+        generic ACME error counter because the two mean opposite things about
+        what to do next: an error is worth retrying, a rate limit is what
+        retrying causes.
+        """
+        from .utils import is_acme_rate_limit
+        if error is None or not is_acme_rate_limit(error):
+            return
+        from .metrics import metrics_collector
+        metrics_collector.record_rate_limit_hit(limit_type, provider)
+
     @staticmethod
     def _certificate_info_cache_ttl() -> int:
         try:
@@ -132,7 +566,9 @@ class CertificateManager:
             return 5.0
 
     @staticmethod
-    def _coerce_renewal_threshold_days(settings: dict | None, default: int = 30) -> int:
+    def _coerce_renewal_threshold_days(
+            settings: dict | None,
+            default: int = DEFAULT_RENEWAL_THRESHOLD_DAYS) -> int:
         """Return a usable renewal threshold in days from settings.
 
         A non-int, zero, or negative ``renewal_threshold_days`` (a typo via
@@ -178,36 +614,542 @@ class CertificateManager:
 
     @staticmethod
     def _atomic_binary_copy(src: Path, dest: Path) -> None:
-        """Copy a binary file atomically via a temp sibling + rename."""
+        """Copy a binary file atomically via a temp sibling + rename,
+        preserving the source's permission bits.
+
+        Without copymode the temp is created under the process umask
+        (typically 0644). The renew path copies certbot's live files with this
+        helper, so a renewed privkey.pem — which certbot writes 0600 — would
+        land world-readable after every renewal. The local storage backend
+        re-chmods afterwards, but a cloud backend never touches the local file,
+        so it would silently stay 0644. The create path already calls
+        shutil.copymode for exactly this reason; mirror it here."""
         tmp = dest.with_suffix('.tmp')
         try:
             tmp.write_bytes(src.read_bytes())
+            shutil.copymode(src, tmp)
             tmp.replace(dest)
         except Exception:
             tmp.unlink(missing_ok=True)
             raise
 
+    def _seed_acme_account(self, domain, cert_dir, ca_provider, ca_account_id):
+        """Give a new domain the ACME account a sibling already registered.
+
+        `--config-dir` is per domain (ca_manager.build_certbot_command), and
+        certbot keeps its ACME account under the config dir. So every new
+        domain registered a brand-new account with the CA: 50 domains through
+        POST /api/web/certificates/batch — the size this product accepts in one
+        request — is 50 registrations from one IP in one run, which no CA
+        allows. It also leaves 50 account private keys on disk, each one a
+        credential that every backup then carries.
+
+        Copying the donor's `accounts/` tree in before certbot runs makes it
+        find a registered account and skip registration. This cannot bind a
+        certificate to the wrong account: certbot indexes accounts by the ACME
+        directory URL, so a tree that does not match the `--server` in use is
+        ignored and certbot registers exactly as it does today. The
+        ca_account_id match is belt-and-braces on top of that, for two CA
+        accounts (different EAB credentials) on the same server.
+
+        Best-effort by design. Any failure leaves the directory untouched and
+        the run proceeds unchanged — this is an optimisation on the issuance
+        path, and the issuance path must not acquire a new way to fail.
+        """
+        # `domain` becomes a directory name three lines down. Its one caller
+        # already screens it, but a unit that builds paths from a parameter
+        # enforces its own precondition rather than relying on where it is
+        # called from (#672).
+        _reject_path_escaping_domain(domain)
+        try:
+            target = Path(cert_dir) / domain / 'accounts'
+            if target.exists() and any(target.rglob('*.json')):
+                return None                      # already has an account
+            for candidate in sorted(Path(cert_dir).iterdir()):
+                if not candidate.is_dir() or candidate.name == domain:
+                    continue
+                donor = candidate / 'accounts'
+                if not donor.is_dir() or not any(donor.rglob('*.json')):
+                    continue
+                metadata = self._load_metadata(candidate.name)
+                if metadata.get('ca_provider') != ca_provider:
+                    continue
+                if (metadata.get('ca_account_id') or None) != (ca_account_id or None):
+                    continue
+                # Stage, then promote. copytree failing halfway would
+                # otherwise leave a partial accounts/ tree, and the
+                # "already has an account" check above would read that
+                # wreckage as a registered account and skip seeding for
+                # good (Copilot, #604). Same shape as _publish_flat_files.
+                staging = target.parent / '.accounts-seeding'
+                shutil.rmtree(staging, ignore_errors=True)
+                try:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copytree(donor, staging)
+                    if target.exists():
+                        shutil.copytree(staging, target, dirs_exist_ok=True)
+                        shutil.rmtree(staging, ignore_errors=True)
+                    else:
+                        staging.rename(target)
+                except Exception:
+                    shutil.rmtree(staging, ignore_errors=True)
+                    raise
+                logger.info(
+                    "Reusing the ACME account registered for %s instead of "
+                    "registering a new one for %s", candidate.name, domain)
+                return candidate.name
+        except Exception as e:                   # noqa: BLE001 - best effort
+            logger.debug("Could not seed an ACME account for %s: %s", domain, e)
+        return None
+
+    def _stale_flat_files(self, src_dir: Path, dest_dir: Path):
+        """Which of CERTIFICATE_FILES differ between live/ and the flat copy.
+
+        `live/<domain>/` is certbot's copy and the only ground truth. The flat
+        files beside it are what /download serves, what deploy hooks ship and
+        what the storage backends push, so any disagreement between the two is
+        an operator-visible defect regardless of how it happened.
+
+        Returns [] when the live directory is absent — an imported or
+        externally-managed certificate has nothing to reconcile against, and
+        must not be reported as stale.
+        """
+        if not src_dir.is_dir():
+            return []
+        stale = []
+        for file_name in CERTIFICATE_FILES:
+            src_file, dest_file = src_dir / file_name, dest_dir / file_name
+            if not src_file.exists():
+                continue
+            try:
+                if (not dest_file.exists()
+                        or src_file.read_bytes() != dest_file.read_bytes()):
+                    stale.append(file_name)
+            except OSError:
+                stale.append(file_name)
+        return stale
+
+    @staticmethod
+    @contextmanager
+    def _publish_lock(dest_dir: Path):
+        """Serialise the stage-and-promote window across PROCESSES.
+
+        The per-domain lock held by callers is a threading.Lock, so it orders
+        threads inside one worker and nothing else. Promote is four independent
+        renames and the staging files are named after their destination, so two
+        processes publishing the same domain shared both the temporaries and
+        the rename sequence. A cross-process race could therefore leave
+        cert.pem from one issuance beside privkey.pem from another — a pair
+        that cannot complete a handshake, served straight off disk by the
+        download endpoint and pushed to every deploy hook.
+
+        Reproduced before fixing: two processes publishing distinguishable
+        generations produced a split bundle roughly one run in six.
+
+        Keyed on the destination directory, so different domains never
+        contend. Best-effort by design, matching the renewal lock: where flock
+        is unavailable (some network filesystems) this yields rather than
+        refusing to publish — no worse than the previous behaviour, and
+        failing closed here would mean declining to install a certificate the
+        CA has already issued.
+        """
+        lock_path = Path(dest_dir) / '.publish.lock'
+        handle = None
+        try:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            handle = open(lock_path, 'w')
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        except (OSError, NameError, AttributeError) as exc:
+            logger.debug("Publish lock unavailable for %s (%s); proceeding",
+                         dest_dir, exc)
+            if handle is not None:
+                handle.close()
+                handle = None
+        try:
+            yield
+        finally:
+            if handle is not None:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                finally:
+                    handle.close()
+
+    def _store_csr(self, domain, cert_output_dir, csr_pem):
+        """Validate the CSR, refuse the cases that would silently mislead, and
+        write it where renewal can find it again (#599).
+
+        Returns ``(csr_path, all_domains)``. The domains come from the CSR, not
+        from the request: a CSR is signed over its own subject and SANs, so the
+        CA issues for those names whatever the caller asked for. Deriving them
+        anywhere else would let the stored metadata disagree with the
+        certificate on disk.
+        """
+        # Screened here, not trusted from the caller. `create_certificate`
+        # already checks it, and that was true of every other unit that builds
+        # a path from a domain until code moved (#672) — so this one screens
+        # its own input too, and `_store_csr` builds three paths from it.
+        #
+        # `validate_domain_path` rather than the cheaper character check: it
+        # resolves the path and confirms it is still under cert_dir, which is
+        # what actually answers the question once symlinks are involved — and
+        # it is the form CodeQL recognises as a sanitizer, so the finding is
+        # closed rather than argued with.
+        domain_dir, path_error = validate_domain_path(domain, self.cert_dir)
+        if path_error:
+            raise ValueError(path_error)
+
+        try:
+            csr = read_csr(csr_pem)
+        except CSRError as e:
+            raise RuntimeError(f'Certificate creation failed: {e}')
+
+        all_domains = csr_domains(csr)
+        if domain not in all_domains:
+            # The directory is named for `domain`, and every later lookup —
+            # renewal, the health check, deploy hooks — goes through that name.
+            # A CSR for other names would produce a certificate filed under a
+            # domain it does not cover.
+            raise RuntimeError(
+                f'Certificate creation failed: the CSR does not cover '
+                f'{domain}. It requests {", ".join(all_domains)}.')
+        # Primary first, so metadata's san_domains means the same thing here as
+        # everywhere else.
+        all_domains = [domain] + [d for d in all_domains if d != domain]
+
+        # Converting a key-managed certificate into a CSR-only one would leave
+        # the old privkey.pem beside a certificate it cannot serve — the exact
+        # unusable pair `_publish_flat_files` exists to prevent, and one that
+        # would then be reported as 'mismatched' forever. Refuse instead.
+        existing_key = domain_dir / 'privkey.pem'
+        if existing_key.exists():
+            raise RuntimeError(
+                f'Certificate creation failed: {domain} already has a private '
+                f'key managed by CertMate. Delete the certificate first if you '
+                f'want to move its key onto the device.')
+
+        cert_output_dir.mkdir(parents=True, exist_ok=True)
+        csr_path = cert_output_dir / 'csr.pem'
+        csr_bytes = csr_pem.encode() if isinstance(csr_pem, str) else csr_pem
+        csr_path.write_bytes(csr_bytes)
+        logger.info(
+            "Stored the submitted CSR for %d name(s); the private key stays "
+            "on the requesting device", len(all_domains))
+        return csr_path, all_domains
+
+    def _publish_flat_files(self, src_dir: Path, dest_dir: Path) -> dict:
+        """Copy live/ to the flat directory as one unit, not four.
+
+        `_atomic_binary_copy` is atomic per file and there was no atomicity
+        across the four, no rollback on the exception paths, and privkey.pem is
+        LAST in CERTIFICATE_FILES. A failure on the fourth file therefore left
+        a new cert.pem, chain.pem and fullchain.pem beside the PREVIOUS
+        privkey.pem — a pair that cannot complete a handshake, served straight
+        off local disk by /api/certificates/<domain>/download and pushed to
+        every deploy hook.
+
+        Worse than the window was the permanence: the next scheduled renewal
+        fingerprints live/, finds it already fresh, concludes renewed=False and
+        returns before this copy ever runs again, so nothing repaired it and
+        check_renewals booked it as skipped_not_due — no failure, no alert.
+
+        Staging every file first means a failure while staging leaves the
+        flat copy exactly as it was: still the old certificate, still
+        internally consistent, still serving. The promote loop is four renames
+        within the same directory — not a transaction: a failure between the
+        second and the third rename still leaves a mixed generation. What
+        changed is that the window shrank from four full read+write copies to
+        four metadata renames, and that the state is no longer permanent: the
+        next renewal check compares the flat copy with live/ and republishes
+        (see the not-yet-due branch of renew_certificate), where the old code
+        returned before the copy loop and booked skipped_not_due forever.
+        Promoting privkey.pem first would not help — new key beside old
+        certificate is just as unusable.
+        """
+        # Leftovers from an attempt that died between staging and promote
+        # (SIGKILL, OOM, container stopped) are cleaned by nobody else; the
+        # caller holds the domain lock, so whatever is here is from a dead
+        # attempt and not from a publish in flight. Four known names, no
+        # wildcard: this is a delete, and the set of files it can ever touch
+        # is spelled out here rather than matched.
+        # Everything from the staging cleanup to the last rename happens under
+        # a cross-process lock: the staging names are shared, and the promote
+        # is four separate renames, so a second process could otherwise
+        # interleave and leave a split bundle.
+        with self._publish_lock(dest_dir):
+            for file_name in CERTIFICATE_FILES:
+                (dest_dir / f"{file_name}.staging").unlink(missing_ok=True)
+            staged = []
+            try:
+                for file_name in CERTIFICATE_FILES:
+                    src_file = src_dir / file_name
+                    if not src_file.exists():
+                        continue
+                    staging = dest_dir / f"{file_name}.staging"
+                    staging.write_bytes(src_file.read_bytes())
+                    shutil.copymode(src_file, staging)
+                    staged.append((staging, dest_dir / file_name))
+            except Exception:
+                for staging, _dest in staged:
+                    staging.unlink(missing_ok=True)
+                raise
+
+            published = {}
+            for staging, dest_file in staged:
+                staging.replace(dest_file)
+                published[dest_file.name] = dest_file.read_bytes()
+            return published
+
+    def reconcile_served_copies(self) -> dict:
+        """Republish any domain whose served files disagree with certbot's.
+
+        `_publish_flat_files` stages all four PEMs and then promotes them with
+        four separate renames. That is not a transaction: a crash between the
+        second and the third leaves the served directory holding a mixed
+        generation — most damagingly a new `cert.pem` beside the previous
+        `privkey.pem`, a pair that cannot complete a handshake and which is
+        served straight off local disk by `/api/certificates/<domain>/download`
+        and pushed to every deploy hook.
+
+        Until now the only thing that healed that state was the renewal check,
+        which reconciles in its not-yet-due branch. That closes the window, but
+        only at the next sweep — up to a day later. A torn promote happens
+        precisely when the process dies, and a process that dies is a process
+        about to be restarted, so startup is the first moment the state can be
+        noticed and the cheapest one at which to fix it.
+
+        Never raises. A domain that cannot be repaired is logged at ERROR and
+        the others are still attempted: refusing to start would turn a
+        one-certificate problem into a total outage, and the instance is more
+        useful serving the rest while an operator reads the log.
+        """
+        summary = {'checked': 0, 'republished': [], 'failed': {}}
+        if not self.cert_dir.is_dir():
+            return summary
+
+        for domain_dir in sorted(self.cert_dir.iterdir()):
+            if not domain_dir.is_dir():
+                continue
+            domain = domain_dir.name
+            live_dir = domain_dir / 'live' / domain
+            if not live_dir.is_dir():
+                # Imported or externally managed: nothing to reconcile against.
+                continue
+            summary['checked'] += 1
+            try:
+                stale = self._stale_flat_files(live_dir, domain_dir)
+                if not stale:
+                    continue
+                logger.warning(
+                    "Served copy for %s disagrees with certbot's on startup: "
+                    "%s. Republishing — this is the state a promote "
+                    "interrupted mid-way leaves behind, and where a new "
+                    "certificate can sit beside the previous private key.",
+                    domain, ", ".join(stale))
+                self._publish_flat_files(live_dir, domain_dir)
+                summary['republished'].append(domain)
+            except Exception as error:
+                summary['failed'][domain] = str(error)
+                logger.error(
+                    "Could not repair the served copy for %s on startup: %s. "
+                    "This domain may be serving a certificate that does not "
+                    "match its private key.", domain, error)
+
+        if summary['republished']:
+            logger.warning("Republished %d served copy(ies) on startup: %s",
+                           len(summary['republished']),
+                           ", ".join(summary['republished']))
+        return summary
+
     @staticmethod
     def _atomic_json_write(path: Path, data: dict) -> None:
-        """Write JSON atomically via a temp file + rename to avoid partial writes on crash."""
+        """Write JSON atomically and durably: temp file, fsync, rename, fsync dir.
+
+        The rename alone gives atomicity — a reader sees the old file or the
+        new one, never a half-written one. It does not give crash safety,
+        which is what this file needs: `metadata.json` records key custody
+        (`private_key_state`, the CSR fingerprint, the CA the certificate came
+        from), and a rename whose data has not reached the platter can be
+        replayed by the filesystem as a rename onto an empty or truncated
+        file. The docstring here used to claim crash safety while doing only
+        the rename.
+
+        Three syncs, each for a different loss:
+
+        * `flush()` moves the bytes out of Python's buffer;
+        * `os.fsync(file)` moves them out of the kernel's page cache, so the
+          temp file's *contents* survive;
+        * `os.fsync(directory)` persists the rename itself, so the *name*
+          survives — without it the file can be durable under a name that is
+          gone after a power loss.
+
+        Same recipe `modules.core.file_operations` uses for settings.json.
+        """
         import json
         tmp = path.with_suffix('.tmp')
         try:
-            tmp.write_text(json.dumps(data, indent=2), encoding='utf-8')
+            with open(tmp, 'w', encoding='utf-8') as handle:
+                json.dump(data, handle, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
             tmp.replace(path)
+            _fsync_directory(path.parent)
         except Exception:
             tmp.unlink(missing_ok=True)
             raise
 
     def _get_domain_lock(self, domain: str) -> threading.Lock:
-        """Return the per-domain lock, creating it on first use."""
+        """Return the per-domain lock, creating it on first use.
+
+        **This lock is per-PROCESS.** Serialising issuance and renewal for a
+        domain therefore depends on there being exactly one worker — a fact
+        the image states in its CMD (`--workers 1`) and which nothing else in
+        the code that relies on it mentioned.
+
+        With two workers the lock is two locks. Two requests for the same
+        domain would run certbot concurrently against the same
+        `--config-dir`, and the four-file publish would interleave with itself
+        — the torn generation `reconcile_served_copies` exists to repair,
+        arrived at deliberately rather than by a crash.
+
+        `_publish_lock` shows the shape a cross-process version would take: an
+        `flock` on a file beside the certificate. It is not used here because
+        the whole issuance path would have to hold it, including the certbot
+        subprocess, and a stale lock file then blocks renewal for a domain
+        until someone removes it. Under one worker that cost buys nothing.
+        `warn_if_multiple_workers` in factory.py is what makes the constraint
+        loud if it is ever violated.
+        """
         with self._domain_locks_mutex:
             if domain not in self._domain_locks:
                 self._domain_locks[domain] = threading.Lock()
             return self._domain_locks[domain]
 
+    @contextmanager
+    def domain_lock(self, domain: str):
+        """Hold the per-domain lock for the duration of the block.
+
+        The same lock create_certificate / renew_certificate take, so any
+        caller that mutates a domain's on-disk state (metadata.json, the flat
+        PEMs) serialises against an in-flight issuance instead of racing it —
+        e.g. the PATCH config handler, whose metadata read-modify-write was
+        otherwise clobbered by a renewal that carries a pre-renewal metadata
+        snapshot across its whole certbot run. Raises DomainOperationInProgress
+        if the lock cannot be taken within the configured timeout, which the
+        API turns into a 409 exactly as create/renew do.
+        """
+        lock = self._get_domain_lock(domain)
+        if not lock.acquire(timeout=self._domain_lock_timeout()):
+            raise DomainOperationInProgress(domain)
+        try:
+            yield
+        finally:
+            lock.release()
+
     def _metadata_path(self, domain: str) -> Path:
+        """Where a domain's metadata lives, screened here rather than upstream.
+
+        This is the single place the metadata path is built — every read and
+        every one of the seven `_save_metadata` call sites goes through it —
+        and it used to build the path from `domain` unchecked, leaving the
+        no-escape property distributed across those callers. The write at the
+        end of that path is `open(tmp, 'w')`, so a domain carrying path
+        characters would put attacker-influenced JSON at an arbitrary location.
+
+        Every caller does screen today. That is the problem: the guarantee is
+        only as good as the least careful of them, and this repository has
+        already shipped the same shape once — `_reject_path_escaping_domain`
+        exists because extracting code out of `create_certificate` produced a
+        unit that no longer enforced its own precondition (#666). Enforcing it
+        where the path is built makes the property local and keeps it that way.
+        """
+        _reject_path_escaping_domain(domain)
         return self.cert_dir / domain / 'metadata.json'
+
+    def _store_in_backend(self, domain, cert_files, metadata):
+        """Push the bundle to the configured storage backend.
+
+        Returns a human-readable warning when the external copy did NOT land,
+        None when it did (or when no backend is configured). Shared by the
+        create and renew paths so they cannot drift again (#423): the create
+        path recorded this warning in metadata while the renew path only
+        logged it, so a Vault token expiring mid-life meant nightly renewals
+        kept succeeding locally while the DR copy silently went stale, with
+        nothing in the API or the UI to show it.
+
+        The message deliberately carries no raw exception text — backend
+        errors can embed credentials and URLs.
+        """
+        if not self.storage_manager:
+            return None
+        try:
+            backend_name = self.storage_manager.get_backend_name()
+        except Exception:
+            backend_name = 'external'
+        try:
+            stored = self.storage_manager.store_certificate(domain, cert_files, metadata)
+        except Exception as e:
+            # Class name only at ERROR: a backend exception can embed a token
+            # or a signed URL, and application logs are readable by any admin
+            # (and streamable over /api/web/logs/stream). The detail is
+            # available to whoever explicitly turns on DEBUG.
+            logger.error(
+                "Error storing certificate in storage backend for %s: %s",
+                domain, type(e).__name__,
+            )
+            logger.debug("Storage backend error detail for %s", domain, exc_info=True)
+            return (
+                f"Certificate issued but saving it to the {backend_name} storage backend "
+                f"failed — the external copy is missing or stale. See server logs for details."
+            )
+        if stored:
+            logger.info(f"Certificate stored in {backend_name} backend for {domain}")
+            return None
+        logger.warning(f"Failed to store certificate in {backend_name} backend for {domain}")
+        return (
+            f"Certificate issued but NOT saved to the {backend_name} storage "
+            f"backend — the external copy is missing or stale. Check the backend "
+            f"credentials and connectivity."
+        )
+
+    @staticmethod
+    def _apply_storage_warning(metadata, storage_warning):
+        """Set or CLEAR metadata['storage_warning'] (#423).
+
+        Clearing matters as much as setting: one failed store used to leave the
+        warning in metadata forever, so the dashboard kept warning long after
+        the backend recovered — and an operator who learns to ignore a stale
+        warning will ignore the real one.
+        """
+        if storage_warning:
+            metadata['storage_warning'] = storage_warning
+        else:
+            metadata.pop('storage_warning', None)
+        return metadata
+
+    def _merge_reissue_metadata(self, domain: str, issuance: dict) -> dict:
+        """Carry forward the metadata a reissue does not own (#421).
+
+        `create_certificate` builds `issuance` from the issuance parameters
+        and used to write metadata.json wholesale, so `replace=True` (Edit &
+        Reissue) silently dropped every key the PATCH endpoint had stored
+        there: deployment_protocol / deployment_port / deployment_host (which
+        resources.py goes out of its way to preserve on a *partial* PATCH),
+        plus deployment_status and renewed_at. Adding a SAN to a mail server's
+        certificate therefore reverted its probe to https-tls:443, and the
+        dashboard reported it "not deployed".
+
+        Everything not in `_REISSUE_OWNED_METADATA_KEYS` is preserved,
+        including keys a future version adds. The alias pair IS owned, so a
+        reissue that drops the alias clears it rather than inheriting the old
+        value from disk.
+        """
+        preserved = {
+            k: v for k, v in self._load_metadata(domain).items()
+            if k not in _REISSUE_OWNED_METADATA_KEYS
+        }
+        if not preserved:
+            return issuance
+        return {**preserved, **issuance}
 
     def _load_metadata(self, domain: str) -> dict:
         metadata_file = self._metadata_path(domain)
@@ -216,7 +1158,26 @@ class CertificateManager:
         try:
             with open(metadata_file, 'r', encoding='utf-8') as f:
                 metadata = json.load(f)
-                return metadata if isinstance(metadata, dict) else {}
+            if isinstance(metadata, dict):
+                version = metadata.get('metadata_schema_version')
+                if isinstance(version, int) and version > METADATA_SCHEMA_VERSION:
+                    # Reading a newer record destroys nothing, and the UI
+                    # should still show the certificate — so this reads and
+                    # warns rather than refusing. The refusal is on the write
+                    # (see _save_metadata), which is where fields are lost.
+                    logger.warning(
+                        "Metadata for %s declares schema v%s and this build "
+                        "understands v%s. Reading it, but this process will "
+                        "refuse to write it back: it would drop the fields it "
+                        "cannot read.", domain, version,
+                        METADATA_SCHEMA_VERSION)
+                return metadata
+            # Valid JSON of the wrong shape (a list, a string) is as unusable
+            # as a syntax error and was the one corruption that still came
+            # back as {} without a quarantine — and so got overwritten by the
+            # next save (review, #583). Same treatment.
+            raise json.JSONDecodeError(
+                f"metadata is a {type(metadata).__name__}, not an object", "", 0)
         except json.JSONDecodeError as e:
             # The on-disk metadata is unparseable. Quarantine it before
             # returning {} — otherwise the next _save_metadata would overwrite
@@ -224,12 +1185,27 @@ class CertificateManager:
             quarantine = metadata_file.with_suffix(
                 f'.json.corrupt-{utc_now().strftime("%Y%m%dT%H%M%SZ")}'
             )
+            # Name the keys the damaged file still visibly carries, so the
+            # operator learns WHAT was lost (ca_provider, domain_alias,
+            # san_domains, deployment_*) and not only that something was.
+            # Names only, never values. With ca_provider gone, a private-CA
+            # certificate renews without its trust bundle until the
+            # .corrupt-* file is repaired — see _renewal_ca_bundle.
+            try:
+                raw = metadata_file.read_text(encoding='utf-8', errors='replace')
+            except OSError:
+                raw = ''
+            lost_keys = sorted(
+                set(re.findall(r'"([A-Za-z_][A-Za-z0-9_]*)"\s*:', raw)) & _KNOWN_METADATA_KEYS)
             try:
                 metadata_file.rename(quarantine)
                 logger.error(
                     f"Corrupt metadata for {domain}: {e}. "
                     f"Quarantined to {quarantine.name}; downstream callers "
-                    f"will see an empty metadata dict until a fresh write."
+                    f"will see an empty metadata dict until a fresh write. "
+                    f"Keys still readable in the damaged file: "
+                    f"{', '.join(lost_keys) if lost_keys else 'none'} — "
+                    f"repair it from the .corrupt-* copy to recover them."
                 )
             except OSError as rename_err:
                 logger.error(
@@ -243,14 +1219,114 @@ class CertificateManager:
             return {}
 
     def _save_metadata(self, domain: str, metadata: dict) -> bool:
-        metadata_file = self._metadata_path(domain)
+        """Write a domain's metadata, stamping the schema it was written with.
+
+        The stamp is applied HERE rather than by the seven callers, for the
+        reason `save_settings` stamps `settings_schema_version` itself: a
+        caller that assembles the dict without the field silently strips it,
+        and #669 shipped exactly that defect once already.
+
+        The check before the write is the point. `metadata.json` records key
+        custody — `private_key_state`, the CSR fingerprint, the CA a private-CA
+        certificate cannot renew without — and a downgrade reads a record
+        written by a newer build, understands the fields it knows, and writes
+        it back without the rest. Silently. That is the failure settings.json
+        was versioned to prevent, on a file that had no version.
+
+        Refusing at the WRITE rather than at startup is deliberate.
+        settings.json is one file and refusing to start is proportionate.
+        Metadata is one file per domain, and taking the whole instance down
+        over one certificate would turn a data-loss risk into an outage.
+        Reading stays allowed — reading destroys nothing, and the UI should
+        still show the certificate — so what is refused is exactly the
+        operation that loses fields.
+
+        `CERTMATE_ALLOW_SCHEMA_DOWNGRADE=1` overrides it, the same variable
+        and the same meaning as for settings.json: proceed, and accept that
+        this process may drop fields it does not know about.
+        """
         try:
-            self._atomic_json_write(metadata_file, metadata)
-            self._invalidate_certificate_info_cache(domain)
+            self.write_metadata(domain, metadata)
             return True
-        except Exception as e:
-            logger.warning(f"Failed to save metadata for {domain}: {e}")
+        except MetadataWriteRefused as e:
+            # ERROR, not WARNING: this one is a data-custody decision, and it
+            # was logged at ERROR before the reason became an exception. The
+            # domain stays a log ARGUMENT rather than being interpolated, so a
+            # handler can filter on it, and %r rather than %s so a newline in
+            # a domain name cannot forge a second log line.
+            logger.error("Refusing to write metadata for %r: %s", domain, e)
             return False
+        except Exception as e:
+            logger.warning("Failed to save metadata for %r: %s", domain, e)
+            return False
+
+    def write_metadata(self, domain: str, metadata: dict) -> None:
+        """Write the metadata, or raise saying **why** it was not written.
+
+        Same rules as `_save_metadata`, which is now the bool-returning
+        wrapper around this. The split exists because the two kinds of caller
+        want different things and one of them was being denied it:
+
+        - six call sites write metadata as part of issuance or renewal and
+          cannot act on a reason. They keep the boolean, and a failure there
+          must not turn a cosmetic metadata problem into a failed issuance.
+        - one call site — a config edit from the UI or API — reports the
+          outcome to a person. It got the same bare ``False``, and produced
+          "Failed to update metadata for domain: X" for causes as different
+          as a read-only volume and a deliberate refusal to downgrade the
+          schema. The reason existed; it was written to the log and thrown
+          away before it could reach the person who had to act on it (#757).
+        """
+        metadata_file = self._metadata_path(domain)
+
+        on_disk = self._metadata_schema_on_disk(metadata_file)
+        if (on_disk is not None
+                and on_disk > METADATA_SCHEMA_VERSION
+                and os.getenv('CERTMATE_ALLOW_SCHEMA_DOWNGRADE') != '1'):
+            raise MetadataWriteRefused(
+                f"metadata.json for {domain} declares schema v{on_disk} and "
+                f"this build understands v{METADATA_SCHEMA_VERSION}. It was "
+                f"written by a newer version of CertMate; overwriting it here "
+                f"would drop the fields this build cannot read, including the "
+                f"record of which private key belongs to this certificate. "
+                f"Run the newer version, or set "
+                f"CERTMATE_ALLOW_SCHEMA_DOWNGRADE=1 to overwrite it anyway.")
+
+        stamped = dict(metadata)
+        stamped['metadata_schema_version'] = METADATA_SCHEMA_VERSION
+        try:
+            self._atomic_json_write(metadata_file, stamped)
+        except OSError as e:
+            # strerror, not the exception: str(OSError) repeats the path,
+            # which the message already names.
+            raise MetadataWriteFailed(
+                f"could not write {metadata_file}: {e.strerror}. Check that "
+                f"the certificates volume is mounted writable and owned by "
+                f"the user CertMate runs as (uid 1000 in the image).") from e
+        self._invalidate_certificate_info_cache(domain)
+
+    @staticmethod
+    def _metadata_schema_on_disk(metadata_file: Path):
+        """The schema version the file currently declares, or None.
+
+        Read from disk immediately before writing rather than carried from
+        whatever `_load_metadata` returned: the caller may have assembled its
+        dict minutes ago, across a certbot run, and the question being asked
+        is about the bytes that are about to be replaced.
+
+        A file that is absent, unreadable or not a JSON object answers None —
+        "nothing here declares a schema". Those are handled by the write
+        itself; this is not the place to decide about them.
+        """
+        try:
+            with open(metadata_file, 'r', encoding='utf-8') as handle:
+                on_disk = json.load(handle)
+        except (OSError, ValueError):
+            return None
+        if not isinstance(on_disk, dict):
+            return None
+        version = on_disk.get('metadata_schema_version')
+        return version if isinstance(version, int) else None
 
     def _write_pfx(self, domain: str) -> None:
         """(Re)generate <domain>/cert.pfx from the on-disk PEMs when a PFX
@@ -427,6 +1503,47 @@ class CertificateManager:
         return {**dns_config, '_zone_domain': zone_domain}
 
     @staticmethod
+    def _acme_dns_native_alias(dns_provider, dns_config):
+        """Return the acme-dns subdomain to drive CertMate's native hook with.
+
+        acme-dns has no usable certbot authenticator. The published
+        ``certbot-acme-dns`` package registers fine but exposes only
+        ``--acme-dns-server`` / ``--acme-dns-propagation-seconds`` /
+        ``--acme-dns-is-trusted`` — it never implements a credentials-file
+        option, so the ``--acme-dns-credentials`` CertMate used to pass was
+        rejected by certbot's own argument parser and acme-dns issuance could
+        never succeed (issue #466). That plugin also expects to register the
+        account itself through interactive zope prompts, which is the opposite
+        of CertMate's model (the account already exists in settings).
+
+        Publishing an acme-dns TXT record is a single authenticated POST, which
+        ``dns_alias_hook._acme_dns_change`` already performs. So every acme-dns
+        issuance is routed through that hook instead of through certbot. The
+        alias target is inherently the configured subdomain: acme-dns *is*
+        CNAME-based delegation, so the user's CNAME already points the
+        challenge name at that subdomain whether or not alias mode was asked
+        for explicitly.
+
+        Returns '' for every other provider, so callers can use it as a plain
+        "should this take the native path?" switch.
+
+        Raises ValueError when an acme-dns account has no subdomain. Returning
+        '' there would silently drop the request back onto the plugin path,
+        where AcmeDNSStrategy raises a "bug in the caller" RuntimeError — a
+        misleading message for what is really a missing settings field.
+        """
+        if dns_provider != 'acme-dns':
+            return ''
+        subdomain = str((dns_config or {}).get('subdomain') or '').strip().rstrip('.')
+        if not subdomain:
+            raise ValueError(
+                "The acme-dns account is missing its Subdomain. Set it to the "
+                "subdomain acme-dns returned when the account was registered — "
+                "the same value the _acme-challenge CNAME points at."
+            )
+        return subdomain
+
+    @staticmethod
     def _create_dns_alias_hook_config(dns_provider, dns_config, domain_alias, propagation_seconds):
         """Write temporary config consumed by the DNS alias hook."""
         if dns_provider not in DNS_ALIAS_SUPPORTED_PROVIDERS:
@@ -502,13 +1619,31 @@ class CertificateManager:
         return f"_acme-challenge.{normalized}" if normalized else ''
 
     @classmethod
-    def build_dns_alias_expectations(cls, domain, domain_alias, san_domains=None):
-        """Build expected DNS-01 CNAME records for an alias-mode certificate."""
+    def build_dns_alias_expectations(cls, domain, domain_alias,
+                                     san_domains=None, alias_provider=None):
+        """Build expected DNS-01 CNAME records for an alias-mode certificate.
+
+        Two delegation shapes, and they want different records.
+
+        The certbot-style alias documented in docs/dns-providers.md points
+        ``_acme-challenge.<domain>`` at ``_acme-challenge.<alias>``: the
+        challenge is published *under* the alias name.
+
+        acme-dns does not work that way. ``dns_alias_hook._acme_dns_change``
+        POSTs the TXT to the acme-dns ``subdomain`` itself and requires
+        ``domain_alias == subdomain``, so the operator's CNAME points at the
+        bare subdomain and acme-dns answers there. Prefixing it produced a
+        `mismatch` verdict for a delegation that was exactly right — the
+        record acme-dns itself tells you to publish.
+        """
         alias = cls._normalize_dns_name(domain_alias).removeprefix('_acme-challenge.')
         if not domain or not alias:
             return []
 
-        expected_target = f"_acme-challenge.{alias}"
+        if (alias_provider or '').strip().lower() in ('acme-dns', 'acme_dns'):
+            expected_target = alias
+        else:
+            expected_target = f"_acme-challenge.{alias}"
         challenge_names = []
         for candidate in [domain] + list(san_domains or []):
             challenge_name = cls._dns01_challenge_name(candidate)
@@ -527,8 +1662,49 @@ class CertificateManager:
     def _normalize_cname_target(value):
         return (value or '').strip().lower().rstrip('.')
 
+    def _resolve_cname(self, source):
+        """The CNAME at *source*, through whichever resolver is configured.
+
+        `dns_resolver` exists so an instance can be told which resolver to
+        trust — a split-horizon view, or a network where the public internet
+        is not reachable at all. Every other lookup honours it: caa.check,
+        domain_health, the inventory scan, and `CheckCAA` in the very same
+        API module. This one went to Cloudflare's DoH endpoint regardless, so
+        on a split-horizon instance a delegation that exists internally was
+        reported `missing`, and on an air-gapped one the check could only
+        ever fail.
+
+        With no nameservers configured the DoH path below is unchanged, so
+        an instance that configures nothing behaves exactly as before.
+        """
+        from .dns_resolver import configured_nameservers
+
+        settings = (self.settings_manager.load_settings()
+                    if self.settings_manager else {})
+        nameservers = configured_nameservers(settings)
+        if nameservers:
+            return self._resolve_cname_via(source, nameservers)
+        return self._resolve_cname_doh(source)
+
+    @staticmethod
+    def _resolve_cname_via(source, nameservers):
+        """Ask the configured nameservers directly, as caa.check does."""
+        import dns.exception
+        import dns.resolver
+
+        from .dns_resolver import build
+
+        resolver = build(nameservers=nameservers)
+        try:
+            answer = resolver.resolve(source, 'CNAME')
+        except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN):
+            return []
+        except dns.exception.DNSException as e:
+            raise RuntimeError(f'DNS query failed: {e}') from e
+        return [str(rdata.target).strip() for rdata in answer]
+
     @classmethod
-    def _resolve_cname(cls, source):
+    def _resolve_cname_doh(cls, source):
         query = urllib.parse.urlencode({'name': source, 'type': 'CNAME'})
         # Hardcoded https URL (Cloudflare's DNS-over-HTTPS endpoint). Bandit
         # B310 fires defensively on urlopen, but the scheme + host are both
@@ -552,10 +1728,12 @@ class CertificateManager:
             if answer.get('type') == 5 and answer.get('data')
         ]
 
-    def check_dns_alias_records(self, domain, domain_alias, san_domains=None):
+    def check_dns_alias_records(self, domain, domain_alias, san_domains=None,
+                                alias_provider=None):
         """Check that DNS-01 alias CNAMEs exist for a requested certificate."""
         checks = []
-        for expectation in self.build_dns_alias_expectations(domain, domain_alias, san_domains):
+        for expectation in self.build_dns_alias_expectations(
+                domain, domain_alias, san_domains, alias_provider=alias_provider):
             source = expectation['source']
             expected_target = self._normalize_cname_target(expectation['expected_target'])
             found_targets = []
@@ -651,7 +1829,65 @@ class CertificateManager:
                 if storage_result:
                     cert_files, metadata = storage_result
                     if 'cert.pem' in cert_files:
-                        info = self._parse_certificate_info(domain, cert_files['cert.pem'], metadata, settings=cache_settings)
+                        # What the key state is, asked of the key rather than
+                        # of the shape of a dict.
+                        #
+                        # This branch used to decide from whether the answer
+                        # happened to contain privkey.pem: present meant
+                        # 'present', absent meant 'unknown'. On the default
+                        # installation the answer never contained a key, since
+                        # the base retrieve_certificate_info fetched the whole
+                        # bundle and then dropped everything but cert.pem. So
+                        # every certificate reported 'unknown', and a
+                        # certificate with no key at all was reported healthy,
+                        # which is the sentence #608 was closed for, on the
+                        # path #608's fix never ran (#830).
+                        #
+                        # A key that is here is here, and is compared rather
+                        # than believed: cert.pem from one issuance beside
+                        # privkey.pem from another cannot complete a handshake
+                        # and would otherwise pass as 'present'.
+                        #
+                        # A key that is NOT here is the ambiguous case, and the
+                        # backend has to say which kind of absence it is. One
+                        # that fetches everything and finds no key knows it is
+                        # gone; one with a cheap info-only path never looked,
+                        # and reading that as 'missing' would mark every
+                        # certificate as needing renewal.
+                        #
+                        # `is True`, not truthiness: a backend that does not
+                        # implement the question, and a test double that
+                        # answers every attribute with another double, both
+                        # fail that test and get 'unknown', which is the safe
+                        # side of being wrong.
+                        key_pem = cert_files.get('privkey.pem')
+                        if key_pem:
+                            storage_key_state = self.key_state_for_bytes(
+                                domain, key_pem, cert_files['cert.pem'], metadata)
+                        elif (metadata or {}).get('key_management') == 'external':
+                            # A CSR-only certificate has no key ANYWHERE, and
+                            # the metadata says so, so this can answer
+                            # 'external' rather than the honest-but-useless
+                            # 'unknown' (#599).
+                            storage_key_state = 'external'
+                        else:
+                            knows_about_keys = False
+                            asks = getattr(self.storage_manager,
+                                           'info_includes_private_key', None)
+                            if callable(asks):
+                                try:
+                                    knows_about_keys = asks() is True
+                                except Exception as e:
+                                    logger.debug(
+                                        "Storage backend could not say whether "
+                                        "it reports private keys for %s: %s",
+                                        domain, e)
+                                    knows_about_keys = False
+                            storage_key_state = 'missing' if knows_about_keys else 'unknown'
+                        info = self._parse_certificate_info(
+                            domain, cert_files['cert.pem'], metadata,
+                            settings=cache_settings,
+                            key_state=storage_key_state)
                         if cache_enabled:
                             self._set_cached_certificate_info(domain, info, cache_settings)
                         return info
@@ -691,12 +1927,147 @@ class CertificateManager:
         try:
             with open(cert_file, 'rb') as f:
                 cert_content = f.read()
-            return self._parse_certificate_info(domain, cert_content, metadata, settings=settings)
+            return self._parse_certificate_info(
+                domain, cert_content, metadata, settings=settings,
+                key_state=self.private_key_state(
+                    domain, cert_content, metadata))
         except Exception as e:
             logger.error(f"Failed to read certificate file for {domain}: {e}")
             return self._create_empty_cert_info(domain)
     
-    def _parse_certificate_info(self, domain, cert_content, metadata=None, settings=None):
+    def private_key_state(self, domain, cert_content=None, metadata=None):
+        """Is there a usable private key beside this certificate? (#608)
+
+        Returns one of ``'present'``, ``'missing'``, ``'mismatched'`` or
+        ``'external'``.
+
+        ``'external'`` is a CSR-only certificate (#599): the appliance generated
+        the key and cannot export it, so its absence here is the feature rather
+        than the symptom. Distinguishing it matters because ``'missing'`` forces
+        `needs_renewal`, and a CSR-only certificate reissued every renewal sweep
+        would burn CA rate limit for a problem that does not exist.
+
+        `get_certificate_info` decided a certificate existed by looking at
+        cert.pem alone, so a directory holding a certificate and no key was
+        reported healthy with `needs_renewal: false` — and the scheduler then
+        left it alone until an expiry that does not matter, because the
+        instance cannot serve TLS for that name at all.
+
+        That state is not hypothetical: it is exactly what restoring a
+        share-safe backup produces, since those deliberately carry no key
+        material. An operator verifying a recovery the obvious way — the API
+        lists my certificates with sane expiries — is told the node is fine.
+
+        The mismatch case is checked too, and is the cheaper half of the same
+        question: cert.pem from one issuance beside privkey.pem from another
+        cannot complete a handshake either, and comparing public numbers
+        catches it for RSA and EC alike without needing to know the key type.
+
+        **The answer is remembered per (key bytes, certificate bytes).** This
+        is called once per domain by every listing, by every Prometheus
+        collection and by every renewal sweep, and the comparison is dominated
+        by loading the private key, which OpenSSL validates as it parses.
+        Measured on one machine: 51.6 ms for RSA-2048, 275 ms for RSA-4096,
+        0.020 ms for EC P-256 — and CertMate's default key shape is RSA-2048,
+        so on the common installation this single call was ~99% of the cost of
+        reading a certificate's information. It is pure with respect to the two
+        files' contents, so hashing both (tens of microseconds) and reusing the
+        answer is exact rather than approximate: any change to either file —
+        renewal, re-key, a restored backup, a torn publish — changes a digest
+        and the comparison runs again. Time is not part of the key, because
+        nothing about this answer expires.
+
+        The warning below therefore fires once per distinct file pair rather
+        than once per read, which is the same information at 1/N the volume.
+        """
+        key_file = self.cert_dir / domain / 'privkey.pem'
+        if not key_file.exists():
+            return self.key_state_for_bytes(domain, None, cert_content, metadata)
+
+        try:
+            key_bytes = key_file.read_bytes()
+        except OSError as e:
+            # Same answer as an unparseable key, and for the same reason: a key
+            # this process cannot read is not one it can serve with.
+            logger.warning(
+                "Could not read the private key for %s: %s",
+                str(domain).replace(chr(10), ' ').replace(chr(13), ' '), e)
+            return 'mismatched'
+
+        return self.key_state_for_bytes(domain, key_bytes, cert_content, metadata)
+
+    def key_state_for_bytes(self, domain, key_bytes, cert_content, metadata=None):
+        """The same question as `private_key_state`, asked about bytes.
+
+        Split out because the key does not always come off this filesystem.
+        `get_certificate_info` takes the storage-backend branch whenever a
+        StorageManager exists, which on a default installation is always, and
+        the bytes it holds there came from the backend. Before this existed
+        that branch decided the key state from whether a dict had a key in it,
+        which meant the default backend, whose answer already contained the
+        key, reported 'unknown' for every certificate (#830).
+
+        `key_bytes` of None means the backend looked and found nothing, not
+        that it did not look. A caller that cannot tell must not call this.
+        """
+        if key_bytes is None:
+            # A key that was never ours to hold is not a key we lost. Note the
+            # order: a CSR-only certificate that somehow DOES have a key beside
+            # it falls through to the comparison below rather than being
+            # excused — that is an anomaly worth reporting, not hiding.
+            if (metadata or {}).get('key_management') == 'external':
+                return 'external'
+            return 'missing'
+        if cert_content is None:
+            return 'present'
+
+        key_digest = hashlib.sha256(key_bytes).digest()
+        cert_digest = hashlib.sha256(cert_content).digest()
+        with self._key_state_mutex:
+            remembered = self._key_state_cache.get(domain)
+        if remembered is not None and remembered[:2] == (key_digest, cert_digest):
+            return remembered[2]
+
+        state = self._compare_key_to_certificate(domain, key_bytes, cert_content)
+        with self._key_state_mutex:
+            self._key_state_cache[domain] = (key_digest, cert_digest, state)
+        return state
+
+    @staticmethod
+    def _compare_key_to_certificate(domain, key_bytes, cert_content):
+        """Does this private key belong to this certificate? The expensive half.
+
+        Split out of `private_key_state` so the cheap decisions (no key file at
+        all, no certificate to compare against) and the cache lookup stay
+        readable above, and so a test can count how often the parsing actually
+        happens.
+        """
+        try:
+            from cryptography.hazmat.primitives import serialization
+            from cryptography import x509
+
+            private_key = serialization.load_pem_private_key(
+                key_bytes, password=None)
+            certificate = x509.load_pem_x509_certificate(cert_content)
+        except Exception as e:
+            # An unreadable or encrypted key is not a usable one. Say so
+            # rather than reporting the certificate as fine.
+            logger.warning(
+                "Could not verify the private key for %s: %s",
+                str(domain).replace(chr(10), ' ').replace(chr(13), ' '), e)
+            return 'mismatched'
+
+        try:
+            matches = (private_key.public_key().public_numbers()
+                       == certificate.public_key().public_numbers())
+        except Exception:
+            # Different key types have incomparable public_numbers; that is
+            # itself a mismatch.
+            matches = False
+        return 'present' if matches else 'mismatched'
+
+    def _parse_certificate_info(self, domain, cert_content, metadata=None,
+                                settings=None, key_state='present'):
         """Parse certificate information from certificate content.
 
         ``settings`` mirrors the get_certificate_info parameter: callers
@@ -741,7 +2112,18 @@ class CertificateManager:
             # arithmetic matches utc_now(), which is naive UTC by design.
             expiry_date = cert.not_valid_after_utc.replace(tzinfo=None)
             now_utc = utc_now()
-            days_left = (expiry_date - now_utc).days
+            remaining = expiry_date - now_utc
+            # timedelta.days truncates toward minus infinity, so anything with
+            # less than 24 hours left comes out as 0 and anything already
+            # expired comes out negative. That is a fine answer to "how many
+            # whole days", and clients read it, so it keeps its meaning. It is
+            # the wrong answer to "has this expired", which is what the
+            # dashboard was asking it (#829): a certificate with 23 hours of
+            # life reported 0 and was rendered as Expired. step-ca issues
+            # 24-hour certificates by default, so that was every certificate on
+            # a default private CA.
+            days_left = remaining.days
+            seconds_left = int(remaining.total_seconds())
 
             return {
                 'domain': domain,
@@ -749,10 +2131,27 @@ class CertificateManager:
                 'expiry_date': expiry_date.strftime('%Y-%m-%d %H:%M:%S'),
                 'days_left': days_left,
                 'days_until_expiry': days_left,
+                # The two questions days_left cannot answer at once: how much
+                # life is left, and whether there is any. Both are derived from
+                # the same instant, so they cannot disagree with each other.
+                'seconds_left': seconds_left,
+                'expired': seconds_left <= 0,
                 # Inclusive boundary: a cert with exactly renewal_threshold_days
                 # left must renew. Using `<` skipped the boundary, delaying
                 # renewal by a day; digest.py and metrics.py already use `<=`.
-                'needs_renewal': days_left <= renewal_threshold_days,
+                # A certificate with no usable private key cannot serve TLS,
+                # so it needs attention now rather than at its expiry — which
+                # is what let a restored keyless certificate sit untouched
+                # while reporting itself healthy (#608).
+                # 'unknown' is not evidence of a problem: the storage-backed
+                # listing path never fetches the key, so only a key we looked
+                # for and did not find (or one that does not match) forces
+                # attention here.
+                'needs_renewal': (days_left <= renewal_threshold_days
+                                  or key_state in ('missing', 'mismatched')),
+                'private_key_present': _private_key_present(key_state),
+                'private_key_state': key_state,
+                'usable': _usable(key_state),
                 'dns_provider': dns_provider,
                 'domain_alias': domain_alias,
                 'alias_dns_provider': alias_dns_provider,
@@ -764,6 +2163,12 @@ class CertificateManager:
                 # or stale) is visible on GET, not just buried in the logs.
                 # None when the last issuance stored cleanly.
                 'storage_warning': metadata.get('storage_warning'),
+                'deployment_port': metadata.get('deployment_port'),
+                'deployment_protocol': metadata.get('deployment_protocol'),
+                # When the certificate was issued and last renewed (ISO text
+                # from metadata), so /metrics can report real timestamps.
+                'created_at': metadata.get('created_at'),
+                'renewed_at': metadata.get('renewed_at'),
             }
         except Exception as e:
             logger.error(f"Error parsing certificate for {domain}: {e}")
@@ -775,7 +2180,16 @@ class CertificateManager:
             'expiry_date': None,
             'days_left': None,
             'days_until_expiry': None,
+            # None, not False. This is the branch where the certificate could
+            # not be parsed, so whether it has expired is unknown, and unknown
+            # is not the same as fine. Answering False here is how the browser
+            # came to render `null <= 0` as Expired in the first place.
+            'seconds_left': None,
+            'expired': None,
             'needs_renewal': True,
+            'private_key_present': _private_key_present(key_state),
+            'private_key_state': key_state,
+            'usable': False,
             'dns_provider': dns_provider,
             'domain_alias': domain_alias,
             'alias_dns_provider': alias_dns_provider,
@@ -784,6 +2198,8 @@ class CertificateManager:
             'challenge_type': challenge_type,
             'account_id': account_id,
             'storage_warning': metadata.get('storage_warning'),
+            'deployment_port': metadata.get('deployment_port'),
+            'deployment_protocol': metadata.get('deployment_protocol'),
         }
 
     def _create_empty_cert_info(self, domain):
@@ -797,11 +2213,560 @@ class CertificateManager:
             'expiry_date': None,
             'days_left': None,
             'days_until_expiry': None,
+            # Same shape as every other answer, so a client does not have to
+            # know which branch produced it. There is no certificate here, so
+            # there is nothing that has or has not expired.
+            'seconds_left': None,
+            'expired': None,
             'needs_renewal': False,
             'dns_provider': dns_provider
         }
 
-    def create_certificate(self, domain, email, dns_provider=None, dns_config=None, account_id=None, staging=False, ca_provider=None, ca_account_id=None, domain_alias=None, alias_dns_provider=None, san_domains=None, challenge_type=None, key_type=None, key_size=None, elliptic_curve=None, replace=False):
+    def _quarantine_broken_lineage(self, cert_output_dir, domain):
+        """Before a reissue, move aside a BROKEN certbot lineage so ``certonly``
+        rebuilds a clean one instead of inheriting the breakage.
+
+        A lineage is broken when ``renewal/<domain>.conf`` exists but
+        ``live/<domain>/cert.pem`` is missing (its archive target is gone — e.g.
+        the data dir moved from host to container) or is a plain file rather than
+        a symlink (e.g. restored from a backup, which extracts flat files). In
+        both cases certbot reports a ``parsefail`` and skips the lineage, so the
+        "Use Edit & Reissue" remediation we surface to users would otherwise not
+        actually repair it. We *move* (not delete) the lineage state into a
+        ``.broken-lineage-*`` dir so it stays recoverable; the flat
+        ``<domain>/*.pem`` we serve from is untouched.
+        """
+        conf = cert_output_dir / 'renewal' / f'{domain}.conf'
+        if not conf.exists():
+            return
+        live_cert = cert_output_dir / 'live' / domain / 'cert.pem'
+        broken = (not live_cert.exists()) or (not live_cert.is_symlink())
+        if not broken:
+            return
+        quarantine = Path(tempfile.mkdtemp(prefix='.broken-lineage-', dir=str(cert_output_dir)))
+        for rel in (Path('renewal') / f'{domain}.conf', Path('live') / domain, Path('archive') / domain):
+            src = cert_output_dir / rel
+            if src.exists() or src.is_symlink():
+                dst = quarantine / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    src.rename(dst)
+                except OSError as e:
+                    logger.warning(f"Could not quarantine {src} during reissue of {domain}: {e}")
+        logger.info(
+            f"Quarantined broken certbot lineage for {domain} into "
+            f"{quarantine.name}; reissue will rebuild it from scratch"
+        )
+
+
+
+    def _resolve_ca(self, settings, ca_provider, ca_account_id, staging):
+        """Which CA, which account, and whether this is a staging request.
+
+        Extracted from _prepare_issuance (#666). Returns
+        ``(ca_provider, staging, ca_account_config, used_ca_account_id)``.
+        """
+        # Get CA provider configuration
+        if not ca_provider:
+            ca_provider = settings.get().get('default_ca', 'letsencrypt')
+
+        # Back-compat (#279): the legacy per-cert staging boolean maps
+        # onto the dedicated staging CA entry, and the boolean is derived
+        # from the entry from here on. Keeping both views coherent means
+        # the no-ca_manager fallback below (which only knows --staging)
+        # and metadata stay correct whichever way the caller asked.
+        if staging and ca_provider == 'letsencrypt':
+            ca_provider = 'letsencrypt_staging'
+        staging = staging or ca_provider == 'letsencrypt_staging'
+
+        logger.info(f"Using CA provider: {ca_provider}")
+
+        # Get CA account configuration if CA manager is available
+        ca_account_config = None
+        used_ca_account_id = None
+        if self.ca_manager:
+            try:
+                ca_account_config, used_ca_account_id = self.ca_manager.get_ca_config(ca_provider, ca_account_id)
+                logger.info(f"Using CA account: {used_ca_account_id}")
+            except Exception as e:
+                if ca_provider in ('letsencrypt', 'letsencrypt_staging'):
+                    # The one CA that needs no saved configuration: certbot's
+                    # defaults are the configuration. With none on disk the
+                    # plain-certbot branch below handles it (staging via
+                    # --staging). Do NOT reset the provider here — that would
+                    # silently flip a staging request to production issuance.
+                    logger.info(f"No saved CA config for {ca_provider}; using certbot defaults: {e}")
+                else:
+                    # Everything else fails closed. This used to fall back to
+                    # Let's Encrypt and answer 201, so a request for DigiCert,
+                    # ZeroSSL, Google, SSL.com, Actalis or a PRIVATE CA came
+                    # back as a certificate from a different authority, with a
+                    # log warning as the only signal. Measured, six providers
+                    # did it; only Sectigo refused, because it was added after
+                    # the fallback and carved itself out (#884).
+                    #
+                    # The private-CA case is the one that settles it. An
+                    # operator asking their internal CA for an internal name
+                    # and receiving a publicly-trusted certificate has had
+                    # that name published, and no log line undoes it.
+                    #
+                    # There is no safe substitute for the CA that was asked
+                    # for, so there is nothing to substitute.
+                    raise ValueError(
+                        f"CA provider '{ca_provider}' is not configured on this "
+                        f"instance, and issuing from a different CA is not a "
+                        f"substitute for the one you asked for. Configure it in "
+                        f"Settings, or request a CA that is configured. ({e})"
+                    ) from e
+        return ca_provider, staging, ca_account_config, used_ca_account_id
+
+    def _resolve_challenge_and_dns(self, settings, domain, challenge_type,
+                                   dns_provider, dns_config, account_id,
+                                   domain_alias, alias_dns_provider):
+        """Which challenge, which DNS provider and account, which strategy.
+
+        Also creates the HTTP-01 webroot directory, which is part of why the
+        caller is named "prepare" rather than "resolve". Returns
+        ``(challenge_type, dns_provider, dns_config, strategy)``.
+        """
+        # Resolve challenge type from settings if not provided
+        if not challenge_type:
+            challenge_type = settings.get().get('challenge_type', 'dns-01')
+
+        # HTTP-01 path: skip DNS config entirely
+        if challenge_type == 'http-01':
+            strategy = HTTP01Strategy()
+            dns_config = dns_config or {}
+            dns_provider = dns_provider or 'http-01'
+            # Ensure webroot directory exists (same path the serving route
+            # reads — see acme_webroot_dir).
+            challenge_dir = acme_webroot_dir() / '.well-known' / 'acme-challenge'
+            challenge_dir.mkdir(parents=True, exist_ok=True)
+            logger.info("Using HTTP-01 challenge (webroot)")
+        else:
+            # DNS-01 path: get DNS configuration
+            if not dns_config:
+                if not dns_provider:
+                    dns_provider = self.settings_manager.get_domain_dns_provider(domain, settings.get())
+
+                if not dns_provider:
+                    raise ValueError("No DNS provider configured. Go to Settings and select a DNS provider.")
+
+                dns_config, used_account_id = self._get_dns_config(
+                    dns_provider, account_id
+                )
+
+                if not dns_config:
+                    raise ValueError(f"DNS provider '{dns_provider}' account '{account_id or 'default'}' not configured")
+
+                logger.info(f"Using DNS provider: {dns_provider} with account: {used_account_id}")
+
+            # Get Strategy
+            strategy = DNSStrategyFactory.get_strategy(dns_provider)
+
+            if domain_alias and (alias_dns_provider or dns_provider) not in DNS_ALIAS_SUPPORTED_PROVIDERS:
+                raise RuntimeError(
+                    "DNS alias mode does not support this DNS provider yet. "
+                    "Use a supported account that controls the alias zone, "
+                    "or omit domain_alias for the provider's normal DNS-01 flow."
+                )
+
+            # Alias mode uses CertMate's manual DNS hook instead of the
+            # provider certbot authenticator, so the plugin is only needed
+            # for the normal non-alias DNS-01 flow. 'manual' is a certbot
+            # core feature (custom-script provider), never an installable
+            # plugin — skip the preflight for it. acme-dns always takes the
+            # native hook (see _acme_dns_native_alias) and has no certbot
+            # plugin to check for either.
+            if (not domain_alias and strategy.plugin_name != 'manual'
+                    and dns_provider != 'acme-dns'):
+                plugin = strategy.plugin_name
+                if not check_certbot_plugin_installed(plugin):
+                    pkg = f"certbot-{plugin}"
+                    raise RuntimeError(
+                        f"The certbot plugin '{plugin}' is not installed. "
+                        f"Install it with: pip install {pkg}  "
+                        f"(Docker users: rebuild with REQUIREMENTS_FILE=requirements.txt)"
+                    )
+        return challenge_type, dns_provider, dns_config, strategy
+
+    def _resolve_key_shape(self, settings, domain, replace, key_type, key_size,
+                           elliptic_curve):
+        """The key type/size/curve triple, defaulted and validated.
+
+        Returns ``(key_type, key_size, elliptic_curve)``.
+        """
+        # Resolve key shape. If the caller did not pick anything we fall
+        # back to the global default from settings — this lets legacy
+        # callers (web routes, scripts, tests) get the configured
+        # default for free without having to fetch it themselves. If
+        # the caller did pick something, validate the triple here too
+        # so the cert is never built with an inconsistent shape (the
+        # API endpoint validates earlier, but renew_certificate also
+        # routes through this method and can pass values from disk).
+        # On reissue (#267) the defaults are deliberately NOT applied:
+        # metadata does not record the lineage's key shape, so forwarding
+        # settings defaults as explicit flags would silently re-key the
+        # certificate. With no key flags certbot keeps the existing key
+        # type; an explicit key option on reissue is an intentional re-key.
+        if not replace and key_type is None and key_size is None and elliptic_curve is None:
+            key_type = settings.get().get('default_key_type')
+            if key_type == 'rsa':
+                key_size = settings.get().get('default_key_size')
+            elif key_type == 'ecdsa':
+                elliptic_curve = settings.get().get('default_elliptic_curve')
+        if key_type is not None:
+            ok, err = validate_key_options(key_type, key_size, elliptic_curve)
+            if not ok:
+                raise ValueError(f"Invalid key options for {domain}: {err}")
+        return key_type, key_size, elliptic_curve
+
+    def _prepare_issuance(self, *, domain, email, dns_provider, dns_config,
+                          account_id, staging, ca_provider, ca_account_id,
+                          domain_alias, alias_dns_provider, san_domains,
+                          challenge_type, key_type, key_size, elliptic_curve,
+                          replace):
+        """Validate and resolve everything an issuance needs, before any
+        command is built (#666).
+
+        Extracted verbatim from the first third of ``create_certificate``'s
+        517-line try block. It answers the questions the command builder then
+        assumes are settled: which CA, which challenge, which DNS provider and
+        account, which key shape, which domains, and whether this domain is
+        already issued.
+
+        Named "prepare" rather than "resolve" because it is not pure: it
+        creates the per-domain output directory and, for HTTP-01, the webroot
+        challenge directory. Both were side effects of this stretch of code
+        before the extraction and stay where they were.
+
+        Raises the same exceptions the inline code did — FileExistsError,
+        ValueError, RuntimeError — so the caller's handlers are unchanged.
+        """
+        # create_certificate rejects these before taking the per-domain lock,
+        # and this repeats it rather than trusting the caller: `domain` is used
+        # here to build cert_dir paths, and a unit that assumes its caller
+        # validated is only safe by position.
+        _reject_path_escaping_domain(domain)
+        settings = _LazySettings(self.settings_manager.load_settings)
+        # Settings are loaded lazily and at most once: several branches
+        # below need settings (CA default, challenge type, DNS provider,
+        # key shape, propagation time) but a fully-specified HTTP-01 caller
+        # needs none, so we keep the load conditional and reuse the result.
+
+        # Return conflict if cert already exists (use renew to refresh it,
+        # or replace=True to reissue with a changed domain set — #267).
+        # This existence check runs *under* the per-domain lock acquired
+        # above so two concurrent creates for the same domain can't both
+        # pass the check and race to issue duplicate certificates.
+        existing_cert = self.cert_dir / domain / 'cert.pem'
+        if existing_cert.exists() and not replace:
+            raise FileExistsError(f"Certificate for {domain} already exists. Use renew to refresh it.")
+
+        logger.info(f"Starting certificate {'reissue' if replace else 'creation'} for domain: {domain}")
+        
+        # ... (Validation and CA setup remains the same until DNS config)
+        
+        # Validate inputs
+        if not domain or not email:
+            raise ValueError("Domain and email are required")
+        
+        ca_provider, staging, ca_account_config, used_ca_account_id = \
+            self._resolve_ca(settings, ca_provider, ca_account_id, staging)
+
+        challenge_type, dns_provider, dns_config, strategy = \
+            self._resolve_challenge_and_dns(
+                settings, domain, challenge_type, dns_provider, dns_config,
+                account_id, domain_alias, alias_dns_provider)
+
+        all_domains = _resolve_all_domains(domain, san_domains, challenge_type)
+
+        # Create output directory
+        cert_dir = self.cert_dir
+        cert_output_dir = cert_dir / domain
+        cert_output_dir.mkdir(parents=True, exist_ok=True)
+
+        key_type, key_size, elliptic_curve = self._resolve_key_shape(
+            settings, domain, replace, key_type, key_size, elliptic_curve)
+
+
+        return _PreparedIssuance(
+            settings=settings.value,
+            ca_provider=ca_provider,
+            staging=staging,
+            ca_account_config=ca_account_config,
+            used_ca_account_id=used_ca_account_id,
+            challenge_type=challenge_type,
+            dns_provider=dns_provider,
+            dns_config=dns_config,
+            strategy=strategy,
+            all_domains=all_domains,
+            cert_dir=cert_dir,
+            cert_output_dir=cert_output_dir,
+            key_type=key_type,
+            key_size=key_size,
+            elliptic_curve=elliptic_curve,
+        )
+
+
+
+    def _write_dns_credentials(self, strategy, artifacts, dns_provider,
+                               dns_config, domain, san_domains):
+        """Write the provider's credentials file and record what it created.
+
+        Three lines, written twice (#666): once in the create path and once in
+        renew. The second of the three is the one that matters — a provider may
+        write SIDE files the ini only references, and Google's is the
+        service-account JSON, a live cloud private key. Reading them off the
+        strategy and putting them on the record is what makes the caller's
+        cleanup able to remove them.
+
+        Both copies also passed the SAN list, for the same reason and from
+        different sources: the discovery path (Azure today) resolves every cert
+        FQDN against the account's hosted zones in one pass, so a wildcard SAN
+        under a parent zone is invisible without it. Create takes the SANs from
+        the request, renew from metadata; that difference stays at the call
+        sites, where it is a fact about the caller rather than about writing a
+        credentials file.
+
+        Returns the credentials path, which is None for providers that
+        authenticate through environment variables (route53 and friends).
+        """
+        strategy_config = self._dns_config_for_strategy(
+            dns_provider, dns_config, domain, san_domains=san_domains,
+        )
+        artifacts.credentials_file = strategy.create_config_file(strategy_config)
+        artifacts.extra_credential_files = list(
+            getattr(strategy, 'extra_credential_files', []) or [])
+        return artifacts.credentials_file
+
+    def _build_issuance_command(self, prepared, artifacts, *, domain, email,
+                                account_id, domain_alias, alias_dns_provider,
+                                replace):
+        """Turn a prepared request into the certbot argv and its environment.
+
+        Extracted from create_certificate (#666): the CA/EAB flags, the reissue
+        flags, the DNS credentials file, and the DNS-alias manual hook.
+
+        *artifacts* is not a return value — it IS where the temp-file paths
+        live, written the moment each file is created. The caller's ``finally``
+        removes whatever it holds, and this method can raise between writing a
+        credentials file and finishing the command (a plugin config that fails
+        validation, an alias zone the provider does not support). Handing the
+        paths back only on success would leave a live cloud private key on disk
+        for exactly those failures. Before this the guarantee existed, but as
+        three locals assigned partway down a 590-line function; now it is a
+        record with one owner.
+
+        Returns ``(certbot_cmd, process_env)``.
+        """
+        # Same reasoning as _prepare_issuance: this builds --cert-name and log
+        # lines from `domain`, so it enforces its own precondition rather than
+        # trusting the one caller that happens to have checked already.
+        _reject_path_escaping_domain(domain)
+        all_domains = prepared.all_domains
+        ca_account_config = prepared.ca_account_config
+        ca_provider = prepared.ca_provider
+        cert_dir = prepared.cert_dir
+        cert_output_dir = prepared.cert_output_dir
+        challenge_type = prepared.challenge_type
+        dns_config = prepared.dns_config
+        dns_provider = prepared.dns_provider
+        elliptic_curve = prepared.elliptic_curve
+        key_size = prepared.key_size
+        key_type = prepared.key_type
+        # Carried, not reloaded: _prepare_issuance already resolved it
+        # lazily. Without it the propagation lookup below raises
+        # NameError, which its `except Exception` swallows into the
+        # strategy default — a wrong value with no error (#671).
+        settings = prepared.settings
+        staging = prepared.staging
+        strategy = prepared.strategy
+
+        # Build certbot command (artifacts.ca_extra_env was hoisted above the try
+        # so the finally block can clean up safely on early failure)
+        san_list = all_domains[1:] if len(all_domains) > 1 else None
+        if self.ca_manager and ca_account_config:
+            try:
+                certbot_cmd, artifacts.ca_extra_env = self.ca_manager.build_certbot_command(
+                    domain, email, ca_provider, dns_provider, dns_config,
+                    ca_account_config, staging, cert_dir, san_domains=san_list,
+                    key_type=key_type, key_size=key_size, elliptic_curve=elliptic_curve,
+                )
+            except TypeError as e:
+                # Defensive fallback: older build_certbot_command without san_domains
+                logger.warning(f"build_certbot_command does not accept san_domains, adding manually: {e}")
+                result = self.ca_manager.build_certbot_command(
+                    domain, email, ca_provider, dns_provider, dns_config,
+                    ca_account_config, staging, cert_dir
+                )
+                if isinstance(result, tuple):
+                    certbot_cmd, artifacts.ca_extra_env = result
+                else:
+                    certbot_cmd = result
+                # Manually append SAN domains
+                if san_list:
+                    for san in san_list:
+                        certbot_cmd.extend(['-d', san])
+                # Fallback path also needs the key flags appended manually
+                # so a stale ca_manager doesn't silently downgrade certs.
+                if key_type == 'rsa' and key_size:
+                    certbot_cmd.extend(['--key-type', 'rsa', '--rsa-key-size', str(key_size)])
+                elif key_type == 'ecdsa' and elliptic_curve:
+                    certbot_cmd.extend(['--key-type', 'ecdsa', '--elliptic-curve', elliptic_curve])
+        else:
+            certbot_cmd = [
+                'certbot', 'certonly',
+                '--non-interactive',
+                '--agree-tos',
+                '--email', email,
+                '--cert-name', domain,
+                '--config-dir', str(cert_output_dir),
+                '--work-dir', str(cert_output_dir / 'work'),
+                '--logs-dir', str(cert_output_dir / 'logs'),
+            ]
+
+            # Add all domains
+            for d in all_domains:
+                certbot_cmd.extend(['-d', d])
+
+            if staging:
+                certbot_cmd.append('--staging')
+
+            # No-ca_manager path: still honour the resolved key shape so
+            # this branch produces the same cert as the main path.
+            if key_type == 'rsa' and key_size:
+                certbot_cmd.extend(['--key-type', 'rsa', '--rsa-key-size', str(key_size)])
+            elif key_type == 'ecdsa' and elliptic_curve:
+                certbot_cmd.extend(['--key-type', 'ecdsa', '--elliptic-curve', elliptic_curve])
+
+        if replace:
+            # If the existing lineage is broken (stale paths / non-symlink
+            # live cert after a data-dir move or backup restore), move it
+            # aside first so certbot rebuilds a clean lineage rather than
+            # parsefailing on the broken conf — this is what makes "Edit &
+            # Reissue" a reliable repair for the RENEWAL_CONFIG_BROKEN case.
+            self._quarantine_broken_lineage(cert_output_dir, domain)
+            # Reissue over the existing lineage: a different -d set with
+            # the same --cert-name replaces the lineage's domains (expand
+            # and shrink). --renew-with-new-domains makes that
+            # confirmation deterministic. --force-renewal is load-bearing
+            # for the UNCHANGED-set case (config-only edits: CA switch,
+            # provider change, alias clear, same-type re-key): without it
+            # certbot hits _handle_identical_cert_request outside the
+            # renewal window, takes the keep-existing default, and exits 0
+            # WITHOUT issuing — and CertMate would then rewrite metadata
+            # with configuration that was never applied. A reissue must
+            # always issue.
+            certbot_cmd.extend(['--renew-with-new-domains', '--force-renewal'])
+
+        # Build per-request environment (avoid race conditions with os.environ)
+        process_env = os.environ.copy()
+        process_env.update(artifacts.ca_extra_env)
+        strategy.prepare_environment(process_env, dns_config)
+
+        # Set propagation time (DNS-01 only; HTTP-01 has no propagation)
+        propagation_time = None
+        if challenge_type != 'http-01':
+            if settings is None:
+                try:
+                    settings = self.settings_manager.load_settings()
+                except Exception as e:
+                    logger.debug("Failed to load settings for propagation time: %s", e)
+                    settings = {}
+            propagation_time = _propagation_seconds(settings, dns_provider, strategy)
+
+            # --manual has no propagation flag: surface the configured
+            # per-provider value to custom-script hooks via env instead.
+            # An account-level propagation_seconds (exported earlier by
+            # prepare_environment) wins over the global setting.
+            if dns_provider == 'custom-script':
+                process_env.setdefault('CERTMATE_DNS_PROPAGATION_SECONDS', str(propagation_time))
+
+        alias_hook_provider = alias_dns_provider or dns_provider
+        # acme-dns is always driven by the native hook, with the configured
+        # subdomain standing in as the alias target when the caller did not
+        # ask for alias mode explicitly (issue #466).
+        effective_domain_alias = domain_alias or self._acme_dns_native_alias(
+            dns_provider, dns_config
+        )
+        use_dns_alias_hook = (
+            challenge_type != 'http-01'
+            and effective_domain_alias
+            and alias_hook_provider in DNS_ALIAS_SUPPORTED_PROVIDERS
+        )
+
+        if use_dns_alias_hook:
+            # The TXT records land on the ALIAS zone, so the hook must run
+            # with the account that controls that zone — which renewals
+            # already honour via metadata alias_dns_provider (issue #129).
+            alias_hook_config = dns_config
+            if alias_hook_provider != dns_provider:
+                alias_hook_config, _ = self._get_dns_config(alias_hook_provider, account_id)
+                if not alias_hook_config:
+                    raise ValueError(
+                        f"Alias DNS provider '{alias_hook_provider}' is not configured"
+                    )
+            logger.info(
+                f"DNS alias '{effective_domain_alias}' requested for {domain}; "
+                f"using {alias_hook_provider} manual hook to create TXT records on the alias zone."
+            )
+            artifacts.alias_hook_config = self._create_dns_alias_hook_config(
+                alias_hook_provider, alias_hook_config, effective_domain_alias,
+                propagation_time or strategy.default_propagation_seconds
+            )
+            self._configure_dns_alias_arguments(certbot_cmd,
+                                                artifacts.alias_hook_config)
+        else:
+            # Create Config File. Pass the SAN list so the discovery
+            # path (Azure today) can resolve every cert FQDN against
+            # the account's hosted zones in one pass.
+            self._write_dns_credentials(
+                strategy, artifacts, dns_provider, dns_config, domain,
+                san_domains=all_domains[1:] if len(all_domains) > 1 else None,
+            )
+
+            # Configure Args
+            strategy.configure_certbot_arguments(certbot_cmd, artifacts.credentials_file, domain_alias=domain_alias)
+
+            # Some plugins (e.g. certbot-dns-route53 >= 1.22) do not accept a
+            # --{plugin}-propagation-seconds flag and handle propagation internally.
+            if challenge_type != 'http-01' and strategy.supports_propagation_seconds_flag:
+                certbot_cmd.extend([f'--{strategy.plugin_name}-propagation-seconds', str(propagation_time)])
+        return certbot_cmd, process_env
+
+    def _caa_explanation(self, ca_provider, domains, challenge_type):
+        """What the CAA records say about a failed issuance, as a suffix.
+
+        Returns ``"\n\n" + a sentence`` when a CAA record refuses this CA,
+        otherwise ``""``, so the caller can append it unconditionally. Only
+        asked after certbot has already failed, so a working issuance never
+        pays for the DNS lookups; and never raises, because an error while
+        explaining an error must not replace the error being explained.
+        """
+        try:
+            from . import caa
+            if not ca_provider:
+                # Metadata written before ca_provider was recorded: the
+                # certificate came from whatever the default CA was.
+                ca_provider = (self.settings_manager.load_settings() or {}).get(
+                    'default_ca', 'letsencrypt')
+            ca_name = None
+            if self.ca_manager is not None:
+                ca_name = (getattr(self.ca_manager, 'ca_providers', {})
+                           .get(ca_provider) or {}).get('name')
+            from .dns_resolver import configured_nameservers
+            sentence = caa.explain_failure(
+                ca_provider, domains, challenge_type=challenge_type,
+                ca_name=ca_name,
+                nameservers=configured_nameservers(
+                    self.settings_manager.load_settings() or {}))
+        except Exception as e:
+            logger.warning("Could not check CAA after a failed issuance: %s", e)
+            return ''
+        return f"\n\n{sentence}" if sentence else ''
+
+    def create_certificate(self, domain, email, dns_provider=None, dns_config=None, account_id=None, staging=False, ca_provider=None, ca_account_id=None, domain_alias=None, alias_dns_provider=None, san_domains=None, challenge_type=None, key_type=None, key_size=None, elliptic_curve=None, replace=False, csr_pem=None):
         """Create SSL certificate using configurable CA with DNS challenge
 
         Args:
@@ -813,7 +2778,12 @@ class CertificateManager:
             staging: Use staging environment for testing
             ca_provider: Certificate Authority provider (letsencrypt, digicert, private_ca)
             ca_account_id: Specific CA account ID to use
-            domain_alias: Optional domain alias for DNS validation (e.g., '_acme-challenge.validation.example.org')
+            domain_alias: Optional domain alias for DNS validation — the
+                delegation TARGET, without the challenge label
+                (e.g. 'validation.example.org'). CertMate adds the
+                `_acme-challenge.` prefix itself; passing it here is
+                rejected by validate_domain, which has no underscore in its
+                label pattern.
             alias_dns_provider: Provider managing the ALIAS zone when it
                 differs from dns_provider (set via PATCH, issue #129, and
                 honoured by renewals). The alias challenge hook runs with
@@ -827,6 +2797,13 @@ class CertificateManager:
                 per-domain.
             key_size: RSA key size in bits (only valid with key_type='rsa').
             elliptic_curve: ECDSA curve (only valid with key_type='ecdsa').
+            csr_pem: A PEM certificate signing request generated elsewhere
+                (#599). When given, CertMate never sees or stores a private
+                key: certbot runs in ``--csr`` mode, the domains come from the
+                CSR rather than from ``domain``/``san_domains``, and the key
+                stays on the appliance that made it. These certificates have no
+                certbot lineage, so ``certbot renew`` will not touch them —
+                renewal re-runs this command with the stored CSR.
             replace: Reissue over the existing certbot lineage (#267). The
                 same ``--cert-name`` with a different ``-d`` set makes
                 certbot replace the lineage's domain set (expand AND
@@ -839,6 +2816,21 @@ class CertificateManager:
                 omitting the flags makes certbot keep the existing key
                 type.
         """
+        # Path-safety gate at the sink. `domain` becomes cert_dir/<domain>/…,
+        # the certbot --config-dir/--cert-name, and the target of
+        # _seed_acme_account — and it keys the per-domain lock just below. Every
+        # caller is supposed to hand a bare hostname; a URL-form value whose
+        # netloc passed validate_domain but was kept raw ("https://x/../y")
+        # would escape cert_dir here and drop the ACME account private key under
+        # the public /.well-known/acme-challenge webroot. The create sources
+        # normalise to the bare hostname now, but this is the last line that
+        # every path — including the batch route, which does not go through
+        # prepare_create — must cross, so a future caller cannot reintroduce the
+        # escape. Reject rather than normalise: normalisation is the source's
+        # job; reaching the sink with path characters means something upstream
+        # failed and the request must not proceed.
+        _reject_path_escaping_domain(domain)
+
         # Acquire per-domain lock to prevent concurrent create/renew operations
         domain_lock = self._get_domain_lock(domain)
         if not domain_lock.acquire(timeout=self._domain_lock_timeout()):
@@ -846,334 +2838,73 @@ class CertificateManager:
 
         # Track timing for metrics
         start_time = time.time()
-        credentials_file = None
-        # Initialized early: the finally block reads ca_extra_env to clean up
-        # the REQUESTS_CA_BUNDLE temp file, and an exception raised before the
-        # ca_manager.build_certbot_command call (e.g. plugin-not-installed)
-        # would otherwise surface as UnboundLocalError, masking the real cause.
-        ca_extra_env = {}
+        # Created before the try so the finally can always clean up, whatever
+        # failed. The builder writes into this record as each temp file
+        # appears: the DNS credentials file, the side files a provider writes
+        # next to it (Google's service-account JSON — a live cloud private key
+        # that must not outlive the operation), and the CA bundle the CA
+        # manager materialises for REQUESTS_CA_BUNDLE. Previously three
+        # separately hoisted locals, one of which existed only so an early
+        # failure would not surface as UnboundLocalError and mask its cause.
+        artifacts = _IssuanceArtifacts()
 
         try:
-            # Settings are loaded lazily and at most once: several branches
-            # below need settings (CA default, challenge type, DNS provider,
-            # key shape, propagation time) but a fully-specified HTTP-01 caller
-            # needs none, so we keep the load conditional and reuse the result.
-            settings = None
+            prepared = self._prepare_issuance(
+                domain=domain, email=email, dns_provider=dns_provider,
+                dns_config=dns_config, account_id=account_id, staging=staging,
+                ca_provider=ca_provider, ca_account_id=ca_account_id,
+                domain_alias=domain_alias,
+                alias_dns_provider=alias_dns_provider,
+                san_domains=san_domains, challenge_type=challenge_type,
+                key_type=key_type, key_size=key_size,
+                elliptic_curve=elliptic_curve, replace=replace,
+            )
+            ca_provider = prepared.ca_provider
+            staging = prepared.staging
+            used_ca_account_id = prepared.used_ca_account_id
+            challenge_type = prepared.challenge_type
+            dns_provider = prepared.dns_provider
+            dns_config = prepared.dns_config
+            all_domains = prepared.all_domains
+            cert_dir = prepared.cert_dir
+            cert_output_dir = prepared.cert_output_dir
+            key_type = prepared.key_type
+            key_size = prepared.key_size
+            elliptic_curve = prepared.elliptic_curve
 
-            # Return conflict if cert already exists (use renew to refresh it,
-            # or replace=True to reissue with a changed domain set — #267).
-            # This existence check runs *under* the per-domain lock acquired
-            # above so two concurrent creates for the same domain can't both
-            # pass the check and race to issue duplicate certificates.
-            existing_cert = self.cert_dir / domain / 'cert.pem'
-            if existing_cert.exists() and not replace:
-                raise FileExistsError(f"Certificate for {domain} already exists. Use renew to refresh it.")
-
-            logger.info(f"Starting certificate {'reissue' if replace else 'creation'} for domain: {domain}")
-            
-            # ... (Validation and CA setup remains the same until DNS config)
-            
-            # Validate inputs
-            if not domain or not email:
-                raise ValueError("Domain and email are required")
-            
-            # Get CA provider configuration
-            if not ca_provider:
-                if settings is None:
-                    settings = self.settings_manager.load_settings()
-                ca_provider = settings.get('default_ca', 'letsencrypt')
-
-            # Back-compat (#279): the legacy per-cert staging boolean maps
-            # onto the dedicated staging CA entry, and the boolean is derived
-            # from the entry from here on. Keeping both views coherent means
-            # the no-ca_manager fallback below (which only knows --staging)
-            # and metadata stay correct whichever way the caller asked.
-            if staging and ca_provider == 'letsencrypt':
-                ca_provider = 'letsencrypt_staging'
-            staging = staging or ca_provider == 'letsencrypt_staging'
-
-            logger.info(f"Using CA provider: {ca_provider}")
-
-            # Get CA account configuration if CA manager is available
-            ca_account_config = None
-            used_ca_account_id = None
-            if self.ca_manager:
-                try:
-                    ca_account_config, used_ca_account_id = self.ca_manager.get_ca_config(ca_provider, ca_account_id)
-                    logger.info(f"Using CA account: {used_ca_account_id}")
-                except Exception as e:
-                    if ca_provider in ('letsencrypt', 'letsencrypt_staging'):
-                        # Let's Encrypt needs no per-account credentials; with
-                        # no saved CA config the plain-certbot branch below
-                        # handles it (staging via --staging). Do NOT reset the
-                        # provider — that would silently flip a staging
-                        # request to production issuance.
-                        logger.info(f"No saved CA config for {ca_provider}; using certbot defaults: {e}")
-                    else:
-                        # Preserve the caller's staging intent across the
-                        # fallback: resetting to production letsencrypt here
-                        # would turn a test request into trusted production
-                        # issuance (and burn real rate limits).
-                        ca_provider = 'letsencrypt_staging' if staging else 'letsencrypt'
-                        logger.warning(f"Could not get CA config, falling back to {ca_provider}: {e}")
-            
-            # Resolve challenge type from settings if not provided
-            if not challenge_type:
-                if settings is None:
-                    settings = self.settings_manager.load_settings()
-                challenge_type = settings.get('challenge_type', 'dns-01')
-
-            # HTTP-01 path: skip DNS config entirely
-            if challenge_type == 'http-01':
-                strategy = HTTP01Strategy()
-                dns_config = dns_config or {}
-                dns_provider = dns_provider or 'http-01'
-                # Ensure webroot directory exists (same path the serving route
-                # reads — see acme_webroot_dir).
-                challenge_dir = acme_webroot_dir() / '.well-known' / 'acme-challenge'
-                challenge_dir.mkdir(parents=True, exist_ok=True)
-                logger.info("Using HTTP-01 challenge (webroot)")
-            else:
-                # DNS-01 path: get DNS configuration
-                if not dns_config:
-                    if not dns_provider:
-                        if settings is None:
-                            settings = self.settings_manager.load_settings()
-                        dns_provider = self.settings_manager.get_domain_dns_provider(domain, settings)
-
-                    if not dns_provider:
-                        raise ValueError("No DNS provider configured. Go to Settings and select a DNS provider.")
-
-                    dns_config, used_account_id = self._get_dns_config(
-                        dns_provider, account_id
-                    )
-
-                    if not dns_config:
-                        raise ValueError(f"DNS provider '{dns_provider}' account '{account_id or 'default'}' not configured")
-
-                    logger.info(f"Using DNS provider: {dns_provider} with account: {used_account_id}")
-
-                # Get Strategy
-                strategy = DNSStrategyFactory.get_strategy(dns_provider)
-
-                if domain_alias and (alias_dns_provider or dns_provider) not in DNS_ALIAS_SUPPORTED_PROVIDERS:
-                    raise RuntimeError(
-                        "DNS alias mode does not support this DNS provider yet. "
-                        "Use a supported account that controls the alias zone, "
-                        "or omit domain_alias for the provider's normal DNS-01 flow."
-                    )
-
-                # Alias mode uses CertMate's manual DNS hook instead of the
-                # provider certbot authenticator, so the plugin is only needed
-                # for the normal non-alias DNS-01 flow. 'manual' is a certbot
-                # core feature (custom-script provider), never an installable
-                # plugin — skip the preflight for it.
-                if not domain_alias and strategy.plugin_name != 'manual':
-                    plugin = strategy.plugin_name
-                    if not check_certbot_plugin_installed(plugin):
-                        pkg = f"certbot-{plugin}"
-                        raise RuntimeError(
-                            f"The certbot plugin '{plugin}' is not installed. "
-                            f"Install it with: pip install {pkg}  "
-                            f"(Docker users: rebuild with REQUIREMENTS_FILE=requirements.txt)"
-                        )
-
-            # Build list of all domains (primary + SANs)
-            all_domains = [domain]
-            if san_domains:
-                # Filter and validate SAN domains
-                for san in san_domains:
-                    san = san.strip()
-                    if san and san != domain and san not in all_domains:
-                        is_valid, validation_msg = validate_domain(san)
-                        if not is_valid:
-                            raise ValueError(f"Invalid SAN domain '{san}': {validation_msg}")
-                        all_domains.append(san)
-                logger.info(f"Creating SAN certificate with domains: {', '.join(all_domains)}")
-
-            # HTTP-01 does not support wildcard domains
-            if challenge_type == 'http-01':
-                for d in all_domains:
-                    if d.startswith('*.'):
-                        raise ValueError("HTTP-01 challenge does not support wildcard domains. Use DNS-01 instead.")
-
-            # Create output directory
-            cert_dir = self.cert_dir
-            cert_output_dir = cert_dir / domain
-            cert_output_dir.mkdir(parents=True, exist_ok=True)
-
-            # Resolve key shape. If the caller did not pick anything we fall
-            # back to the global default from settings — this lets legacy
-            # callers (web routes, scripts, tests) get the configured
-            # default for free without having to fetch it themselves. If
-            # the caller did pick something, validate the triple here too
-            # so the cert is never built with an inconsistent shape (the
-            # API endpoint validates earlier, but renew_certificate also
-            # routes through this method and can pass values from disk).
-            # On reissue (#267) the defaults are deliberately NOT applied:
-            # metadata does not record the lineage's key shape, so forwarding
-            # settings defaults as explicit flags would silently re-key the
-            # certificate. With no key flags certbot keeps the existing key
-            # type; an explicit key option on reissue is an intentional re-key.
-            if not replace and key_type is None and key_size is None and elliptic_curve is None:
-                if settings is None:
-                    settings = self.settings_manager.load_settings()
-                key_type = settings.get('default_key_type')
-                if key_type == 'rsa':
-                    key_size = settings.get('default_key_size')
-                elif key_type == 'ecdsa':
-                    elliptic_curve = settings.get('default_elliptic_curve')
-            if key_type is not None:
-                ok, err = validate_key_options(key_type, key_size, elliptic_curve)
-                if not ok:
-                    raise ValueError(f"Invalid key options for {domain}: {err}")
-
-            # Build certbot command (ca_extra_env was hoisted above the try
-            # so the finally block can clean up safely on early failure)
-            san_list = all_domains[1:] if len(all_domains) > 1 else None
-            if self.ca_manager and ca_account_config:
-                try:
-                    certbot_cmd, ca_extra_env = self.ca_manager.build_certbot_command(
-                        domain, email, ca_provider, dns_provider, dns_config,
-                        ca_account_config, staging, cert_dir, san_domains=san_list,
-                        key_type=key_type, key_size=key_size, elliptic_curve=elliptic_curve,
-                    )
-                except TypeError as e:
-                    # Defensive fallback: older build_certbot_command without san_domains
-                    logger.warning(f"build_certbot_command does not accept san_domains, adding manually: {e}")
-                    result = self.ca_manager.build_certbot_command(
-                        domain, email, ca_provider, dns_provider, dns_config,
-                        ca_account_config, staging, cert_dir
-                    )
-                    if isinstance(result, tuple):
-                        certbot_cmd, ca_extra_env = result
-                    else:
-                        certbot_cmd = result
-                    # Manually append SAN domains
-                    if san_list:
-                        for san in san_list:
-                            certbot_cmd.extend(['-d', san])
-                    # Fallback path also needs the key flags appended manually
-                    # so a stale ca_manager doesn't silently downgrade certs.
-                    if key_type == 'rsa' and key_size:
-                        certbot_cmd.extend(['--key-type', 'rsa', '--rsa-key-size', str(key_size)])
-                    elif key_type == 'ecdsa' and elliptic_curve:
-                        certbot_cmd.extend(['--key-type', 'ecdsa', '--elliptic-curve', elliptic_curve])
-            else:
-                certbot_cmd = [
-                    'certbot', 'certonly',
-                    '--non-interactive',
-                    '--agree-tos',
-                    '--email', email,
-                    '--cert-name', domain,
-                    '--config-dir', str(cert_output_dir),
-                    '--work-dir', str(cert_output_dir / 'work'),
-                    '--logs-dir', str(cert_output_dir / 'logs'),
-                ]
-
-                # Add all domains
-                for d in all_domains:
-                    certbot_cmd.extend(['-d', d])
-
-                if staging:
-                    certbot_cmd.append('--staging')
-
-                # No-ca_manager path: still honour the resolved key shape so
-                # this branch produces the same cert as the main path.
-                if key_type == 'rsa' and key_size:
-                    certbot_cmd.extend(['--key-type', 'rsa', '--rsa-key-size', str(key_size)])
-                elif key_type == 'ecdsa' and elliptic_curve:
-                    certbot_cmd.extend(['--key-type', 'ecdsa', '--elliptic-curve', elliptic_curve])
-
-            if replace:
-                # Reissue over the existing lineage: a different -d set with
-                # the same --cert-name replaces the lineage's domains (expand
-                # and shrink). --renew-with-new-domains makes that
-                # confirmation deterministic. --force-renewal is load-bearing
-                # for the UNCHANGED-set case (config-only edits: CA switch,
-                # provider change, alias clear, same-type re-key): without it
-                # certbot hits _handle_identical_cert_request outside the
-                # renewal window, takes the keep-existing default, and exits 0
-                # WITHOUT issuing — and CertMate would then rewrite metadata
-                # with configuration that was never applied. A reissue must
-                # always issue.
-                certbot_cmd.extend(['--renew-with-new-domains', '--force-renewal'])
-
-            # Build per-request environment (avoid race conditions with os.environ)
-            process_env = os.environ.copy()
-            process_env.update(ca_extra_env)
-            strategy.prepare_environment(process_env, dns_config)
-
-            # Set propagation time (DNS-01 only; HTTP-01 has no propagation)
-            propagation_time = None
-            if challenge_type != 'http-01':
-                try:
-                    if settings is None:
-                        settings = self.settings_manager.load_settings()
-                    propagation_map = settings.get('dns_propagation_seconds', {}) or {}
-                except Exception as e:
-                    logger.debug("Failed to load settings in issue_certificate for propagation time: %s", e)
-                    propagation_map = {}
-
-                # Default to strategy default if not in settings map
-                default_seconds = strategy.default_propagation_seconds
-                try:
-                    propagation_time = int(propagation_map.get(dns_provider, default_seconds))
-                except (ValueError, TypeError):
-                    propagation_time = default_seconds
-                # Ensure propagation time is within reasonable bounds (1 second to 1 hour)
-                propagation_time = max(1, min(3600, propagation_time))
-
-                # --manual has no propagation flag: surface the configured
-                # per-provider value to custom-script hooks via env instead.
-                # An account-level propagation_seconds (exported earlier by
-                # prepare_environment) wins over the global setting.
-                if dns_provider == 'custom-script':
-                    process_env.setdefault('CERTMATE_DNS_PROPAGATION_SECONDS', str(propagation_time))
-
-            alias_hook_provider = alias_dns_provider or dns_provider
-            use_dns_alias_hook = (
-                challenge_type != 'http-01'
-                and domain_alias
-                and alias_hook_provider in DNS_ALIAS_SUPPORTED_PROVIDERS
+            certbot_cmd, process_env = self._build_issuance_command(
+                prepared, artifacts, domain=domain, email=email,
+                account_id=account_id, domain_alias=domain_alias,
+                alias_dns_provider=alias_dns_provider, replace=replace,
             )
 
-            if use_dns_alias_hook:
-                # The TXT records land on the ALIAS zone, so the hook must run
-                # with the account that controls that zone — which renewals
-                # already honour via metadata alias_dns_provider (issue #129).
-                alias_hook_config = dns_config
-                if alias_hook_provider != dns_provider:
-                    alias_hook_config, _ = self._get_dns_config(alias_hook_provider, account_id)
-                    if not alias_hook_config:
-                        raise ValueError(
-                            f"Alias DNS provider '{alias_hook_provider}' is not configured"
-                        )
-                logger.info(
-                    f"DNS alias '{domain_alias}' requested for {domain}; "
-                    f"using {alias_hook_provider} manual hook to create TXT records on the alias zone."
-                )
-                credentials_file = self._create_dns_alias_hook_config(
-                    alias_hook_provider, alias_hook_config, domain_alias, propagation_time or strategy.default_propagation_seconds
-                )
-                self._configure_dns_alias_arguments(certbot_cmd, credentials_file)
-            else:
-                # Create Config File. Pass the SAN list so the discovery
-                # path (Azure today) can resolve every cert FQDN against
-                # the account's hosted zones in one pass.
-                strategy_config = self._dns_config_for_strategy(
-                    dns_provider, dns_config, domain,
-                    san_domains=all_domains[1:] if len(all_domains) > 1 else None,
-                )
-                credentials_file = strategy.create_config_file(strategy_config)
+            # CSR mode (#599). The command above is reused wholesale — the CA,
+            # the EAB credentials, the DNS plugin and its credentials file are
+            # identical in both modes — and only the parts that describe a key
+            # or a lineage are rewritten. See modules/core/csr_issuance.
+            csr_output_dir = None
+            if csr_pem is not None:
+                csr_path, all_domains = self._store_csr(
+                    domain, cert_output_dir, csr_pem)
+                csr_output_dir = cert_output_dir / CSR_OUTPUT_DIRNAME
+                csr_output_dir.mkdir(parents=True, exist_ok=True)
+                # certbot REFUSES to overwrite the files it is told to write in
+                # --csr mode: a second run dies with
+                # `FileExistsError: ... csr-out/cert.pem` before it contacts the
+                # CA. Every renewal is a second run, so without this the first
+                # renewal of every CSR certificate fails — measured against a
+                # real container, not reasoned about.
+                #
+                # Clearing before rather than after: this is a staging
+                # directory, and the SERVED copies are the flat ones beside it,
+                # promoted by _publish_flat_files. Emptying it costs nothing if
+                # certbot then fails — the certificate on disk is untouched and
+                # still being served.
+                for stale in CSR_OUTPUT_FILES:
+                    (csr_output_dir / stale).unlink(missing_ok=True)
+                certbot_cmd = to_csr_command(
+                    certbot_cmd, csr_path, csr_output_dir)
 
-                # Configure Args
-                strategy.configure_certbot_arguments(certbot_cmd, credentials_file, domain_alias=domain_alias)
-
-                # Some plugins (e.g. certbot-dns-route53 >= 1.22) do not accept a
-                # --{plugin}-propagation-seconds flag and handle propagation internally.
-                if challenge_type != 'http-01' and strategy.supports_propagation_seconds_flag:
-                    certbot_cmd.extend([f'--{strategy.plugin_name}-propagation-seconds', str(propagation_time)])
 
             logger.info(f"Running certbot command for {domain} with {dns_provider}")
             # Redact sensitive arguments before logging
@@ -1191,6 +2922,16 @@ class CertificateManager:
                     safe_cmd.append(str(part))
             logger.debug(f"Certbot command: {' '.join(safe_cmd)}")
 
+            # build_certbot_command created the per-domain config dir; hand
+            # this domain the account a sibling already registered, so a batch
+            # of new domains does not become a batch of new ACME accounts.
+            # used_ca_account_id, not the request parameter: metadata persists
+            # the RESOLVED account (line ~1708), so comparing against the
+            # caller's `ca_account_id` — None whenever they did not name one —
+            # never matched a donor and the reuse silently never happened
+            # (Copilot, #604).
+            self._seed_acme_account(domain, cert_dir, ca_provider, used_ca_account_id)
+
             # Run certbot with isolated environment
             result = self.shell_executor.run(
                 certbot_cmd,
@@ -1201,39 +2942,89 @@ class CertificateManager:
             )
 
             if result.returncode != 0:
-                # Log the FULL stderr internally for operator debugging.
                 # certbot-dns-azure and a few other plugins echo the
-                # offending credentials .ini line on parse failure, so
-                # the raw stderr carries secret material. Sanitise
-                # before bubbling up into the exception that becomes
-                # the API response body. Internal audit finding H3.
-                logger.error(f"Certbot failed for {domain}: {result.stderr}")
+                # offending credentials .ini line on parse failure, so the
+                # raw stderr carries secret material. The sanitised copy is
+                # what goes BOTH to the log and to the exception that
+                # becomes the API response body.
+                #
+                # It used to be logged raw, on the reasoning that the log is
+                # internal and an operator debugging a failed issuance wants
+                # everything. But the log is a file that outlives the
+                # request, gets shipped to whatever collects logs, and ends
+                # up in a support bundle — so "internal" was doing a lot of
+                # work in that sentence, and the comment above this one used
+                # to say the raw stderr carries secrets while the line below
+                # it wrote them down. Internal audit finding H3.
                 from .utils import sanitize_certbot_stderr
                 safe_stderr = sanitize_certbot_stderr(result.stderr)
-                raise RuntimeError(f"Certificate creation failed: {safe_stderr}")
+                for flag in ('--eab-kid', '--eab-hmac-key'):
+                    if flag in certbot_cmd:
+                        secret = certbot_cmd[certbot_cmd.index(flag) + 1]
+                        if secret:
+                            safe_stderr = safe_stderr.replace(secret, '***')
+                # %r, and as logging ARGUMENTS: repr escapes a newline to a
+                # literal \n so neither the domain nor certbot's output can
+                # forge a second log line, and a handler can still filter on
+                # the values. Same convention as every other log line here
+                # that carries a domain.
+                logger.error("Certbot failed for %r: %r", domain, safe_stderr)
+                raise RuntimeError(
+                    f"Certificate creation failed: {safe_stderr}"
+                    + self._caa_explanation(ca_provider, all_domains, challenge_type))
             
-            # Move certificates to standard location
-            live_dir = cert_output_dir / 'live' / domain
+            # Move certificates to standard location. Publish live/ to the flat
+            # directory through the SAME staged-promote helper the renew path
+            # uses: stage all four to <name>.staging, then promote by rename.
+            # A failure while STAGING rolls the staged set back, so the served
+            # copy is left exactly as it was. (The promote loop is four renames
+            # and is not itself transactional — a crash between renames leaves a
+            # mixed generation — but the next renewal check reconciles that,
+            # which the old in-place loop's state was permanent past.) The
+            # previous loop wrote each served file directly, privkey.pem last,
+            # with no staging at all, so a failure on the fourth write left a new
+            # cert.pem beside the old privkey.pem — a pair that cannot handshake,
+            # served straight off disk. This is the create AND the replace=True
+            # reissue path. _publish_flat_files returns {filename: bytes}, the
+            # same shape the rest of this method expects from cert_files.
+            # In CSR mode certbot writes no lineage at all — no `live/`, no
+            # `renewal/`; certbot says so on success. Verified against Let's
+            # Encrypt staging, not read from the documentation. So the publish
+            # source is the directory it was told to write to. The staged
+            # promote is the same one either way, and it skips files that do
+            # not exist, which is what leaves privkey.pem alone.
+            live_dir = (csr_output_dir if csr_output_dir is not None
+                        else cert_output_dir / 'live' / domain)
             cert_files = {}
-            
+
             if live_dir.exists():
-                for cert_file in CERTIFICATE_FILES:
-                    src_file = live_dir / cert_file
-                    dst_file = cert_output_dir / cert_file
-                    if src_file.exists():
-                        # Single content read: copy bytes once and reuse them
-                        # for cert_files instead of re-opening the destination.
-                        src_real = os.path.realpath(src_file)
-                        data = Path(src_real).read_bytes()
-                        dst_file.write_bytes(data)
-                        # Preserve the source mode bits. shutil.copy did this
-                        # implicitly; without it privkey.pem (often 0600) would
-                        # be created under the umask (e.g. 0644), exposing the
-                        # private key — a security regression.
-                        shutil.copymode(src_real, dst_file)
-                        logger.info(f"Copied {cert_file} to {dst_file}")
-                        cert_files[cert_file] = data
+                cert_files = self._publish_flat_files(live_dir, cert_output_dir)
+                # No domain in the message: the surrounding logs already carry
+                # it, and interpolating a user-influenced value tripped CodeQL's
+                # log-injection rule for no added signal here.
+                logger.info(
+                    "Published %d flat certificate files", len(cert_files))
             
+            # certbot exited 0 — but verify a certificate actually materialised
+            # before reporting success. A missing or empty live dir (a suffixed
+            # lineage like <domain>-0001, a cert-name/path mismatch, or a
+            # partially-failed broken-lineage quarantine) would otherwise return
+            # success=True, audit "created", satisfy monitoring, AND push an
+            # empty file set to the external DR backend — all while no usable
+            # certificate exists on disk. Fail loudly instead.
+            # A CSR-only certificate has no private key on this node, by
+            # design. Demanding one here would fail every such issuance after
+            # it had already succeeded at the CA — burning rate limit for a
+            # file that must not exist.
+            required_files = (('cert.pem',) if csr_pem is not None
+                              else ('cert.pem', 'privkey.pem'))
+            missing_files = [f for f in required_files if not cert_files.get(f)]
+            if missing_files and getattr(self.shell_executor, 'produces_artifacts', True):
+                raise RuntimeError(
+                    "certbot reported success but expected certificate files "
+                    f"are missing for {domain}: {', '.join(missing_files)}"
+                )
+
             # Save metadata. 'staging' is kept alongside the new
             # 'ca_provider' key for backward compatibility: external storage
             # backends (Azure KV tags) and pre-#279 readers still understand
@@ -1250,6 +3041,15 @@ class CertificateManager:
                 'ca_provider': ca_provider,
                 'ca_account_id': used_ca_account_id
             }
+            if csr_pem is not None:
+                # `key_management` is what stops the health check from reading
+                # the absent key as a lost one (#608 forces needs_renewal on
+                # 'missing'), and what tells the renewal path to re-run the CSR
+                # command instead of `certbot renew`, which will never touch a
+                # certificate issued this way.
+                metadata['key_management'] = 'external'
+                metadata['csr_fingerprint'] = csr_fingerprint(csr_pem)
+                metadata['san_domains'] = all_domains[1:]
             if domain_alias:
                 metadata['domain_alias'] = domain_alias
                 metadata['alias_dns_provider'] = alias_dns_provider or dns_provider
@@ -1261,38 +3061,18 @@ class CertificateManager:
             # operator had no signal their backup never landed. Capture a
             # generic warning (no raw exception text — it can carry backend
             # credentials/URLs) and surface it on the result and in metadata.
-            storage_warning = None
-            if self.storage_manager:
-                try:
-                    backend_name = self.storage_manager.get_backend_name()
-                except Exception:
-                    backend_name = 'external'
-                try:
-                    storage_success = self.storage_manager.store_certificate(domain, cert_files, metadata)
-                    if storage_success:
-                        logger.info(f"Certificate stored in {backend_name} backend for {domain}")
-                    else:
-                        storage_warning = (
-                            f"Certificate issued but NOT saved to the {backend_name} storage "
-                            f"backend — the external copy is missing or stale. Check the backend "
-                            f"credentials and connectivity."
-                        )
-                        logger.warning(f"Failed to store certificate in {backend_name} backend for {domain}")
-                except Exception as e:
-                    storage_warning = (
-                        f"Certificate issued but saving it to the {backend_name} storage backend "
-                        f"failed — the external copy is missing or stale. See server logs for details."
-                    )
-                    logger.error(f"Error storing certificate in storage backend for {domain}: {e}")
+            storage_warning = self._store_in_backend(domain, cert_files, metadata)
+            self._apply_storage_warning(metadata, storage_warning)
 
-            if storage_warning:
-                metadata['storage_warning'] = storage_warning
+            if replace:
+                metadata = self._merge_reissue_metadata(domain, metadata)
 
             if self._save_metadata(domain, metadata):
                 logger.info(f"Saved certificate metadata to {self._metadata_path(domain)}")
 
             duration = time.time() - start_time
             logger.info(f"Certificate created successfully for {domain} in {duration:.2f} seconds")
+            self._record_creation_metrics(domain, dns_provider, True, duration)
             self._invalidate_certificate_info_cache(domain)
             self._write_pfx(domain)
 
@@ -1308,59 +3088,214 @@ class CertificateManager:
                 result['storage_warning'] = storage_warning
             return result
             
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as e:
             logger.error(f"Certificate creation timeout for {domain}")
+            self._record_creation_metrics(
+                domain, dns_provider, False, time.time() - start_time, error=e)
             raise RuntimeError("Certificate creation timed out")
-            
+
         except Exception as e:
             duration = time.time() - start_time
             logger.error(f"Certificate creation failed for {domain}: {str(e)} (duration: {duration:.2f}s)")
+            self._record_creation_metrics(
+                domain, dns_provider, False, duration, error=e)
             raise
         finally:
             domain_lock.release()
-            # Always clean up credential files (even on failure)
-            if credentials_file:
-                try:
-                    os.unlink(credentials_file)
-                except (FileNotFoundError, OSError):
-                    pass
-            # Clean up CA bundle temp file if created
-            ca_bundle = ca_extra_env.get('REQUESTS_CA_BUNDLE')
-            if ca_bundle:
-                try:
-                    os.unlink(ca_bundle)
-                except (FileNotFoundError, OSError):
-                    pass
+            # Always clean up credential files (even on failure), including any
+            # side files a provider writes alongside the main one — the sweep in
+            # create_google_config only mops up crashed runs, not live ones.
+            # (Google needs no side file since #385: its credentials file IS the
+            # service-account JSON, so it is unlinked as the main one.)
+            _remove_temp_files(artifacts)
+
+    @staticmethod
+    def _cert_fingerprint(cert_path):
+        """SHA256 of the certificate file bytes, or None when unreadable.
+        Used to detect whether a certbot run actually replaced the live
+        certificate — the artifact is the only renewal signal certbot
+        cannot suppress (its "not yet due" text vanishes under --quiet)."""
+        try:
+            return hashlib.sha256(Path(cert_path).read_bytes()).hexdigest()
+        except OSError:
+            return None
+
+
+    def _renewal_happened(self, result, fingerprint_check, live_cert_file,
+                          pre_renew_fingerprint):
+        """Did that certbot run actually renew anything? (#666)
+
+        ``certbot renew`` exits 0 both when it renews and when nothing is due,
+        so the exit code cannot answer this. Getting it wrong stamps
+        ``renewed_at`` and reports a renewal that did not happen — false
+        telemetry that masks a genuinely stuck renewal, which is worse than
+        reporting nothing.
+
+        The signal that cannot lie is the artifact: fingerprint the live
+        certificate before and after. The output sentinel is the FALLBACK,
+        for executors that stage no real files, and must never be primary —
+        certbot suppresses those messages under ``--quiet``.
+
+        Extracted so this decision can be tested directly instead of only
+        through a renewal that has to be staged end to end.
+        """
+        if fingerprint_check:
+            post_renew_fingerprint = self._cert_fingerprint(live_cert_file)
+            return (post_renew_fingerprint is not None
+                    and post_renew_fingerprint != pre_renew_fingerprint)
+
+        output = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
+        sentinel_no_op = ('not yet due for renewal' in output
+                          or 'no renewals were attempted' in output)
+        return not sentinel_no_op
+
+    def _csr_renewal_request(self, domain):
+        """The stored CSR for a CSR-only certificate, or None (#599).
+
+        None means "renew this the ordinary way". Both halves have to hold —
+        the metadata marker AND the file — because a CSR-only certificate whose
+        csr.pem went missing cannot be renewed at all, and falling through to
+        `certbot renew` would report a clean no-op every night while the
+        certificate marched to expiry. Better to raise where an operator can
+        see it.
+        """
+        metadata = self._load_metadata(domain) or {}
+        if metadata.get('key_management') != 'external':
+            return None
+        csr_path = self.cert_dir / domain / 'csr.pem'
+        if not csr_path.exists():
+            raise RuntimeError(
+                f"Cannot renew {domain}: it was issued from a CSR this "
+                f"instance no longer has ({csr_path}). Submit the CSR again "
+                f"from the device that holds the private key."
+            )
+        return {'metadata': metadata, 'csr_pem': csr_path.read_bytes()}
+
+    def _renew_from_stored_csr(self, domain, request):
+        """Re-run issuance with the stored CSR, and report it as a renewal.
+
+        Everything the ordinary renewal re-derives from metadata — the CA, the
+        DNS provider and account, the alias — is passed straight through, so a
+        CSR renewal reaches the CA the same way its issuance did.
+
+        `replace=True` is passed for one reason: create_certificate refuses a
+        domain that already has a certificate, and a renewal by definition
+        does. It does NOT mean there is a lineage to replace — there is not —
+        so the two flags it adds to the command (`--renew-with-new-domains`,
+        `--force-renewal`) are dropped again in `to_csr_command`. What it does
+        buy is the reissue metadata semantics, which are the right ones here.
+        """
+        metadata = request['metadata']
+        before = self._cert_fingerprint(self.cert_dir / domain / 'cert.pem')
+
+        result = self.create_certificate(
+            domain=domain,
+            email=metadata.get('email'),
+            dns_provider=metadata.get('dns_provider'),
+            account_id=metadata.get('account_id'),
+            ca_provider=metadata.get('ca_provider'),
+            ca_account_id=metadata.get('ca_account_id'),
+            domain_alias=metadata.get('domain_alias'),
+            alias_dns_provider=metadata.get('alias_dns_provider'),
+            challenge_type=metadata.get('challenge_type'),
+            csr_pem=request['csr_pem'],
+            replace=True,
+        )
+
+        # The SAME dict shape the ordinary renewal returns. The route reads
+        # `.get('renewed')` off it, so a tuple here — which is what this
+        # returned when the shape was invented rather than copied — is a 500
+        # with "'tuple' object has no attribute 'get'". `create_certificate`
+        # raises on failure, so reaching this line means it succeeded.
+        #
+        # Same question the ordinary path asks, answered the same way: the
+        # artifact, not the exit code. A CA that returns the SAME certificate
+        # for an unchanged CSR — which is exactly what a repeat request inside
+        # the CA's own reuse window produces — must not be reported as a
+        # renewal, or `renewed_at` would advance while the expiry did not.
+        after = self._cert_fingerprint(self.cert_dir / domain / 'cert.pem')
+        renewed = after is None or after != before
+        return {
+            'success': True,
+            'renewed': renewed,
+            'domain': domain,
+            'message': ('Certificate renewed from the stored CSR'
+                        if renewed
+                        else 'Reissued from the stored CSR, but the CA returned '
+                             'the same certificate'),
+            'dns_provider': (result or {}).get('dns_provider')
+            if isinstance(result, dict) else None,
+        }
 
     def renew_certificate(self, domain, force=False):
         """Renew a certificate"""
+        # A CSR-only certificate has no certbot lineage, so `certbot renew`
+        # will never touch it — certbot says so on issuance: "Certificates
+        # created using --csr will not be renewed automatically by Certbot. You
+        # will need to renew the certificate before it expires, by running the
+        # same Certbot command again." So that is what this does (#599).
+        #
+        # Before the lock, deliberately: the per-domain lock is a plain Lock,
+        # not an RLock, and create_certificate takes it too. Acquiring here and
+        # delegating there would deadlock every CSR renewal — silently, since
+        # the acquire has a timeout and would surface as
+        # DomainOperationInProgress against no other operation.
+        csr_renewal = self._csr_renewal_request(domain)
+        if csr_renewal is not None:
+            return self._renew_from_stored_csr(domain, csr_renewal)
+
         domain_lock = self._get_domain_lock(domain)
         if not domain_lock.acquire(timeout=self._domain_lock_timeout()):
             raise DomainOperationInProgress(domain)
-        alias_hook_config = None
-        credentials_file = None
+        # The same record create_certificate uses (#666). Renewal kept its own
+        # four locals and its own deletion loop, and the two sets had already
+        # diverged — a file one path removes and the other forgets is a secret
+        # left on disk.
+        artifacts = _IssuanceArtifacts()
         try:
             # Use the same config/work/log directories as during creation
             cert_dir = self.cert_dir
             domain_dir = cert_dir / domain
             if not domain_dir.exists() or not (domain_dir / 'cert.pem').exists():
                 raise FileNotFoundError(f"No certificate found for domain: {domain}")
+
+            # Self-heal a lineage flattened by a backup restore (#410) before
+            # certbot sees it. Without this, `certbot renew` parsefails and
+            # skips the lineage, so every scheduled renewal reports
+            # "renewed: False" forever while the certificate marches to
+            # expiry. Repairing here (not only on the reissue path) is what
+            # makes an unattended instance recover on its own.
+            try:
+                if repair_certbot_lineage_symlinks(domain_dir, domain):
+                    logger.warning(
+                        f"Rebuilt broken certbot lineage symlinks for {domain} "
+                        "(flattened by a backup restore) before renewal"
+                    )
+            except OSError as e:
+                logger.warning(f"Could not rebuild lineage symlinks for {domain}: {e}")
+
             work_dir = domain_dir / 'work'
             logs_dir = domain_dir / 'logs'
 
             metadata_file = domain_dir / 'metadata.json'
-            metadata = {}
-            if metadata_file.exists():
-                try:
-                    with open(metadata_file, 'r') as f:
-                        metadata = json.load(f)
-                except Exception as e:
-                    logger.warning(f"Failed to read metadata for renewal of {domain}: {e}")
-            
+            # The one metadata reader that quarantines a corrupt file instead
+            # of returning {} over it. The inline json.load this replaces did
+            # the latter — and the renewal then wrote renewed_at into that
+            # {} and saved it, destroying dns_provider, san_domains,
+            # ca_provider, domain_alias and every deployment_* key in one
+            # pass, without a .corrupt-* copy and with success reported.
+            metadata = self._load_metadata(domain)
+
             cmd = [
                 'certbot', 'renew',
                 '--cert-name', domain,
-                '--quiet',
+                # No --quiet: under --quiet certbot routes its "not yet due
+                # for renewal" notification to /dev/null, so a no-op renew
+                # exits 0 with EMPTY output and becomes indistinguishable
+                # from a real renewal by output alone. Output is captured
+                # programmatically (never emailed), so verbosity costs
+                # nothing; the no-op sentinel below needs it as a secondary
+                # signal next to the primary cert-fingerprint comparison.
                 # certbot's default `renew` injects a random sleep of up
                 # to ~8 minutes before contacting the ACME server, to
                 # avoid stampeding Let's Encrypt when run from a flock
@@ -1383,6 +3318,17 @@ class CertificateManager:
             # renewal, causing Route53 and other env-var-based providers to
             # fail with "Unable to locate credentials").
             process_env = os.environ.copy()
+            # A private ACME CA whose endpoint presents a certificate from its
+            # own root: creation passed the trust bundle through
+            # REQUESTS_CA_BUNDLE (ca_manager.build_certbot_command); renewal
+            # built its own environment and never read ca_provider, so every
+            # renewal against such a CA failed TLS verification — silently,
+            # until the certificate expired. Same bundle, same variable, same
+            # cleanup in the finally below.
+            ca_bundle_path = self._renewal_ca_bundle(metadata)
+            if ca_bundle_path:
+                process_env['REQUESTS_CA_BUNDLE'] = ca_bundle_path
+                artifacts.ca_extra_env['REQUESTS_CA_BUNDLE'] = ca_bundle_path
 
             dns_provider = metadata.get('dns_provider')
             challenge_type = metadata.get('challenge_type', 'dns-01')
@@ -1408,20 +3354,16 @@ class CertificateManager:
                 # Inject provider env vars (e.g. AWS credentials) for alias renewals too
                 strategy.prepare_environment(process_env, dns_config)
 
-                propagation_map = settings.get('dns_propagation_seconds', {}) or {}
-                try:
-                    propagation_time = int(propagation_map.get(alias_provider, strategy.default_propagation_seconds))
-                except (ValueError, TypeError):
-                    propagation_time = strategy.default_propagation_seconds
-                propagation_time = max(1, min(3600, propagation_time))
+                propagation_time = _propagation_seconds(
+                    settings, alias_provider, strategy)
 
-                alias_hook_config = self._create_dns_alias_hook_config(
+                artifacts.alias_hook_config = self._create_dns_alias_hook_config(
                     alias_provider,
                     dns_config,
                     domain_alias,
                     propagation_time,
                 )
-                self._configure_dns_alias_arguments(cmd, alias_hook_config)
+                self._configure_dns_alias_arguments(cmd, artifacts.alias_hook_config)
                 logger.info(
                     f"Renewing {domain} with DNS alias '{domain_alias}' "
                     f"using {alias_provider} manual hook."
@@ -1434,7 +3376,28 @@ class CertificateManager:
                     metadata.get('account_id'),
                     settings,
                 )
-                if dns_config:
+                acme_dns_alias = self._acme_dns_native_alias(dns_provider, dns_config)
+                if dns_config and acme_dns_alias:
+                    # Mirror the create path: acme-dns renews through CertMate's
+                    # native hook, never through a certbot plugin (issue #466).
+                    # Certs issued before this fix carry no domain_alias in
+                    # metadata, so they land here rather than in the alias
+                    # branch above — routing on the provider keeps them renewable
+                    # without a metadata migration.
+                    strategy = DNSStrategyFactory.get_strategy(dns_provider)
+                    strategy.prepare_environment(process_env, dns_config)
+                    artifacts.alias_hook_config = self._create_dns_alias_hook_config(
+                        dns_provider,
+                        dns_config,
+                        acme_dns_alias,
+                        _propagation_seconds(settings, dns_provider, strategy),
+                    )
+                    self._configure_dns_alias_arguments(cmd, artifacts.alias_hook_config)
+                    # Strip CR/LF so a crafted domain cannot forge log entries
+                    # (CodeQL py/log-injection), matching modules/web/cert_routes.py.
+                    safe_domain = str(domain).replace('\r', ' ').replace('\n', ' ')
+                    logger.info(f"Renewing {safe_domain} with the native acme-dns hook.")
+                elif dns_config:
                     strategy = DNSStrategyFactory.get_strategy(dns_provider)
                     strategy.prepare_environment(process_env, dns_config)
                     # Create credentials file for providers that need one.
@@ -1442,97 +3405,252 @@ class CertificateManager:
                     # the same FQDN set the cert was originally issued with;
                     # otherwise a wildcard SAN under a parent zone would
                     # be invisible at renew time.
-                    renew_sans = metadata.get('san_domains') or None
-                    strategy_config = self._dns_config_for_strategy(
-                        dns_provider, dns_config, domain, san_domains=renew_sans,
+                    self._write_dns_credentials(
+                        strategy, artifacts, dns_provider, dns_config, domain,
+                        san_domains=metadata.get('san_domains') or None,
                     )
-                    credentials_file = strategy.create_config_file(strategy_config)
+                    # Pass the authenticator + credentials explicitly at renew
+                    # (mirrors the create path) so renewal does not depend on the
+                    # credentials path certbot baked into renewal/<domain>.conf at
+                    # issue time — that path is written relative to the issuing
+                    # CWD and goes stale after a data-dir/CWD move, which silently
+                    # broke renewal for file-based DNS providers. Env-based
+                    # providers (route53) return no credentials file and keep
+                    # using the stored authenticator + prepared env vars.
+                    if artifacts.credentials_file:
+                        strategy.configure_certbot_arguments(
+                            cmd, artifacts.credentials_file)
                     if dns_provider == 'custom-script':
                         # Mirror the create path: expose the propagation
                         # setting to the hooks certbot replays at renewal.
-                        propagation_map = settings.get('dns_propagation_seconds', {}) or {}
-                        try:
-                            renew_propagation = int(propagation_map.get(dns_provider, strategy.default_propagation_seconds))
-                        except (ValueError, TypeError):
-                            renew_propagation = strategy.default_propagation_seconds
                         process_env.setdefault(
                             'CERTMATE_DNS_PROPAGATION_SECONDS',
-                            str(max(1, min(3600, renew_propagation))))
+                            str(_propagation_seconds(settings, dns_provider,
+                                                     strategy)))
                     logger.info(f"Prepared DNS environment for renewal of {domain} with {dns_provider}")
                 else:
-                    logger.warning(
-                        f"DNS config for provider '{dns_provider}' not found during "
-                        f"renewal of {domain}; certbot may fail if credentials are required"
+                    # The DNS account this cert was issued with is gone from
+                    # settings. create_certificate raises on this same condition,
+                    # so renewal fails fast with a clear message instead of
+                    # letting certbot fail opaquely (which surfaced as a 500 with
+                    # no hint about the missing account).
+                    raise RuntimeError(
+                        f"Cannot renew {domain}: DNS provider '{dns_provider}' "
+                        f"account '{metadata.get('account_id') or 'default'}' is not configured"
                     )
 
-            result = self.shell_executor.run(cmd, capture_output=True, text=True, env=process_env)
-            
+            # certbot `renew` exits 0 BOTH when it renews and when nothing is
+            # due, and its "not yet due" messages are display-channel output
+            # certbot may suppress (it does under --quiet). The only signal
+            # that cannot lie is the artifact itself: fingerprint the live
+            # cert before the run and compare after. Skipped for
+            # non-artifact-producing doubles (MockShellExecutor), which stage
+            # no real files — those fall back to the output sentinel below.
+            live_cert_file = domain_dir / 'live' / domain / 'cert.pem'
+            fingerprint_check = getattr(self.shell_executor, 'produces_artifacts', True)
+            pre_renew_fingerprint = None
+            if fingerprint_check:
+                pre_renew_fingerprint = self._cert_fingerprint(live_cert_file)
+
+            # 30-minute cap, mirroring the create path (see the timeout on the
+            # create certbot call). Without it a wedged certbot — an
+            # unresponsive ACME server, or a manual-auth / DNS-alias hook that
+            # never returns — blocks this thread forever. Because check_renewals
+            # renews serially under APScheduler max_instances=1, one hung renew
+            # would silently stop EVERY future automatic renewal until the
+            # process is restarted; a synchronous API/web renew would also pin
+            # its gunicorn worker. Fail fast instead.
+            result = self.shell_executor.run(cmd, capture_output=True, text=True,
+                                             timeout=1800, env=process_env)
+
             if result.returncode == 0:
+                # If CertMate's renewal_threshold_days is wider than certbot's
+                # own ~30-day window, check_renewals calls this daily, certbot
+                # no-ops, and stamping renewed_at + reporting a renewal would
+                # be false telemetry that masks a genuinely stuck renewal.
+                # Primary no-op detection: the live cert bytes are unchanged
+                # (or still absent) after an exit-0 run. The output sentinel
+                # is the fallback for non-artifact-producing executors and a
+                # belt-and-braces cross-check; it MUST NOT be the primary
+                # signal because certbot suppresses it under --quiet.
+                renewed = self._renewal_happened(
+                    result, fingerprint_check, live_cert_file,
+                    pre_renew_fingerprint)
+
+                if not renewed:
+                    logger.info(f"Certificate for {domain} is not yet due for renewal; no action taken")
+                    # Before returning: does the flat copy still agree with
+                    # live/? This branch is where a half-finished publish
+                    # became permanent — it returns before the copy below, so
+                    # nothing ever retried it and the daily run kept booking
+                    # the domain as skipped_not_due. Reconciling here is what
+                    # heals an instance that is already in that state; the
+                    # staged publish above is what stops it happening again.
+                    stale = self._stale_flat_files(domain_dir / 'live' / domain, domain_dir)
+                    if stale:
+                        logger.warning(
+                            "Certificate for %s did not need renewing, but its "
+                            "served copy disagreed with certbot's: %s. "
+                            "Republishing — this is the state where a new "
+                            "certificate can sit beside the previous private "
+                            "key.", domain, ", ".join(stale))
+                        try:
+                            self._publish_flat_files(domain_dir / 'live' / domain, domain_dir)
+                        except Exception as republish_error:
+                            logger.error(
+                                "Could not republish the served copy for %s: %s",
+                                domain, republish_error)
+                            raise RuntimeError(
+                                f"{domain} is serving files that do not match "
+                                f"its certificate and they could not be "
+                                f"repaired: {republish_error}") from republish_error
+                    # Reconcile the external copy too. _store_in_backend is
+                    # otherwise reached only from create and the renewed=True
+                    # branch, so a store that failed once (an expired Vault
+                    # token, a transient 5xx) was never retried: the local cert
+                    # was fresh but the backend stayed on the OLD generation, and
+                    # because get_certificate_info reads the backend copy when a
+                    # storage backend is configured, needs_renewal stayed True
+                    # forever, every run landed here, and the store was never
+                    # tried again. And when the reconcile above republished
+                    # the flat PEMs, the new generation reached /download and the
+                    # deploy hooks but not the backend or the PFX. Push here
+                    # when the external copy is behind — a prior store failed
+                    # (storage_warning persisted) or we just republished — so
+                    # downstream is not stranded on the old certificate.
+                    reconcile_warning = None
+                    if self.storage_manager and (stale or metadata.get('storage_warning')):
+                        cert_files = {
+                            name: (domain_dir / name).read_bytes()
+                            for name in CERTIFICATE_FILES
+                            if (domain_dir / name).exists()
+                        }
+                        reconcile_warning = self._store_in_backend(
+                            domain, cert_files, metadata)
+                        try:
+                            self._apply_storage_warning(metadata, reconcile_warning)
+                            self._save_metadata(domain, metadata)
+                        except Exception as e:
+                            logger.warning(
+                                "Failed to persist storage state for %s: %s",
+                                domain, e)
+                        if stale:
+                            # The served pair rotated a generation; rebuild the
+                            # PFX so Windows automation polling cert.pfx sees it.
+                            self._write_pfx(domain)
+                    self._invalidate_certificate_info_cache(domain)
+                    result = {
+                        'success': True,
+                        'renewed': False,
+                        'domain': domain,
+                        'repaired': stale or None,
+                        'message': 'Certificate not yet due for renewal',
+                    }
+                    if reconcile_warning:
+                        result['storage_warning'] = reconcile_warning
+                    return result
+
                 # Copy renewed certificates from the correct live directory
                 src_dir = domain_dir / 'live' / domain
                 dest_dir = domain_dir
                 
-                cert_files = {}
-                for file_name in CERTIFICATE_FILES:
-                    src_file = src_dir / file_name
-                    dest_file = dest_dir / file_name
-                    if src_file.exists():
-                        self._atomic_binary_copy(src_file, dest_file)
-                        with open(dest_file, 'rb') as f:
-                            cert_files[file_name] = f.read()
+                cert_files = self._publish_flat_files(src_dir, dest_dir)
                 
-                if self.storage_manager:
-                    try:
-                        storage_success = self.storage_manager.store_certificate(domain, cert_files, metadata)
-                        if storage_success:
-                            logger.info(f"Certificate stored in {self.storage_manager.get_backend_name()} backend for {domain}")
-                        else:
-                            logger.warning(f"Failed to store certificate in {self.storage_manager.get_backend_name()} backend for {domain}")
-                    except Exception as e:
-                        logger.error(f"Error storing certificate in storage backend for {domain}: {e}")
+                # Stamp the renewal BEFORE storing, so the external copy
+                # carries the same renewed_at as the local one; then persist
+                # metadata once, with the resulting storage state (#423).
+                metadata['renewed_at'] = utc_now_iso()
+                storage_warning = self._store_in_backend(domain, cert_files, metadata)
 
-                # Update metadata with renewal timestamp
-                if metadata_file.exists():
+                # Persist when there is metadata to update OR a warning to
+                # record: a domain with no metadata.json would otherwise lose
+                # the only signal that its external copy is stale.
+                if metadata_file.exists() or storage_warning:
                     try:
-                        metadata['renewed_at'] = utc_now_iso()
+                        self._apply_storage_warning(metadata, storage_warning)
                         self._save_metadata(domain, metadata)
                         logger.info(f"Updated renewal timestamp in metadata for {domain}")
                     except Exception as e:
                         logger.warning(f"Failed to update metadata for {domain}: {e}")
-                
+
                 logger.info(f"Certificate renewed successfully for {domain}")
                 self._invalidate_certificate_info_cache(domain)
                 self._write_pfx(domain)
-                return {
+                renew_result = {
                     'success': True,
+                    'renewed': True,
                     'domain': domain,
                     'message': "Certificate renewed successfully"
                 }
+                if storage_warning:
+                    renew_result['storage_warning'] = storage_warning
+                return renew_result
             else:
-                # Mirror the create-path sanitisation: log raw stderr,
-                # surface a redacted copy. See sanitize_certbot_stderr
-                # docstring for the precise stripping rules.
+                # Mirror the create path: the redacted copy is what is
+                # logged and what is surfaced. See sanitize_certbot_stderr
+                # for the precise stripping rules.
                 error_msg = result.stderr or "Certificate not found"
-                logger.error(f"Certificate renewal failed for {domain}: {error_msg}")
                 from .utils import sanitize_certbot_stderr
                 safe_error = sanitize_certbot_stderr(error_msg) if result.stderr else error_msg
-                raise RuntimeError(f"Renewal failed: {safe_error}")
+                logger.error("Certificate renewal failed for %r: %r", domain, safe_error)
+                caa_domains = [domain] + list(metadata.get('san_domains') or [])
+                raise RuntimeError(
+                    f"Renewal failed: {safe_error}"
+                    + self._caa_explanation(metadata.get('ca_provider'), caa_domains,
+                                            challenge_type))
+        except subprocess.TimeoutExpired:
+            # Explicit, clean message before the generic handler below re-wraps
+            # every exception as "Exception: ...". The finally block still runs,
+            # releasing the domain lock and cleaning up credential files.
+            logger.error(f"Certificate renewal timed out for {domain}")
+            raise RuntimeError("Certificate renewal timed out")
         except Exception as e:
             error_msg = str(e)
             logger.error(f"Exception during certificate renewal for {domain}: {error_msg}")
             raise RuntimeError(f"Exception: {error_msg}")
         finally:
-            if alias_hook_config:
-                try:
-                    os.unlink(alias_hook_config)
-                except (FileNotFoundError, OSError):
-                    pass
-            if credentials_file:
-                try:
-                    os.unlink(credentials_file)
-                except (FileNotFoundError, OSError):
-                    pass
+            _remove_temp_files(artifacts)
             domain_lock.release()
+
+    def _renewal_ca_bundle(self, metadata):
+        """Return the trust-bundle path certbot needs to talk to this
+        certificate's CA at renewal, or None.
+
+        Mirrors what ``build_certbot_command`` does at issuance for
+        ``private_ca``: resolve the CA account the certificate was issued
+        under and write its ``ca_cert`` to a temp file.
+
+        A quarantined metadata.json (see _load_metadata) no longer carries
+        ca_provider, so until the operator repairs it from the .corrupt-*
+        copy the certificate renews without a bundle — the quarantine log
+        line names the lost keys for exactly that reason.
+
+        When the account is gone or has no bundle the attempt still goes
+        ahead without one — honestly: against an endpoint whose
+        certificate chains to the private root it will fail TLS
+        verification, which is the pre-fix behaviour and what the error
+        line says; against an endpoint with a publicly trusted
+        certificate (a private ACME CA behind a public-cert front) it
+        succeeds, which is why refusing here would be wrong.
+        """
+        if metadata.get('ca_provider') != 'private_ca' or self.ca_manager is None:
+            return None
+        account_id = metadata.get('ca_account_id')
+        try:
+            account_config, _ = self.ca_manager.get_ca_config('private_ca', account_id)
+            bundle = self.ca_manager.create_ca_trust_bundle('private_ca', account_config)
+        except Exception as e:
+            logger.error(f"Renewal will run without the private CA trust bundle "
+                         f"(private_ca/{account_id or 'default'}: {e}); it fails TLS "
+                         f"verification unless the ACME endpoint presents a publicly "
+                         f"trusted certificate")
+            return None
+        if not bundle:
+            logger.error(f"Renewal will run without the private CA trust bundle: account "
+                         f"private_ca/{account_id or 'default'} has no ca_cert; it fails TLS "
+                         f"verification unless the ACME endpoint presents a publicly "
+                         f"trusted certificate")
+        return bundle
 
     def check_renewals(self):
         """Check and renew certificates that are about to expire.
@@ -1543,41 +3661,70 @@ class CertificateManager:
         debug-level one), so a typo in settings.json could quietly exclude a
         domain from renewal forever; every skip and failure is now counted
         and logged.
+
+        The sweep runs under one correlation id, which every line it produces
+        carries — including the deploy hooks it triggers, because the event
+        bus hands the id across the thread boundary. Scheduled work had no
+        identifier at all, so a renewal and its deploy were two unrelated sets
+        of log lines and the only way to associate them was the clock, on a
+        run where dozens of certificates renew inside the same minute.
+
+        A wrapper rather than a `with` around the body: the body is long and
+        already deeply nested, and `with` guarantees the release on every exit
+        path — a leaked context would tag every later job on this scheduler
+        thread with a stale sweep id, which is worse than no id at all.
         """
+        with LogContext(request_id=new_correlation_id(),
+                        operation='renewal_sweep'):
+            return self._check_renewals()
+
+    def _check_renewals(self):
         settings = self.settings_manager.load_settings()
 
         if not settings.get('auto_renew', True):
             logger.info("Automatic renewal is globally disabled; skipping renewal check")
+            # `unmanaged` present but zero: the key is part of the summary
+            # shape, and a caller that reads it must not have to know which
+            # early return produced the dict. Nothing is reported here because
+            # renewal was switched off deliberately — naming certificates the
+            # sweep "did not consider" when it considered none would be noise.
             return {'checked': 0, 'renewed': 0, 'failed': 0,
                     'skipped_disabled': 0, 'skipped_invalid': 0,
+                    'skipped_not_due': 0, 'unmanaged': 0, 'reregistered': 0,
                     'auto_renew_disabled': True}
 
         # Migrate settings format if needed
         settings = self.settings_manager.migrate_domains_format(settings)
 
-        logger.info("Checking for certificates that need renewal")
+        domains = settings.get('domains', [])
+        logger.info("Checking %d certificate(s) for renewal", len(domains))
 
         summary = {'checked': 0, 'renewed': 0, 'failed': 0,
-                   'skipped_disabled': 0, 'skipped_invalid': 0}
+                   'skipped_disabled': 0, 'skipped_invalid': 0,
+                   'skipped_not_due': 0, 'unmanaged': 0, 'reregistered': 0}
+        # Every domain this sweep took a decision about, so the reconciliation
+        # below can name the certificates it never reached. Collected rather
+        # than re-derived from `domains`, because a malformed entry is skipped
+        # here and must not read as "seen".
+        considered = set()
+        started = time.time()
+        self._report_unfinished_sweep()
+        self._mark_sweep_started(len(domains))
 
-        for domain_entry in settings.get('domains', []):
+        for domain_entry in domains:
+            # Reset per iteration: the outer except reads `domain` to publish
+            # certificate_failed, and a leftover value from the previous entry
+            # would attribute the failure to the wrong certificate.
+            domain = None
             try:
-                # Handle both old and new domain formats
-                if isinstance(domain_entry, str):
-                    domain = domain_entry
-                    per_cert_auto_renew = True
-                elif isinstance(domain_entry, dict):
-                    domain = domain_entry.get('domain')
-                    per_cert_auto_renew = domain_entry.get('auto_renew', True)
-                else:
-                    logger.warning(f"Skipping malformed domain entry (not str/dict): {domain_entry!r}")
-                    summary['skipped_invalid'] += 1
-                    continue
-
+                domain = entry_domain(domain_entry)
                 if not domain:
-                    logger.warning(f"Skipping domain entry with no domain name: {domain_entry!r}")
+                    logger.warning(f"Skipping domain entry that names no domain: {domain_entry!r}")
                     summary['skipped_invalid'] += 1
                     continue
+                per_cert_auto_renew = entry_auto_renew(domain_entry)
+
+                considered.add(domain)
 
                 # Per-certificate opt-out: skip when auto_renew is explicitly
                 # disabled on this domain entry. The global auto_renew flag is
@@ -1596,23 +3743,22 @@ class CertificateManager:
                 # per run, so populating _certificate_info_cache would only
                 # add a deepcopy-on-set with no possible read hit.
                 summary['checked'] += 1
-                cert_info = self.get_certificate_info(domain, settings=settings, use_cache=False)
-
-                if cert_info and cert_info.get('needs_renewal'):
-                    logger.info(f"Renewing certificate for {domain}")
-                    try:
-                        self.renew_certificate(domain)
-                        summary['renewed'] += 1
-                        logger.info(f"Successfully renewed certificate for {domain}")
-                        self._audit_scheduled_renew(domain, 'success')
-                    except Exception as e:
-                        summary['failed'] += 1
-                        logger.error(f"Failed to renew certificate for {domain}: {e}")
-                        self._audit_scheduled_renew(domain, 'failure', error=e)
+                if summary['checked'] % self.SWEEP_PROGRESS_EVERY == 0:
+                    # Roughly where the sweep is, so a process that dies here
+                    # leaves a record of how far it got. Every tenth, not
+                    # every one: the marker must not cost the same order as
+                    # the work it describes.
+                    self._mark_sweep_progress(
+                        summary['checked'], len(domains), started)
+                self._renew_if_due(domain, settings, summary)
 
             except Exception as e:
                 summary['failed'] += 1
                 logger.error(f"Error checking renewal for domain entry {domain_entry}: {e}")
+                # A failure while *checking* (unreadable metadata, bad entry)
+                # is just as invisible to the operator as a failed renewal.
+                if domain:
+                    self._publish_failed_event(domain, e)
 
         if summary['skipped_invalid']:
             logger.warning(
@@ -1622,13 +3768,326 @@ class CertificateManager:
                 summary['skipped_invalid'],
                 'y' if summary['skipped_invalid'] == 1 else 'ies',
             )
+        # A certificate in CertMate's own store that no settings entry names
+        # was invisible to the loop above, which iterates settings and nothing
+        # else. It was never invisible to the rest of the application: the
+        # listing, discovery and the digest all take the union of settings and
+        # the certificate directories, so the dashboard showed it, the digest
+        # reported it expiring, and the sweep that is supposed to renew it
+        # never mentioned it. That disagreement is what made #759 read as a
+        # threshold bug — the log had no line for the domain at all.
+        #
+        # #789 made the sweep report them. #792 decided what to do with them,
+        # and the answer is here: renew the ones that can say how they were
+        # issued, report the rest.
+        #
+        # The union comes from collect_domain_sources, the one implementation
+        # of "which certificates exist" (#670), so the sweep now answers that
+        # question the same way the other three components do. The loop above
+        # still walks settings directly, deliberately: it is what counts a
+        # malformed entry as skipped_invalid, and the union silently drops
+        # those — a typo must not become an absence.
+        for domain in self._unregistered_on_disk(settings, considered):
+            self._sweep_unregistered(domain, settings, summary)
+
+        duration = time.time() - started
+        summary['duration_seconds'] = round(duration, 2)
+        summary['examined'] = (
+            summary['checked'] + summary['skipped_disabled']
+            + summary['skipped_invalid'])
+        self._mark_sweep_finished(summary, duration)
         logger.info(
-            "Renewal check complete: %d checked, %d renewed, %d failed, "
-            "%d disabled, %d invalid",
+            "Renewal check complete in %.1fs: %d checked, %d renewed, "
+            "%d failed, %d disabled, %d invalid, %d not-due, %d unmanaged, "
+            "%d re-registered",
+            duration,
             summary['checked'], summary['renewed'], summary['failed'],
             summary['skipped_disabled'], summary['skipped_invalid'],
+            summary['skipped_not_due'], summary['unmanaged'],
+            summary['reregistered'],
         )
         return summary
+
+    def _renew_if_due(self, domain, settings, summary):
+        """Renew one certificate if it is due, and account for the outcome.
+
+        Extracted so the registered path and the disk-only path cannot drift:
+        they are the same work, and this codebase's own history is a list of
+        two copies of one operation growing apart (create/renew, #423, #666).
+        Everything a renewal owes the operator happens here — the counters, the
+        duration metric, the attributed audit record, and the events that reach
+        their notification channels — so a caller cannot get half of it.
+
+        Returns True when a certificate was actually renewed, which is the
+        signal the disk-only path needs before it writes anything back to
+        settings. `skipped_not_due` is not that: certbot said no.
+        """
+        cert_info = self.get_certificate_info(domain, settings=settings, use_cache=False)
+        if not (cert_info and cert_info.get('needs_renewal')):
+            return False
+
+        logger.info(f"Renewing certificate for {domain}")
+        renew_started = time.time()
+        try:
+            res = self.renew_certificate(domain)
+            # certbot can report "not yet due" (renewed=False) when the
+            # configured threshold is wider than certbot's own window. That is
+            # NOT a real renewal — don't count it, audit it, or fire deploy
+            # hooks; it retries next run.
+            if isinstance(res, dict) and res.get('renewed') is False:
+                summary['skipped_not_due'] += 1
+                logger.info(f"{domain} not yet due for renewal per certbot; will retry next run")
+                return False
+            summary['renewed'] += 1
+            logger.info(f"Successfully renewed certificate for {domain}")
+            self._record_renewal_metrics(
+                domain, cert_info, True, time.time() - renew_started)
+            self._audit_scheduled_renew(domain, 'success')
+            # Fire deploy hooks for background renewals too (#329): the manual
+            # path publishes this via the executor, the scheduler must publish
+            # it itself.
+            self._publish_renewed_event(domain)
+            return True
+        except Exception as e:
+            summary['failed'] += 1
+            logger.error(f"Failed to renew certificate for {domain}: {e}")
+            self._record_renewal_metrics(
+                domain, cert_info, False, time.time() - renew_started, error=e)
+            self._audit_scheduled_renew(domain, 'failure', error=e)
+            # Notify (#417): without this the operator's configured email/Slack
+            # channels stay silent while the cert marches to expiry.
+            self._publish_failed_event(domain, e)
+            return False
+
+    def _sweep_unregistered(self, domain, settings, summary):
+        """A certificate on disk that no settings entry names (#792).
+
+        Renewed when it can say how it was issued and that answer still holds;
+        reported otherwise. The guard is not a second copy of the renewal
+        path's requirements — it asks the same resolver the renewal will ask,
+        so the two cannot disagree about what "renewable" means.
+
+        On success the domain is written back to settings. Without that the
+        warning below returns every night for the life of the certificate, and
+        a warning that repeats forever is one an operator learns to scroll
+        past — which is how #759 stayed invisible long enough to be reported
+        as something else. After this, the warning only ever names
+        certificates the sweep genuinely could not take on.
+        """
+        renewable, reason = self._unregistered_is_renewable(domain, settings)
+        if not renewable:
+            summary['unmanaged'] += 1
+            logger.warning(
+                "Certificate %r exists on disk but no settings entry names it, "
+                "and it cannot be renewed on its own: %s. Re-register it with "
+                "the 'Add Domain' flow or POST /api/settings.", domain, reason)
+            return
+
+        logger.info(
+            "Certificate %r exists on disk with no settings entry; its "
+            "metadata names how it was issued, so this sweep takes it on.",
+            domain)
+        summary['checked'] += 1
+        if self._renew_if_due(domain, settings, summary):
+            self._reregister_domain(domain, summary)
+
+    def _unregistered_is_renewable(self, domain, settings):
+        """Can a disk-only certificate be renewed from what it carries?
+
+        Returns ``(True, None)`` or ``(False, reason)`` — the reason goes in
+        front of an operator, so it names the missing thing rather than saying
+        no.
+        """
+        metadata = self._load_metadata(domain)
+        if not metadata:
+            return False, 'it has no readable metadata.json'
+
+        challenge_type = metadata.get('challenge_type', 'dns-01')
+        if challenge_type == 'http-01':
+            # No per-domain credential to check: the webroot is instance-level
+            # and the renewal needs nothing this instance does not already have.
+            return True, None
+
+        dns_provider = metadata.get('dns_provider')
+        if not dns_provider:
+            return False, 'its metadata.json does not name a DNS provider'
+
+        # The same call renew_certificate makes. Asking it here means the
+        # guard cannot drift from the requirement it is guarding.
+        try:
+            dns_config, _ = self.dns_manager.get_dns_provider_account_config(
+                dns_provider, metadata.get('account_id'), settings)
+        except Exception as e:                       # pragma: no cover - defensive
+            return False, f'its DNS provider {dns_provider!r} could not be resolved ({e})'
+        if not dns_config:
+            account = metadata.get('account_id') or 'default'
+            return False, (f'its DNS provider {dns_provider!r} (account '
+                           f'{account!r}) is not configured on this instance')
+        return True, None
+
+    def _reregister_domain(self, domain, summary):
+        """Put a renewed disk-only certificate back in settings.
+
+        Through the mutator form, on the fresh on-disk list, so a registration
+        or deletion that landed while the sweep was running is not lost — the
+        lesson `set_auto_renew` records. Never raises: the certificate has
+        already been renewed, and losing the bookkeeping again is a smaller
+        failure than reporting a successful renewal as a failed one.
+        """
+        def _add(stored):
+            self.settings_manager.migrate_domains_format(stored)
+            entries = stored.get('domains', [])
+            for entry in entries:
+                if isinstance(entry, dict) and entry.get('domain') == domain:
+                    return
+            metadata = self._load_metadata(domain) or {}
+            entry = {'domain': domain, 'auto_renew': True}
+            for key in ('dns_provider', 'account_id', 'ca_provider'):
+                if metadata.get(key):
+                    entry[key] = metadata[key]
+            stored['domains'] = entries + [entry]
+
+        try:
+            self.settings_manager.update(_add, reason='sweep_reregistered')
+        except Exception as e:
+            logger.error(
+                "Renewed %r but could not re-register it in settings (%s); it "
+                "will be taken on again next sweep", domain, e)
+            return
+        summary['reregistered'] = summary.get('reregistered', 0) + 1
+        self._audit_scheduled_renew(domain, 'success')
+        logger.warning(
+            "Certificate %r was renewed and re-registered in settings: it was "
+            "on disk with no entry naming it, and its metadata said how it had "
+            "been issued.", domain)
+
+    def _unregistered_on_disk(self, settings, considered):
+        """Certificates on disk that no settings entry names, sorted.
+
+        The union comes from `collect_domain_sources`, the one implementation
+        of "which certificates exist" (#670) — the same answer the listing, the
+        digest and discovery use, which is the point of #792.
+
+        Read-only and failure-tolerant: an unreadable certificate directory
+        must not turn a completed renewal sweep into a failed one. Losing this
+        reconciliation is bad; losing the sweep that renewed everything else,
+        after it has already done the work, is worse.
+        """
+        try:
+            sources = collect_domain_sources(settings, self.cert_dir)
+        except OSError as e:
+            logger.warning(
+                "Could not enumerate certificate directories to check for "
+                "unmanaged certificates: %s", e)
+            return []
+        return [source.domain for source in sources.values()
+                if source.only_on_disk and source.domain not in considered]
+
+    # ------------------------------------------------------------------
+    # Renewal sweep progress
+    # ------------------------------------------------------------------
+    #
+    # The sweep counted what it did and logged the counts, and that was the
+    # whole of its self-knowledge: no duration, nothing exported, and no way to
+    # tell "finished, with nothing due" from "died half way through". An
+    # instance whose sweep is taking longer every night — and will eventually
+    # stop finishing between runs — looked exactly like one that was fine,
+    # right up until certificates stopped renewing.
+    #
+    # Two artefacts fix that, and neither needs a capacity number to be chosen
+    # in advance. A small marker file records that a sweep is in progress and
+    # how far it has got, so the NEXT sweep can say the previous one did not
+    # finish and where it stopped. Four gauges make the same thing a graph.
+    #
+    # What this deliberately does not do is resume from where the last one
+    # stopped. Renewal is idempotent and ordered by settings.json, so a rerun
+    # from the start re-examines cheap not-due entries rather than losing work;
+    # reordering the sweep to resume would be a behaviour change for a problem
+    # nobody has reported yet. Recording the stopping point is what makes that
+    # decision possible later, with evidence.
+
+    SWEEP_PROGRESS_EVERY = 10
+
+    def _sweep_marker_path(self) -> Path:
+        return self.cert_dir.parent / 'data' / 'renewal_sweep.json'
+
+    def _report_unfinished_sweep(self) -> None:
+        """Say so if the previous sweep never reached the end.
+
+        Called at the start of a sweep, because that is the first moment
+        anyone is in a position to notice: the process that failed to finish
+        is by definition not around to report it.
+        """
+        marker = self._sweep_marker_path()
+        try:
+            if not marker.exists():
+                return
+            previous = json.loads(marker.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            return
+        if not isinstance(previous, dict) or previous.get('finished'):
+            return
+
+        started_at = previous.get('started_at')
+        ago = ('%.0f minutes' % ((time.time() - started_at) / 60)
+               if isinstance(started_at, (int, float)) else 'an unknown time')
+        logger.warning(
+            "The previous renewal sweep did not finish. It started %s ago and "
+            "had examined %s of %s certificate(s). Either the process was "
+            "stopped mid-sweep, or the sweep is taking longer than the "
+            "interval between runs — which ends with certificates not being "
+            "renewed. certmate_renewal_sweep_duration_seconds is the number "
+            "to watch.",
+            ago, previous.get('examined', '?'), previous.get('total', '?'))
+        self._safe_metric(lambda c: c.record_renewal_sweep_unfinished())
+
+    def _mark_sweep_started(self, total: int) -> None:
+        self._write_sweep_marker(
+            {'started_at': time.time(), 'total': total, 'examined': 0,
+             'finished': False})
+
+    def _mark_sweep_progress(self, examined: int, total: int,
+                             started_at: float) -> None:
+        """Update the marker every SWEEP_PROGRESS_EVERY certificates.
+
+        Not on every one: the point is to know roughly where a stopped sweep
+        got to, and a write per certificate would put the marker's cost in the
+        same order as the work it is describing.
+        """
+        self._write_sweep_marker(
+            {'started_at': started_at, 'total': total, 'examined': examined,
+             'finished': False})
+
+    def _mark_sweep_finished(self, summary: dict, duration: float) -> None:
+        completed_at = time.time()
+        self._write_sweep_marker({
+            'started_at': completed_at - duration,
+            'completed_at': completed_at,
+            'total': summary.get('examined', 0),
+            'examined': summary.get('examined', 0),
+            'duration_seconds': round(duration, 2),
+            'finished': True,
+        })
+        self._safe_metric(lambda c: c.record_renewal_sweep(
+            summary.get('examined', 0), duration, completed_at))
+
+    def _write_sweep_marker(self, record: dict) -> None:
+        """Never raises. A telemetry file that cannot be written must not stop
+        certificates from renewing — which is the one thing this is for."""
+        marker = self._sweep_marker_path()
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            self._atomic_json_write(marker, record)
+        except Exception as e:
+            logger.debug("Could not write the renewal sweep marker: %s", e)
+
+    @staticmethod
+    def _safe_metric(emit) -> None:
+        try:
+            from .metrics import metrics_collector
+            emit(metrics_collector)
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("Could not record a renewal sweep metric")
 
     def create_certificate_legacy(self, domain, email, cloudflare_token):
         """Legacy function for backward compatibility"""
@@ -1705,29 +4164,50 @@ class CertificateManager:
         otherwise. Legacy string-form entries are upgraded to dict form so the
         flag can be persisted.
         """
-        settings = self.settings_manager.load_settings()
-        # Migrate so every entry is a dict and the flag has somewhere to live.
-        settings = self.settings_manager.migrate_domains_format(settings)
+        # Flip the flag as a read-modify-write on the FRESH on-disk list, under
+        # the lock. The previous shape — load_settings() (a request-cache hit)
+        # then atomic_update({'domains': whole_list}) — replaced 'domains'
+        # wholesale from a possibly-stale snapshot: any concurrent registration
+        # or deletion that landed after the cache was primed was silently
+        # dropped. atomic_update guards the WRITE but not the staleness of the
+        # list it is handed. The mutator sees the current list and touches only
+        # this domain's entry, and raises _DomainNotInSettings when the domain
+        # is absent so nothing is persisted (preserving the old "return False,
+        # no write" behaviour rather than saving the migration for a no-op).
+        class _DomainNotInSettings(Exception):
+            pass
 
-        new_domains = []
-        found = False
-        for entry in settings.get('domains', []):
-            if isinstance(entry, dict) and entry.get('domain') == domain:
-                entry = {**entry, 'auto_renew': bool(enabled)}
-                found = True
-            new_domains.append(entry)
+        def _flip(s):
+            self.settings_manager.migrate_domains_format(s)
+            new_domains = []
+            found = False
+            for entry in s.get('domains', []):
+                if isinstance(entry, dict) and entry.get('domain') == domain:
+                    entry = {**entry, 'auto_renew': bool(enabled)}
+                    found = True
+                new_domains.append(entry)
+            if not found:
+                raise _DomainNotInSettings
+            s['domains'] = new_domains
 
-        if not found:
+        try:
+            self.settings_manager.update(_flip, reason='set_auto_renew')
+        except _DomainNotInSettings:
             return False
-
-        # atomic_update merges under a lock, avoiding a load/mutate/save race
-        # with concurrent settings writes.
-        self.settings_manager.atomic_update({'domains': new_domains})
         logger.info(f"auto_renew set to {bool(enabled)} for {domain}")
         return True
 
     def delete_certificate(self, domain: str) -> bool:
-        """Delete a certificate directory, blocking if a create/renew is in progress."""
+        """Delete a certificate directory, blocking if a create/renew is in progress.
+
+        Also deletes the copy held by the configured storage backend (#419).
+        Without that, `DELETE /api/certificates/<domain>` returned 200 and the
+        UI showed the certificate gone while the full PEM bundle — private key
+        included — stayed in Vault / AWS / Azure Key Vault / Infisical
+        indefinitely, and a later storage migration or restore resurrected it.
+        An explicit user-initiated deletion must destroy the key material
+        everywhere CertMate put it.
+        """
         domain_lock = self._get_domain_lock(domain)
         # Acquire lock to ensure no create/renew is in progress (non-blocking)
         if not domain_lock.acquire(blocking=False):
@@ -1735,14 +4215,66 @@ class CertificateManager:
         try:
             import shutil
             domain_dir = self.cert_dir / domain
+            local_deleted = False
             if domain_dir.exists():
                 shutil.rmtree(domain_dir)
                 logger.info(f"Certificate deleted for {domain}")
                 self._invalidate_certificate_info_cache(domain)
-                return True
-            return False
+                local_deleted = True
+
+            remote_deleted = self._delete_from_storage_backend(domain)
+            # A certificate that exists ONLY in the remote backend (local dir
+            # already gone, e.g. after a partial restore) still counts as
+            # deleted — reporting 404 there would leave the key unreachable
+            # AND undeletable through the API.
+            return local_deleted or remote_deleted
         finally:
             domain_lock.release()
+
+    def _delete_from_storage_backend(self, domain: str) -> bool:
+        """Remove the domain's bundle from the external storage backend.
+
+        Returns True only when the backend confirms a deletion. Never raises:
+        a backend outage must not turn a successful local deletion into a 500,
+        but it MUST be loud — an operator who believes a key was destroyed and
+        finds it in Vault later has been misled by us.
+        """
+        if not self.storage_manager:
+            return False
+        try:
+            # The local filesystem backend points at the same directory the
+            # rmtree above already removed; calling it again is a no-op that
+            # only muddies the log.
+            backend_name = self.storage_manager.get_backend_name()
+            if backend_name in ('local_filesystem', 'local'):
+                return False
+        except Exception:  # pragma: no cover - defensive
+            backend_name = 'unknown'
+        try:
+            deleted = self.storage_manager.delete_certificate(domain)
+            if deleted:
+                logger.info(
+                    "Certificate for %s deleted from storage backend %s",
+                    domain, backend_name,
+                )
+            else:
+                logger.warning(
+                    "Storage backend %s reported no certificate to delete for "
+                    "%s — verify by hand that no private key remains there",
+                    backend_name, domain,
+                )
+            return bool(deleted)
+        except Exception as e:
+            # Class name only — see _store_in_backend: backend errors can carry
+            # credentials, and this line lands in the admin-readable log.
+            logger.error(
+                "Certificate for %s was deleted locally but the storage "
+                "backend %s could not delete its copy (%s) — the private key "
+                "may still be stored there; remove it manually",
+                domain, backend_name, type(e).__name__,
+            )
+            logger.debug("Storage backend delete error for %s", domain, exc_info=True)
+            return False
 
     def _infer_dns_provider(self, domain, settings):
         """Infer the DNS provider for a domain, preferring its explicit

@@ -14,6 +14,28 @@
                     webhooks: []
                 }
             },
+            // Every event an operator can filter on, in one place. The two
+            // checkbox rows in the template used to carry their own copy of
+            // this list, and both copies were missing `certificate_deployed`
+            // — an event the system publishes and `_EVENT_TITLES` names, so
+            // ticking any box silently excluded it and nothing said so.
+            //
+            // `deploy_hook_failed` and `certificate_deploy_incomplete` are
+            // deliberately absent: the notifier's _ALWAYS_NOTIFY_EVENTS sends
+            // them whatever is selected, so a checkbox would imply a choice
+            // that does not exist.
+            //
+            // tests/test_every_filterable_event_is_selectable.py compares this
+            // against the backend's own two sets.
+            notifiableEvents: [
+                'certificate_created',
+                'certificate_renewed',
+                'certificate_deployed',
+                'certificate_expiring',
+                'certificate_revoked',
+                'certificate_failed',
+                'domain_expiring'
+            ],
             showSmtp: false,
             showWebhooks: false,
             showDeliveries: false,
@@ -56,14 +78,33 @@
                     btn.disabled = true;
                     btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i> در حال ذخیره...';
                 }
+                // _preview is editor state, not configuration.
+                (self.config.channels.webhooks || []).forEach(function (wh) { if (wh && wh._preview) delete wh._preview; });
                 fetch('/api/notifications/config', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     credentials: 'same-origin',
                     body: JSON.stringify(self.config)
                 })
-                    .then(function (r) { return r.json(); })
-                    .then(function () { CertMate.toast('تنظیمات اعلان‌ها ذخیره شد', 'success'); })
+                    // r.ok must gate the toast: /api/notifications/config is
+                    // admin-only and answers JSON on 403/400/503, so reading
+                    // the body alone made every failure render as a green
+                    // "saved" — the operator closed the tab believing SMTP
+                    // was configured and no alert ever fired (#415).
+                    .then(function (r) {
+                        return r.json()
+                            .catch(function () { return {}; })
+                            .then(function (data) { return { ok: r.ok, status: r.status, data: data }; });
+                    })
+                    .then(function (res) {
+                        if (!res.ok) {
+                            var msg = (res.data && (res.data.error || res.data.message))
+                                || ('ذخیره ناموفق بود (HTTP ' + res.status + ')');
+                            CertMate.toast(msg, 'error');
+                            return;
+                        }
+                        CertMate.toast('تنظیمات اعلان‌ها ذخیره شد', 'success');
+                    })
                     .catch(function () { CertMate.toast('ذخیره ناموفق بود', 'error'); })
                     .then(function () {
                         if (btn) {
@@ -146,6 +187,49 @@
                             btn.innerHTML = originalHTML;
                         }
                     });
+            },
+            // Payload-template editor (#218): the placeholder chips, insertion at
+            // the caret, and a dry render through /api/notifications/webhook/preview.
+            templateVariables: ['event', 'title', 'message', 'timestamp', 'domain', 'details', 'details.error', 'details.days_until_expiry', 'details.expires_at'],
+            insertPlaceholder: function (wh, name, ev) {
+                var token = '{{' + name + '}}';
+                var card = ev && ev.target ? ev.target.closest('.border.rounded-lg') : null;
+                var area = card ? card.querySelector('textarea[aria-label="Payload template"]') : null;
+                var current = wh.payload_template || '';
+                if (area && typeof area.selectionStart === 'number') {
+                    var start = area.selectionStart, end = area.selectionEnd;
+                    wh.payload_template = current.slice(0, start) + token + current.slice(end);
+                    var self = this;
+                    self.$nextTick(function () {
+                        area.focus();
+                        area.setSelectionRange(start + token.length, start + token.length);
+                    });
+                } else {
+                    wh.payload_template = current + token;
+                }
+            },
+            previewWebhook: function (wh) {
+                var payload = Object.assign({}, wh);
+                delete payload._preview;
+                fetch('/api/notifications/webhook/preview', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify({ config: payload })
+                })
+                    .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+                    .then(function (res) {
+                        if (!res.ok || res.d.error) {
+                            CertMate.toast('Preview: ' + (res.d.error || 'failed'), 'error');
+                            wh._preview = null;
+                            return;
+                        }
+                        var headers = Object.keys(res.d.headers || {}).map(function (k) { return k + ': ' + res.d.headers[k]; }).join('\n');
+                        var body = res.d.body;
+                        try { body = JSON.stringify(JSON.parse(res.d.body), null, 2); } catch (e) { /* show raw */ }
+                        wh._preview = { method: res.d.method, url: res.d.url, text: headers + '\n\n' + body };
+                    })
+                    .catch(function () { CertMate.toast('Preview failed', 'error'); });
             },
             toggleWebhookEvent: function (wh, evt) {
                 if (!wh.events) wh.events = [];

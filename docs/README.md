@@ -21,6 +21,12 @@ Welcome to the CertMate documentation. This folder contains comprehensive guides
 - **[API Reference](./api.md)** — Complete REST API documentation
 - **[Architecture](./architecture.md)** — System design, components, data flow
 - **[Testing Guide](./testing.md)** — Test framework, CI/CD, coverage
+- **[Certificate Discovery & Inventory](./discovery-inventory.md)** — probe/CT-log discovery, inventory, adopt, crypto readiness
+- **[Deploy Hooks](./deploy-hooks.md)** — post-issuance hooks: configuration, testing, output redaction, maintenance windows
+- **[CSR-only certificates](./csr-only-certificates.md)** — issuing and renewing when the private key stays on the device
+- **[Webhooks](./webhooks.md)** — generic webhooks: payload templates, authentication, signature verification
+- **[Compliance](./compliance.md)** — audit chain, actor attribution, NIS2/eIDAS posture
+- **[Deployment Probes](./probes.en.md)** — verifying a renewed certificate is actually served
 
 ---
 
@@ -53,7 +59,7 @@ Welcome to the CertMate documentation. This folder contains comprehensive guides
 - **two dozen+ DNS providers** for Let's Encrypt DNS-01 challenges (see [DNS Providers](./dns-providers.md) for the full list)
 - **Multiple CA providers**: Let's Encrypt, DigiCert, Private CA
 - **Multi-account support** per DNS provider
-- **Pluggable storage backends**: Local, Azure Key Vault, AWS, Vault, Infisical
+- **Pluggable storage backends**: Local, Azure Key Vault, AWS Secrets Manager, HashiCorp Vault, Infisical, S3-compatible
 - **Auto-renewal** with configurable thresholds
 - **Docker support** with multi-platform builds (ARM64 + AMD64)
 - **Log Sanitizer** — Automatically redacts API tokens, private keys, and sensitive credentials from CertMate logs
@@ -65,7 +71,7 @@ Welcome to the CertMate documentation. This folder contains comprehensive guides
 - **Full lifecycle management** — create, renew, revoke, monitor
 - **OCSP & CRL** — real-time status and revocation lists
 - **Web dashboard** at `/client-certificates`
-- **Batch operations** — import 100-30,000 certificates via CSV
+- **Batch operations** — import client certificates in bulk via CSV (up to 100 rows per request)
 - **Audit logging** and **rate limiting**
 
 ---
@@ -95,7 +101,10 @@ All features are thoroughly tested:
 
 ```bash
 # Run tests
-python -m pytest tests/ -v
+# The UI suite drives Playwright against a live server and cannot share
+# a process with the rest; e2e needs a running instance. Same selection
+# `make test` and scripts/release.sh use.
+pytest -v --tb=short -m "not ui and not e2e"
 ```
 
 Test coverage includes:
@@ -140,26 +149,37 @@ Test coverage includes:
 
 ## File Structure
 
+<!-- Checked by tests/test_docs_navigation.py: this listing must match
+     what is actually on disk. It used to omit six pages. -->
+
 ```
 docs/
-  README.md            ← You are here
-  index.md             ← Client certificates landing page
-  installation.md      ← Installation & setup
-  kubernetes.md        ← Kubernetes production notes
-  dns-providers.md     ← DNS providers & multi-account
-  ca-providers.md      ← Certificate Authority providers
-  docker.md            ← Docker build & deployment
-  testing.md           ← Testing framework & CI/CD
-  guide.md             ← Client certificates user guide
-  api.md               ← Complete API reference
-  architecture.md      ← System architecture
+  README.md               this file — documentation index  <- you are here
+  THEME_MIGRATION.md      one-off theme migration record
+  api.md                  complete REST API reference
+  architecture.md         system architecture
+  ca-providers.md         certificate authorities
+  compliance.md           audit chain, attribution, NIS2/eIDAS
+  csr-only-certificates.md  issuing when the key stays on the device
+  deploy-hooks.md         post-issuance deploy hooks
+  webhooks.md             generic webhooks: payload templates, auth, signature
+  discovery-inventory.md  discovery, inventory, adopt, crypto readiness
+  dns-providers.md        DNS providers, multi-account, domain alias
+  docker.md               Docker build and deployment
+  guide.md                client-certificate user guide
+  index.md                client-certificate landing page
+  installation.md         installation and setup
+  kubernetes.md           Kubernetes production notes and Helm chart
+  mcp.md                  MCP server for AI agents
+  probes.en.md            deployment probes
+  testing.md              test framework and CI/CD
 ```
 
 ---
 
 ## Learning Path
 
-**Beginner** → [Start Here](./index.md) → [Getting Started](./guide.md)
+**Beginner** → [Start Here](./guide.md) → [Getting Started](./guide.md)
 
 **Developer** → [API Reference](./api.md) → [Architecture](./architecture.md)
 
@@ -176,18 +196,11 @@ docs/
 
 ---
 
-## Status Dashboard
+## Test status
 
-| Component        | Status    | Tests     |
-| ---------------- | --------- | --------- |
-| CA Foundation    | Ready     | 3/3       |
-| CSR Handler      | Ready     | 3/3       |
-| Cert Manager     | Ready     | 8/8       |
-| Filtering        | Ready     | 3/3       |
-| Batch Ops        | Ready     | 2/2       |
-| OCSP/CRL         | Ready     | 5/5       |
-| Audit/Rate Limit | Ready     | 3/3       |
-| **Total**        | **Ready** | **27/27** |
+There is no hand-maintained scorecard here. A table of test counts is stale the day after it is written — this one said `27/27` while the suite had grown past two thousand.
+
+The authoritative signal is CI on `main`: the badges at the top of the [project README](../README.md), and the coverage floor enforced in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml).
 
 ---
 
@@ -239,6 +252,10 @@ CertMate is licensed under the MIT License. See LICENSE file in the repository.
 - Check the [API Reference](./api.md) for endpoint details
 
 ---
+
+---
+
+**Current Version**: 2.35.0
 
 <div align="center">
 

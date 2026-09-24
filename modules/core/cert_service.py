@@ -17,18 +17,32 @@ adapters map to HTTP 403.
 """
 import logging
 
+from .structured_logging import scrub_log_value
+from .constants import PROBE_PROTOCOLS
+from .csr_issuance import CSRError, csr_domains, read_csr
 from .utils import validate_domain, validate_key_options
 
 logger = logging.getLogger(__name__)
 
+# Per-request bounds, because the global MAX_CONTENT_LENGTH is 50 MB and
+# exists for the backup upload. Without these, the ceiling on a certificate
+# request was "however many names fit in fifty megabytes" and "however large a
+# PEM fits in fifty megabytes" — neither of which is a limit anyone chose, and
+# neither of which any endpoint stated.
+#
+# 100 is Let's Encrypt's cap on names per certificate, so a request naming more
+# cannot be satisfied by the CA regardless of what CertMate does with it.
+MAX_SAN_DOMAINS = 100
 
-def _scrub_log(value):
-    """Strip CR/LF from a value before it goes into a log line, so a crafted
-    domain / username / scope cannot forge or inject log entries
-    (CodeQL py/log-injection)."""
-    if value is None:
-        return value
-    return str(value).replace('\r', '').replace('\n', '')
+# A PEM CSR for a 4096-bit key carrying a hundred names is a few kilobytes.
+# 64 KB is generous by more than an order of magnitude and still refuses long
+# before anything reaches the parser.
+MAX_CSR_BYTES = 64 * 1024
+
+
+# Kept as a local alias: this module's call sites read better with the short
+# name, but the implementation now lives once, in the logging module.
+_scrub_log = scrub_log_value
 
 
 class DomainOutOfScope(PermissionError):
@@ -109,9 +123,10 @@ class CertificateService:
             logger.debug("Audit emit failed for operation=%s", operation)
 
     def create(self, *, domain, san_domains=None, dns_provider=None,
-               account_id=None, ca_provider=None, challenge_type=None,
-               domain_alias=None, key_type=None, key_size=None,
-               elliptic_curve=None, user=None, ip_address=None, audit_ctx=None):
+               account_id=None, ca_provider=None, ca_account_id=None, challenge_type=None,
+               domain_alias=None, alias_dns_provider=None, key_type=None,
+               key_size=None, elliptic_curve=None, user=None, ip_address=None,
+               audit_ctx=None, csr_pem=None):
         """Validate, scope-check, resolve defaults, issue, and persist a new
         certificate; returns the ``CertificateManager.create_certificate``
         result dict. Raises ``ValueError`` (bad input / missing config),
@@ -130,17 +145,20 @@ class CertificateService:
         """
         return self.issue_create(self.prepare_create(
             domain=domain, san_domains=san_domains, dns_provider=dns_provider,
-            account_id=account_id, ca_provider=ca_provider,
+            account_id=account_id, ca_provider=ca_provider, ca_account_id=ca_account_id,
             challenge_type=challenge_type, domain_alias=domain_alias,
+            alias_dns_provider=alias_dns_provider,
             key_type=key_type, key_size=key_size, elliptic_curve=elliptic_curve,
             user=user, ip_address=ip_address, audit_ctx=audit_ctx,
+            csr_pem=csr_pem,
         ))
 
     def prepare_create(self, *, domain, san_domains=None, dns_provider=None,
-                        account_id=None, ca_provider=None, challenge_type=None,
-                        domain_alias=None, key_type=None, key_size=None,
+                        account_id=None, ca_provider=None, ca_account_id=None, challenge_type=None,
+                        domain_alias=None, alias_dns_provider=None,
+                        key_type=None, key_size=None,
                         elliptic_curve=None, user=None, ip_address=None,
-                        audit_ctx=None):
+                        audit_ctx=None, csr_pem=None):
         """Validate, authorize and resolve a create request WITHOUT side
         effects, returning the resolved kwargs for :meth:`issue_create`. Raises
         ``ValueError`` / :class:`DomainOutOfScope`. Cheap (no certbot, no disk
@@ -153,16 +171,59 @@ class CertificateService:
         # creation, settings write, certbot): a poisoned primary domain
         # ("../poisoned") would otherwise be persisted into settings.json and
         # replayed by the renewal loop. SAN *content* is validated one layer
-        # down in create_certificate; here we only guard the container type.
-        ok, msg = validate_domain(domain)
+        # down in create_certificate.
+        #
+        # validate_domain returns the NORMALISED name as its second value on
+        # success (the URL netloc extracted, lowercased) — and we now use it
+        # instead of discarding it. Keeping the caller's raw string was the
+        # bug: "https://x/../../y" has a perfectly good netloc, passed
+        # validation, and was then used verbatim as a path component, escaping
+        # cert_dir. Rebinding to the normalised name means everything
+        # downstream — the cert dir, the certbot --cert-name, _seed_acme_account
+        # — sees a bare hostname that can never contain '/' or '..'.
+        ok, normalized = validate_domain(domain)
         if not ok:
-            raise ValueError(f'Invalid domain: {msg}')
+            raise ValueError(f'Invalid domain: {normalized}')
+        domain = normalized
         if domain_alias:
-            ok, msg = validate_domain(domain_alias)
+            ok, normalized_alias = validate_domain(domain_alias)
             if not ok:
-                raise ValueError(f'Invalid domain_alias: {msg}')
+                raise ValueError(f'Invalid domain_alias: {normalized_alias}')
+            domain_alias = normalized_alias
+        # The alias zone may live with a different provider than the primary
+        # (#129). PATCH and reissue have always read this; create accepted it
+        # in the request body, answered 201, and dropped it — so the only way
+        # to create an alias certificate with a separate alias provider was
+        # to create it wrong and then PATCH it.
+        if not domain_alias:
+            alias_dns_provider = None
         if san_domains and not isinstance(san_domains, list):
             raise ValueError('Invalid san_domains format')
+        if san_domains and len(san_domains) > MAX_SAN_DOMAINS:
+            # The global 50 MB body limit exists for the backup upload, and
+            # applied to this endpoint too — so the ceiling on a certificate
+            # request was "however many names fit in fifty megabytes", which
+            # is not a limit anyone chose. Let's Encrypt caps a certificate at
+            # 100 names, so a request naming more cannot be satisfied by the
+            # CA regardless; refusing it here says so, instead of building a
+            # certbot command line with thousands of -d flags and letting the
+            # CA reject it after the DNS challenges have been set up.
+            raise ValueError(
+                f'Too many san_domains: {len(san_domains)}. A certificate can '
+                f'carry at most {MAX_SAN_DOMAINS} names, including the primary '
+                f'domain.')
+
+        # A CSR is signed over its own subject and SANs, and carries its own
+        # public key. A request that also names SANs or a key shape is asking
+        # for something the CA will not deliver, so it is refused rather than
+        # silently ignored — the certificate would come back different from
+        # what the caller asked for, with nothing to say why (#599).
+        if csr_pem is not None:
+            self._check_csr(csr_pem, domain, san_domains=san_domains,
+                            key_type=key_type, key_size=key_size,
+                            elliptic_curve=elliptic_curve,
+                            scope_action='create_san',
+                            user=user, ip_address=ip_address)
 
         # Scope: the primary AND every SAN must be in the key's
         # allowed_domains — a partial create would leak one tenant's domain
@@ -200,12 +261,15 @@ class CertificateService:
             'dns_provider': dns_provider,
             'account_id': account_id,
             'ca_provider': ca_provider,
+            'ca_account_id': ca_account_id,
             'domain_alias': domain_alias,
+            'alias_dns_provider': alias_dns_provider,
             'san_domains': san_domains,
             'challenge_type': challenge_type,
             'key_type': key_type,
             'key_size': key_size,
             'elliptic_curve': elliptic_curve,
+            'csr_pem': csr_pem,
             # Fallback used only to label the persisted domain entry.
             '_settings_dns_provider': settings.get('dns_provider'),
             # Attribution captured synchronously so the deferred async issuance
@@ -228,12 +292,15 @@ class CertificateService:
                 dns_provider=prepared['dns_provider'],
                 account_id=prepared['account_id'],
                 ca_provider=prepared['ca_provider'],
+                ca_account_id=prepared.get('ca_account_id'),
                 domain_alias=prepared['domain_alias'],
+                alias_dns_provider=prepared.get('alias_dns_provider'),
                 san_domains=prepared['san_domains'],
                 challenge_type=prepared['challenge_type'],
                 key_type=prepared['key_type'],
                 key_size=prepared['key_size'],
                 elliptic_curve=prepared['elliptic_curve'],
+                csr_pem=prepared.get('csr_pem'),
             )
 
             # Append the new domain under the settings manager's lock so two
@@ -254,12 +321,193 @@ class CertificateService:
         })
         return result
 
+
+    # ------------------------------------------------------------------
+    # Configuration, as opposed to issuance
+    # ------------------------------------------------------------------
+
+    def read_metadata(self, domain):
+        """The certificate's stored metadata, or ``{}``.
+
+        A public read (#672). Route handlers were calling
+        ``certificate_manager._load_metadata`` — a private method — which meant
+        the manager could not change how it stores metadata without breaking
+        them. Reading through the manager still matters, though, and this keeps
+        that: it builds the path from the validated domain and quarantines
+        corrupt JSON rather than silently returning ``{}``.
+        """
+        return self._certs._load_metadata(domain) or {}
+
+    def update_config(self, domain, changes):
+        """Apply a configuration change to a certificate's metadata.
+
+        Takes the raw change set — not keyword arguments — because the
+        semantics depend on a key being ABSENT versus present-and-null: an
+        absent key leaves existing config alone, an explicit ``None`` deletes
+        it. Keyword defaults cannot express that, and getting it wrong lets a
+        DNS-only edit silently wipe a certificate's probe configuration.
+
+        Validation lives here rather than in the route so both HTTP layers get
+        the same answer, and raises :class:`ValueError` with the message the
+        caller should surface.
+
+        Returns ``(metadata, old_dns_provider)``.
+        """
+        # The whole read-modify-write happens under the domain lock, so an
+        # in-flight renewal — which carries a pre-renewal metadata snapshot
+        # across its entire certbot run — cannot clobber this write.
+        with self._certs.domain_lock(domain):
+            metadata = self.read_metadata(domain)
+            old_dns_provider = metadata.get('dns_provider')
+
+            for key in ('dns_provider', 'account_id', 'alias_dns_provider'):
+                value = changes.get(key)
+                if value:
+                    metadata[key] = value
+
+            if 'deployment_port' in changes:
+                port = changes['deployment_port']
+                if port is None:
+                    metadata.pop('deployment_port', None)
+                else:
+                    try:
+                        port = int(port)
+                    except (TypeError, ValueError):
+                        raise ValueError('deployment_port must be an integer')
+                    if port < 1 or port > 65535:
+                        raise ValueError('deployment_port must be 1-65535')
+                    metadata['deployment_port'] = port
+
+            if 'deployment_protocol' in changes:
+                protocol = changes['deployment_protocol']
+                if protocol is None:
+                    metadata.pop('deployment_protocol', None)
+                elif protocol not in PROBE_PROTOCOLS:
+                    raise ValueError(
+                        f"deployment_protocol must be one of {PROBE_PROTOCOLS!r}")
+                else:
+                    metadata['deployment_protocol'] = protocol
+
+            if 'deployment_host' in changes:
+                host = changes['deployment_host']
+                if host is None:
+                    metadata.pop('deployment_host', None)
+                else:
+                    if not isinstance(host, str):
+                        raise ValueError('deployment_host must be a string')
+                    host = host.strip()
+                    # A probe target is a bare hostname: no scheme, no path, no
+                    # whitespace, and no wildcard label — you deploy a
+                    # certificate on a concrete name, not on "*.".
+                    if (not host or len(host) > 253 or host.startswith('*.')
+                            or any(c in host for c in ' \t/\\')
+                            or '://' in host):
+                        raise ValueError(
+                            'deployment_host must be a bare hostname '
+                            '(no scheme, path, whitespace, or wildcard)')
+                    metadata['deployment_host'] = host
+
+            # write_metadata, not _save_metadata: this is the one call site
+            # whose outcome reaches a person, and the boolean threw the reason
+            # away. "Failed to update metadata for domain: X" was produced by
+            # a read-only volume and by a deliberate schema-downgrade refusal
+            # alike, naming neither and suggesting nothing (#757). The
+            # exceptions it raises are RuntimeError subclasses, so the route's
+            # existing arm keeps handling them; it just has something to say
+            # now.
+            self._certs.write_metadata(domain, metadata)
+
+            # The settings entry is written HERE, inside the same domain lock,
+            # rather than by the caller afterwards.
+            #
+            # A domain's DNS provider is authoritative in two files: this
+            # certificate's metadata.json, which issuance reads, and the
+            # domain's entry in settings.json, which get_domain_dns_provider
+            # reads. They were updated by two separate writes with the lock
+            # released between them, and nothing reconciled them — so a
+            # renewal starting in that window read the OLD provider from
+            # settings while the metadata already said the new one, and
+            # neither file was wrong on its own.
+            #
+            # Lock ordering: this takes the settings lock while holding the
+            # domain lock. Checked before doing it — no settings mutate
+            # callback anywhere acquires a domain lock, so the reverse order
+            # does not exist and this cannot deadlock. Anything that adds one
+            # would have to take the domain lock first.
+            self._settings.update(
+                lambda s: self._write_domain_provider(s, domain, changes),
+                'dns_provider_change')
+
+        return metadata, old_dns_provider
+
+    @staticmethod
+    def _write_domain_provider(settings, domain, changes):
+        """Mirror the DNS provider onto the domain's settings entry.
+
+        Only the keys the caller actually sent: an absent one means "leave
+        alone", the same rule the metadata write above follows, so a probe-only
+        edit does not touch the provider.
+        """
+        for entry in settings.get('domains', []):
+            if isinstance(entry, dict) and entry.get('domain') == domain:
+                if changes.get('dns_provider'):
+                    entry['dns_provider'] = changes['dns_provider']
+                if changes.get('account_id'):
+                    entry['dns_account_id'] = changes['account_id']
+                break
+
+    def _check_csr(self, csr_pem, domain, *, san_domains, key_type, key_size,
+                   elliptic_curve, scope_action, user, ip_address):
+        """Everything that must be true of a CSR before anything happens.
+
+        One copy, used by create and by reissue. A CSR is signed over its own
+        subject and SANs and carries its own public key, so a request that
+        also names SANs or a key shape is asking for something the CA will not
+        deliver: it is refused rather than silently ignored, because the
+        certificate would come back different from what was asked for with
+        nothing to say why (#599).
+
+        Extracted when reissue learned to take one (#876 item 6). Copying it
+        would have meant two versions of a scope check, and the second copy is
+        the one that stops being updated.
+        """
+        if not isinstance(csr_pem, (str, bytes)):
+            raise ValueError('Invalid CSR: expected PEM text')
+        if len(csr_pem) > MAX_CSR_BYTES:
+            # Without this the limit on a CSR was the global body limit. A PEM
+            # CSR for a 4096-bit key with a hundred names is a few kilobytes;
+            # the bound is generous by two orders of magnitude and still says
+            # no long before anything reaches the parser.
+            raise ValueError(
+                f'CSR too large: {len(csr_pem)} bytes. A certificate '
+                f'request PEM is at most {MAX_CSR_BYTES} bytes.')
+        if san_domains:
+            raise ValueError(
+                'san_domains cannot be combined with a CSR: the '
+                'certificate covers the names inside the CSR')
+        if key_type is not None or key_size is not None \
+                or elliptic_curve is not None:
+            raise ValueError(
+                'key options cannot be combined with a CSR: the key was '
+                'generated by the device that produced it')
+        try:
+            csr_names = csr_domains(read_csr(csr_pem))
+        except CSRError as e:
+            raise ValueError(f'Invalid CSR: {e}')
+        # Scope-checked before any side effect, for the same reason the SANs
+        # are: a CSR covering another tenant's name must not reach issuance
+        # because the primary domain happened to be allowed.
+        for name in csr_names:
+            if name != domain:
+                self._enforce_scope(name, scope_action, user, ip_address)
+        return csr_names
+
     def prepare_reissue(self, *, domain, san_domains=None, dns_provider=None,
                         account_id=None, ca_provider=None, challenge_type=None,
                         domain_alias=None, alias_dns_provider=None,
                         key_type=None, key_size=None,
                         elliptic_curve=None, user=None, ip_address=None,
-                        audit_ctx=None):
+                        audit_ctx=None, csr_pem=None):
         """Validate and resolve an edit-and-reissue request (#267) without
         side effects, returning kwargs for :meth:`issue_reissue`.
 
@@ -277,9 +525,14 @@ class CertificateService:
         ``ValueError`` on bad input, :class:`DomainOutOfScope` on scope.
         """
         domain = (domain or '').strip()
-        ok, msg = validate_domain(domain)
+        # Same rebind-to-normalised as prepare_create: use the bare hostname
+        # validate_domain returns, not the raw string, so a URL form cannot
+        # drive `cert_dir / domain` here either. The reissue path builds the
+        # same paths as create and must hold the same invariant.
+        ok, normalized = validate_domain(domain)
         if not ok:
-            raise ValueError(f'Invalid domain: {msg}')
+            raise ValueError(f'Invalid domain: {normalized}')
+        domain = normalized
 
         cert_file = self._certs.cert_dir / domain / 'cert.pem'
         if not cert_file.exists():
@@ -289,6 +542,13 @@ class CertificateService:
 
         metadata = self._certs._load_metadata(domain)
 
+        # Whether the caller NAMED a SAN set, recorded before inheritance
+        # rewrites it. With a CSR the distinction is the whole thing: naming
+        # SANs alongside one is refused, because the CSR already carries the
+        # names — while the set this certificate happens to have today is not
+        # something the caller said, and must not turn every CSR rotation on a
+        # multi-name certificate into an error.
+        sans_were_named = san_domains is not None
         if san_domains is None:
             san_domains = metadata.get('san_domains') or []
         if not isinstance(san_domains, list):
@@ -314,9 +574,10 @@ class CertificateService:
             alias_dns_provider = None
 
         if domain_alias:
-            ok, msg = validate_domain(domain_alias)
+            ok, normalized_alias = validate_domain(domain_alias)
             if not ok:
-                raise ValueError(f'Invalid domain_alias: {msg}')
+                raise ValueError(f'Invalid domain_alias: {normalized_alias}')
+            domain_alias = normalized_alias
 
         # Scope covers the primary and the FINAL SAN set (kept + added):
         # a scoped key must not be able to keep another tenant's SAN alive
@@ -326,6 +587,18 @@ class CertificateService:
             san_clean = san.strip() if isinstance(san, str) else ''
             if san_clean:
                 self._enforce_scope(san_clean, 'reissue_san', user, ip_address)
+
+        if csr_pem is not None:
+            self._check_csr(csr_pem, domain,
+                            san_domains=san_domains if sans_were_named else None,
+                            key_type=key_type, key_size=key_size,
+                            elliptic_curve=elliptic_curve,
+                            scope_action='reissue_san',
+                            user=user, ip_address=ip_address)
+            # The CSR carries the names. Anything inherited from the previous
+            # certificate would be added to what it asks for, which is not a
+            # reissue of that CSR.
+            san_domains = []
 
         if key_type is not None or key_size is not None or elliptic_curve is not None:
             ok, key_err = validate_key_options(key_type, key_size, elliptic_curve)
@@ -358,6 +631,7 @@ class CertificateService:
             'key_type': key_type,
             'key_size': key_size,
             'elliptic_curve': elliptic_curve,
+            'csr_pem': csr_pem,
             '_settings_dns_provider': settings.get('dns_provider'),
             '_audit_ctx': audit_ctx,
         }
@@ -385,6 +659,7 @@ class CertificateService:
                 key_type=prepared['key_type'],
                 key_size=prepared['key_size'],
                 elliptic_curve=prepared['elliptic_curve'],
+                csr_pem=prepared.get('csr_pem'),
                 replace=True,
             )
 

@@ -10,13 +10,12 @@ import re
 import json
 import tempfile
 import zipfile
-import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-import fcntl
 import logging
+from .domain_entries import iter_domains
 
-from .utils import utc_now, utc_now_iso
+from .utils import utc_now, utc_now_iso, repair_certbot_lineage_symlinks
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +42,157 @@ _PRIVATE_KEY_FILE_RE = re.compile(
     r'(?:^|[._-])privkey\d*\.pem$|^private_key\.json$|\.key$',
     re.IGNORECASE,
 )
+
+# Subtrees of data_dir that a unified backup carries under the "data/" arc
+# prefix. Without these the archive holds no PKI state at all: the private
+# CA signing key, every client certificate, the CRL and the audit chain all
+# live here, so a "restore" left an operator unable to issue, renew or
+# revoke a single client cert (#409). 'inventory' carries the certificate
+# inventory SQLite DB so a restore does not silently lose discovered-cert
+# history (a missing subtree is skipped, so this is a no-op until first use).
+#
+# This is also the RESTORE allowlist, and it deliberately excludes
+# settings.json: settings are restored from the archive's own settings.json
+# entry, which passes the deploy-hook revalidation gate. Honouring a
+# "data/settings.json" member would let a tampered archive write settings
+# straight to disk around that gate.
+_BACKUP_DATA_SUBTREES = ('certs', 'audit', 'inventory')
+
+# Key material: what a share-safe (include_secrets=False) backup must NOT carry.
+# The settings tree was masked since the May 2026 audit, but the archive still
+# walked every certificate directory and data/certs/ — so a "masked" backup
+# held every ACME private key, the ACME account key and the private CA key,
+# while its manifest said secrets_masked=True and two docstrings called it
+# share-safe. A .pfx/.p12 bundle contains the key too, and pfx_password may be
+# empty.
+_KEY_FILE_SUFFIXES = frozenset({'.key', '.pfx', '.p12'})
+
+
+# certbot's config-dir is the domain directory, so its ``keys/`` subtree —
+# a copy of every private key it generated, named NNNN_key-certbot.pem — is
+# walked too. Excluded by directory in a share-safe archive (a directory rule
+# survives a future change of file-name convention; a name pattern would not),
+# and the name is in the predicate as well for anything that copies one out.
+_KEY_MATERIAL_DIRS = frozenset({'keys'})
+
+
+def _is_key_material(path) -> bool:
+    """True for a file that carries a private key."""
+    name = path.name.lower()
+    # Any privkey* — .pem, a numbered archive copy, or the transient
+    # privkey.pem.staging that #581's staged publish writes for a moment:
+    # a backup taken in that moment must not carry it either.
+    if name.startswith('privkey'):
+        return True
+    if name == 'private_key.json' or name.endswith('_key-certbot.pem'):
+        return True
+    return path.suffix.lower() in _KEY_FILE_SUFFIXES
+
+
+_BACKUP_REASON_RE = re.compile(r'[^A-Za-z0-9_.-]+')
+
+
+def _safe_backup_reason(reason) -> str:
+    """``backup_reason`` lands in the archive file name; keep it to a short
+    token so a reason such as ``../../etc`` cannot steer the write outside
+    backups/unified/."""
+    cleaned = _BACKUP_REASON_RE.sub('_', str(reason or 'manual')).strip('._-')
+    return (cleaned or 'manual')[:48]
+
+# Per-entry ceiling when restoring the data/ subtrees. Deliberately far above
+# the 10 MB used for PEM files: certificate_audit.log is append-only and grows
+# with every operation, and an audit chain restored with a hole in it is
+# unverifiable. Entries are streamed in chunks, so this is a bound on disk
+# use, not on memory.
+_MAX_DATA_ENTRY_BYTES = 512 * 1024 * 1024
+
+
+class RestoreIncompleteError(RuntimeError):
+    """A restore extracted some entries but not all of them.
+
+    Raised at the end of restore_unified_backup when at least one archive
+    member could not be written. The point is the "not all": the previous
+    behaviour logged each failure and returned True, so the API answered
+    ``200 "restored atomically successfully"`` while, in the case that
+    prompted this, a live ``privkey.pem`` had just been truncated to zero
+    bytes and lost. Failing loudly instead means the operator reaches for the
+    pre-restore backup rather than trusting an instance that reports healthy
+    and cannot serve TLS. ``failed`` lists the archive member names.
+    """
+
+    def __init__(self, failed):
+        self.failed = list(failed)
+        super().__init__(
+            "restore incomplete: could not extract "
+            + ", ".join(self.failed)
+        )
+
+
+def _extract_zip_member_atomically(zipf, file_info, target_path, max_bytes):
+    """Extract one archive member to *target_path* without ever leaving it in
+    a half-written state.
+
+    The member is streamed into a sibling temp file, locked to 0600, then
+    promoted with ``os.replace`` — an atomic rename on the same filesystem.
+    Until that rename, ``target_path`` is untouched: if the read fails (a
+    corrupt member, a bad CRC pulled back from an off-site copy) or the
+    declared size is a lie, the pre-existing file is still exactly what it was.
+
+    The promoted file is 0600 — restrictive by default, so a private key is
+    never briefly world-readable. A caller that restores public material
+    (cert.pem/chain.pem/fullchain.pem) relaxes it to 0644 afterwards, with a
+    literal mode; that is a widening of an already-safe file, not a window.
+
+    This replaces two earlier shapes that both ended at zero bytes:
+    ``open(target_path, 'wb')`` truncated the destination *before* the first
+    byte was read, and the surrounding ``except: ... continue`` (or the
+    oversize ``continue``) then left it empty. The certificates/ branch, which
+    holds every privkey.pem and the ACME account key, had no cleanup at all.
+
+    Streams in 1 MiB chunks, so a large audit log bounds disk, not memory.
+    Raises on any failure (after removing the temp file); the caller records
+    the member as failed and keeps going.
+    """
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(target_path.parent),
+        prefix='.' + target_path.name + '.',
+        suffix='.restoring',
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        written = 0
+        # os.fdopen FIRST, so it takes ownership of the mkstemp fd before
+        # zipf.open is evaluated: if opening the member raises (a corrupt entry
+        # header), the already-entered file object is closed on the way out and
+        # the fd is not leaked. With the order reversed, a member that fails to
+        # open would strand one file descriptor per attempt.
+        with os.fdopen(fd, 'wb') as target, zipf.open(file_info) as source:
+            while True:
+                chunk = source.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > max_bytes:
+                    # The header size can understate the real size; this is the
+                    # check that actually holds. Treated as a failure, not a
+                    # skip: an entry that does not fit is a hole in the restore.
+                    raise ValueError(
+                        f'entry exceeds {max_bytes}-byte limit '
+                        f'(declared {file_info.file_size})'
+                    )
+                target.write(chunk)
+        # chmod the temp file, so the promoted file is 0600 the instant it
+        # becomes visible — a key is never briefly world-readable.
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, target_path)
+        return written
+    except BaseException:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
 
 # --- Backup encryption at rest --------------------------------------------
 # Unified backups embed every certificate private key (privkey.pem). With
@@ -139,9 +289,27 @@ class FileOperations:
             self.backup_dir.resolve(),
             self.logs_dir.resolve()
         ]
+        # Why the last restore_unified_backup() returned False, when it knows.
+        self.last_restore_error = None
 
     def safe_file_read(self, file_path, is_json=False, default=None):
-        """Safely read a file with proper error handling and file locking"""
+        """Safely read a file with proper error handling.
+
+        No lock is taken, and there is nothing to take one against. Every
+        writer here goes through `safe_file_write`, which builds the new
+        content in a private temporary file and renames it over the target;
+        POSIX rename is atomic, so a reader's `open` resolves to either the
+        whole old file or the whole new one and never to a half-written one.
+        A reader already holding the old inode goes on reading a complete file
+        that happens to be one version behind, which is the same thing a
+        shared lock would have given it.
+
+        This used to take `LOCK_SH` "for safety". It paired with nothing: the
+        writer's exclusive lock was on its own temporary file, which no other
+        process can name, so no holder of this path's lock ever had to wait
+        and no waiter was ever excluded. Two locks that never meet cost two
+        syscalls and buy a reader's confidence that nothing had been checked.
+        """
         try:
             # Validate file path to prevent path traversal
             file_path = Path(file_path).resolve()
@@ -155,15 +323,10 @@ class FileOperations:
                 return default
                 
             with open(file_path, 'r', encoding='utf-8') as f:
-                # Use file locking for safety
-                fcntl.flock(f.fileno(), fcntl.LOCK_SH)
-                try:
-                    content = f.read()
-                    if is_json:
-                        return json.loads(content) if content.strip() else default
-                    return content
-                finally:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                content = f.read()
+                if is_json:
+                    return json.loads(content) if content.strip() else default
+                return content
                     
         except (json.JSONDecodeError, FileNotFoundError, PermissionError) as e:
             logger.error(f"Error reading file {file_path}: {e}")
@@ -173,7 +336,27 @@ class FileOperations:
             return default
 
     def safe_file_write(self, file_path, data, is_json=True):
-        """Safely write data to a file with proper error handling and atomic operations"""
+        """Write a file atomically: build it beside the target, then rename.
+
+        Where the atomicity comes from, since the answer used to be a comment
+        saying "use file locking for safety" over an exclusive lock on the
+        temporary file this call had just created — a name no other process
+        can open, so the lock excluded nobody and the comment described a
+        guarantee that was not there:
+
+        * **no reader sees a partial file.** The content is written and fsynced
+          into a private temporary file and then renamed over the target.
+          POSIX rename is atomic, so a concurrent reader gets the whole old
+          file or the whole new one;
+        * **mutual exclusion between writers is not from here.** Two callers
+          writing the same path concurrently both succeed and the later rename
+          wins, whole. Nothing is interleaved and nothing is corrupted, but a
+          read-modify-write done as two separate calls can still lose an
+          update — which is why settings mutation goes through
+          `SettingsManager.update`, holding its own lock across the read and
+          the write, rather than through a lock inside this function that
+          could not span both halves of it anyway.
+        """
         # Initialise the cleanup target before any code that could raise. If
         # mkstemp() (below) fails — disk full, parent dir unwritable, sandbox
         # restriction — control jumps straight to one of the except blocks
@@ -199,17 +382,15 @@ class FileOperations:
             temp_file = Path(_tmp_name)
             fd = os.open(str(temp_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, 'w', encoding='utf-8') as f:
-                # Use file locking for safety
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                try:
-                    if is_json:
-                        json.dump(data, f, indent=2, ensure_ascii=False)
-                    else:
-                        f.write(str(data))
-                    f.flush()
-                    os.fsync(f.fileno())
-                finally:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                if is_json:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+                else:
+                    f.write(str(data))
+                f.flush()
+                # Before the rename, not after: a rename that reaches the
+                # directory ahead of the data would leave the target pointing
+                # at an empty file if the machine lost power in between.
+                os.fsync(f.fileno())
             
             # Atomic move
             temp_file.rename(file_path)
@@ -248,17 +429,29 @@ class FileOperations:
     def create_unified_backup(self, settings_data, backup_reason="manual", include_secrets=False):
         """Create a unified backup containing both settings and certificates.
 
-        ``include_secrets`` controls whether secret-bearing fields in
-        ``settings_data`` (DNS provider tokens, storage backend
+        ``include_secrets`` decides what kind of archive this is.
+
+        ``False`` (default) is the **share-safe** archive: secret-bearing
+        fields in ``settings_data`` (DNS provider tokens, storage backend
         credentials, ``api_bearer_token``, ``smtp_password``, OIDC
-        ``client_secret``, user password hashes, …) appear in plaintext
-        in the resulting zip. Default ``False`` writes the canonical
-        mask sentinel in place of every secret, so a leaked backup file
-        does NOT also leak every CertMate credential. The opt-in
-        ``include_secrets=True`` path produces a plaintext backup for
-        full disaster-recovery use; callers MUST audit-log the opt-in
-        because the resulting file on disk is now a credential dump
-        that survives outside the API role gate.
+        ``client_secret``, user password hashes, …) are written as the
+        canonical mask sentinel, AND no key material is carried — no
+        ``privkey*.pem``, no ACME account ``private_key.json``, no
+        ``.key``/``.pfx``/``.p12`` under data/certs/ (the private CA key
+        included). Certificates, chains, metadata, the audit chain and
+        the inventory are all there. Such an archive cannot restore an
+        instance on its own; the manifest says so (``secrets_masked`` +
+        ``key_material_excluded``) and ``restore_unified_backup`` reads
+        the flag: it refuses to lay key-less certificates over an
+        instance that has certificates, because cert.pem from the archive
+        next to the privkey.pem already on disk is a pair that does not
+        complete a handshake.
+
+        ``True`` is the **disaster-recovery** archive: plaintext settings
+        and every key. Callers MUST audit-log the opt-in because the file
+        on disk is now a credential dump that survives outside the API
+        role gate. With ``CERTMATE_BACKUP_PASSPHRASE`` set the payload is
+        encrypted at rest, which is the intended way to keep one.
 
         Output file is always chmod 0600 — only the certmate process
         user can read it — so backup-dir-readable threats (rsync,
@@ -267,7 +460,10 @@ class FileOperations:
         """
         try:
             timestamp = utc_now().strftime("%Y%m%d_%H%M%S_%f")
+            backup_reason = _safe_backup_reason(backup_reason)
             backup_id = f"backup_{timestamp}_{backup_reason}"
+            exclude_keys = not include_secrets
+            key_files_excluded = 0
             passphrase = _backup_passphrase()
             backup_filename = f"{backup_id}{_BACKUP_ENC_SUFFIX if passphrase else '.zip'}"
             backup_path = self.backup_dir / "unified" / backup_filename
@@ -287,6 +483,16 @@ class FileOperations:
                         domain_dirs.append(domain_dir)
             domains = [d.name for d in domain_dirs]
 
+            # PKI + audit state that lives outside cert_dir (#409). Collected
+            # here, before the metadata dict is built, so the count is
+            # identical in settings.json and backup_metadata.json.
+            data_files = []
+            for subtree in _BACKUP_DATA_SUBTREES:
+                subtree_dir = self.data_dir / subtree
+                if not subtree_dir.is_dir():
+                    continue
+                data_files.extend(f for f in subtree_dir.rglob("*") if f.is_file())
+
             settings_to_write = settings_data if include_secrets else self._mask_settings_secrets(settings_data)
 
             metadata = {
@@ -296,12 +502,20 @@ class FileOperations:
                 "version": "2.2.0",  # New unified format
                 "type": "unified",
                 "domains": domains,
-                "settings_domains": [d.get('domain') if isinstance(d, dict) else d for d in settings_data.get('domains', [])],
+                "settings_domains": [name for name, _ in iter_domains(settings_data)],
                 "total_domains": len(domains),
+                # Count of PKI/audit files carried under the "data/" prefix
+                # (private CA, client certs, CRL, audit chain) — #409.
+                "data_files": len(data_files),
                 # Pin the secret-handling mode on the backup itself so an
                 # operator inspecting an old archive can see whether it's
                 # a share-safe (masked) snapshot or a full-restore one.
                 "secrets_masked": not include_secrets,
+                # Share-safe archives carry no private keys (ACME keys,
+                # account key, private CA key, PKCS#12 bundles). The count
+                # is filled in below, once the tree has been walked.
+                "key_material_excluded": exclude_keys,
+                "key_files_excluded": 0,
                 "encrypted": bool(passphrase),
             }
 
@@ -310,12 +524,12 @@ class FileOperations:
             # plaintext zip to disk, not even transiently.
             zip_buffer = io.BytesIO()
             with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                # Add settings data
+                # settings.json is written after the file walk (below), so
+                # its manifest copy carries the final key_files_excluded.
                 settings_backup = {
                     "metadata": metadata,
                     "settings": settings_to_write
                 }
-                zipf.writestr("settings.json", json.dumps(settings_backup, indent=2))
 
                 # Reuse the domain_dirs list from above instead of doing a
                 # second iterdir + is_dir() on the same cert_dir.
@@ -332,11 +546,28 @@ class FileOperations:
                         rel_parts = cert_file.relative_to(domain_dir).parts
                         if rel_parts and rel_parts[0] in _BACKUP_EXCLUDE_DIRS:
                             continue
+                        if exclude_keys and rel_parts and (rel_parts[0] in _KEY_MATERIAL_DIRS
+                                             or _is_key_material(cert_file)):
+                            key_files_excluded += 1
+                            continue
                         # Add file to zip with relative path under certificates/
                         arc_path = f"certificates/{cert_file.relative_to(self.cert_dir)}"
                         zipf.write(cert_file, arc_path)
 
-                # Add unified metadata
+                # PKI + audit state (#409). certificates/ only covers the
+                # ACME server certs; the private CA key, the client certs it
+                # signed, the CRL and the audit chain live under data_dir and
+                # were previously absent from every backup — silently, since
+                # total_domains still looked right.
+                for data_file in data_files:
+                    if exclude_keys and _is_key_material(data_file):
+                        key_files_excluded += 1
+                        continue
+                    zipf.write(data_file, f"data/{data_file.relative_to(self.data_dir)}")
+
+                # Manifest, in both places it lives, with the final count.
+                metadata["key_files_excluded"] = key_files_excluded
+                zipf.writestr("settings.json", json.dumps(settings_backup, indent=2))
                 zipf.writestr("backup_metadata.json", json.dumps(metadata, indent=2))
 
             payload = zip_buffer.getvalue()
@@ -355,23 +586,34 @@ class FileOperations:
                 logger.warning(f"Could not tighten permissions on {backup_path}: {perm_err}")
 
             mode_tag = 'plaintext' if include_secrets else 'masked'
+            keys_tag = 'included' if include_secrets else f'excluded ({key_files_excluded} files)'
             enc_tag = 'encrypted' if passphrase else 'cleartext'
-            logger.info(f"Unified backup created: {backup_filename} (contains {len(domains)} domains; secrets={mode_tag}; at-rest={enc_tag})")
+            logger.info(f"Unified backup created: {backup_filename} (contains {len(domains)} domains; "
+                        f"secrets={mode_tag}; keys={keys_tag}; at-rest={enc_tag})")
             self._prune_unified_backups()
-            self._upload_backup_offsite(backup_path, backup_filename, settings_data)
+            self._upload_backup_offsite(backup_path, backup_filename, settings_data,
+                                        encrypted=bool(passphrase))
             return backup_filename
 
         except Exception as e:
             logger.error(f"Error creating unified backup: {e}")
             return None
 
-    def _upload_backup_offsite(self, backup_path, backup_filename, settings_data):
+    def _upload_backup_offsite(self, backup_path, backup_filename, settings_data,
+                               encrypted=False):
         """Best-effort off-site copy of the unified backup to an S3-compatible
         target. NEVER raises: the local backup is authoritative; the S3 copy is
         a disaster-recovery convenience. Enabled via settings
         ``backup_storage`` = {'backend': 's3_compatible', 's3_compatible': {...}}.
         Works with any S3 endpoint (Hetzner, Contabo, OVHcloud, Scaleway, Wasabi,
         MinIO, AWS); boto3 is already a core dependency.
+
+        ``encrypted`` MUST be True for the upload to proceed: the unified backup
+        contains every domain's private key, and at-rest encryption is only
+        applied when CERTMATE_BACKUP_PASSPHRASE is set. Off-site upload and
+        encryption are independent settings, so refusing here is what prevents
+        an operator who enabled S3 without a passphrase from silently
+        exfiltrating cleartext private keys to third-party storage.
         """
         try:
             cfg = (settings_data or {}).get('backup_storage') or {}
@@ -384,6 +626,29 @@ class FileOperations:
             secret_key = (s3.get('secret_access_key') or '').strip()
             if not all([endpoint, bucket, access_key, secret_key]):
                 return
+
+            # Refuse to ship cleartext private keys off-box. This is the guard
+            # that couples off-site upload to encryption (they are otherwise
+            # unrelated settings). Fail-safe: default False, so a caller that
+            # forgets to pass the flag never leaks.
+            if not encrypted:
+                logger.error(
+                    "Off-site backup upload SKIPPED: the backup is NOT encrypted "
+                    "(CERTMATE_BACKUP_PASSPHRASE is not set) and contains every "
+                    "domain's private key. Refusing to upload cleartext keys to "
+                    "external storage. Set CERTMATE_BACKUP_PASSPHRASE to enable "
+                    "off-site backups."
+                )
+                return
+            if not endpoint.lower().startswith('https://'):
+                # The payload is encrypted at rest, so this is not a key-leak,
+                # but plaintext transport is still worth flagging. Log the
+                # scheme only — never the endpoint host/credentials.
+                logger.warning(
+                    "Off-site backup endpoint is not HTTPS (scheme=%s); prefer "
+                    "an HTTPS endpoint for transport security.",
+                    (endpoint.split('://', 1)[0] or 'unknown'),
+                )
             prefix = (s3.get('prefix') or 'certmate/backups').strip().strip('/')
             region = (s3.get('region') or 'us-east-1').strip()
 
@@ -436,6 +701,171 @@ class FileOperations:
 
 
 
+    # A generous ceiling on an uploaded archive, well under the 50 MB Flask
+    # itself enforces via MAX_CONTENT_LENGTH. Stated here too so the rule holds
+    # for any caller, not only one that arrived over HTTP.
+    MAX_INGEST_BYTES = 40 * 1024 * 1024
+
+    def ingest_backup(self, raw):
+        """Take an archive from outside this node. Returns ``(filename, error)``.
+
+        This is the missing half of disaster recovery: restore reads a file
+        that is already in ``backups/unified``, so after losing the volume
+        there was no way to bring a backup back — recovery required
+        out-of-band access to a filesystem that no longer existed (#655).
+
+        The stored name is generated here and the uploaded one is discarded
+        entirely. A name supplied by the caller is the classic way to steer a
+        write out of the directory, and nothing about the upload needs it: the
+        archive's own manifest carries what it is.
+
+        The kind of archive is decided from its CONTENT, never its extension,
+        because the restore path branches on the suffix — an encrypted archive
+        stored as ``.zip`` would simply fail to open later, at the moment it
+        was most needed.
+        """
+        if not raw:
+            return None, 'The uploaded file is empty'
+        if len(raw) > self.MAX_INGEST_BYTES:
+            return None, (f'Backup exceeds the {self.MAX_INGEST_BYTES // (1024 * 1024)} MB '
+                          f'limit for an upload')
+
+        try:
+            _parse_encrypted_backup(raw)
+            suffix = _BACKUP_ENC_SUFFIX
+        except ValueError:
+            # Not an encrypted container; it must then be a readable archive
+            # that at least looks like one of ours. Refusing here means a
+            # corrupt or unrelated file is rejected at upload rather than
+            # sitting in the list until someone tries to restore from it.
+            try:
+                with zipfile.ZipFile(io.BytesIO(raw)) as zipf:
+                    if 'settings.json' not in zipf.namelist():
+                        return None, ('The archive contains no settings.json, so it is '
+                                      'not a CertMate backup')
+            except (zipfile.BadZipFile, OSError):
+                return None, ('The file is neither a CertMate encrypted backup nor a '
+                              'readable ZIP archive')
+            suffix = '.zip'
+
+        timestamp = utc_now().strftime("%Y%m%d_%H%M%S_%f")
+        filename = f"backup_{timestamp}_{_safe_backup_reason('uploaded')}{suffix}"
+        target = self.backup_dir / "unified" / filename
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            target.write_bytes(raw)
+            os.chmod(target, 0o600)
+        except OSError as e:
+            logger.error(f"Could not store uploaded backup: {e}")
+            return None, 'Could not write the uploaded backup to disk'
+
+        logger.info(f"Backup ingested from upload: {filename} ({len(raw)} bytes)")
+        return filename, None
+
+    def _archive_key_files(self, backup_file):
+        """Key files inside *backup_file*, or None if it cannot be inspected.
+
+        None is not an answer of "none": an encrypted archive this instance has
+        no passphrase for genuinely cannot be read, and reporting that as clean
+        would be the same mistake the old manifests made.
+        """
+        try:
+            if backup_file.name.endswith(_BACKUP_ENC_SUFFIX):
+                passphrase = _backup_passphrase()
+                if not passphrase:
+                    return None
+                source = io.BytesIO(_decrypt_backup_payload(
+                    backup_file.read_bytes(), passphrase))
+            else:
+                source = backup_file
+            with zipfile.ZipFile(source, 'r') as zipf:
+                return self._archive_key_material(zipf.namelist())
+        except Exception as e:
+            logger.debug(f"Could not inspect {backup_file.name} for keys: {e}")
+            return None
+
+    @staticmethod
+    def _archive_key_material(names):
+        """The key files an archive carries, from its NAME LIST alone.
+
+        Every backup made before v2.26.0 with the default settings contains the
+        private key of every certificate, while its manifest says
+        `secrets_masked: true` and the interface called it share-safe (#595).
+        Archives from v2.22.0 also carry the private CA key and every
+        client-certificate key.
+
+        An operator who shared one believing it harmless has no way to tell
+        from the listing, and the advice — unzip and grep — assumes they know
+        to look. So the listing looks for them.
+
+        Reads the name list only: no entry is decompressed, so this stays cheap
+        enough to run while rendering a page.
+        """
+        from pathlib import PurePosixPath
+
+        return sorted({
+            name for name in names
+            if not name.endswith('/') and _is_key_material(PurePosixPath(name))
+        })
+
+    def _backup_restorability(self, backup_file):
+        """Can this archive actually bring the instance back? ``(bool, reason)``.
+
+        Answered with the same predicate the restore path uses, so the two
+        cannot drift apart — the listing calling an archive a restore point
+        while restore refuses it is the failure being closed here (#655).
+
+        Conservative by construction: anything that cannot be inspected is
+        reported as NOT restorable. Presenting an unknown archive as a restore
+        point is the exact harm, so an unreadable file must never be optimistic.
+        """
+        from .settings import backup_can_restore
+
+        try:
+            if backup_file.name.endswith(_BACKUP_ENC_SUFFIX):
+                passphrase = _backup_passphrase()
+                if not passphrase:
+                    return False, ('encrypted, and CERTMATE_BACKUP_PASSPHRASE is '
+                                   'not set on this instance, so it cannot be '
+                                   'opened or verified here')
+                payload = _decrypt_backup_payload(
+                    backup_file.read_bytes(), passphrase)
+                source = io.BytesIO(payload)
+            else:
+                source = backup_file
+
+            with zipfile.ZipFile(source, 'r') as zipf:
+                names = zipf.namelist()
+                if "settings.json" not in names:
+                    return False, 'the archive contains no settings.json'
+                raw = json.loads(zipf.read("settings.json").decode('utf-8'))
+                settings = (raw.get('settings')
+                            if isinstance(raw, dict) and 'settings' in raw
+                            else raw)
+                if not isinstance(settings, dict) or not settings:
+                    return False, 'the archive contains no usable settings'
+                if not backup_can_restore(zipf, names, settings):
+                    # Measured, not assumed: a masked archive carries no
+                    # credentials at all — the mask is not written back as a
+                    # value. This used to say restoring it "would install the
+                    # mask in place of every credential and lock this instance
+                    # out", which is the sentence an operator reads in the
+                    # backup list, and it frightened them away from a recovery
+                    # path that works.
+                    return False, ('secrets are masked, so it cannot bring this '
+                                   'instance back on its own — the credentials '
+                                   'are not in it. Restored onto an instance with '
+                                   'no certificates it still returns domains, '
+                                   'deploy hooks, the inventory and the audit '
+                                   'chain; the certificates come back without '
+                                   'their private keys and the credentials must '
+                                   'be re-entered')
+        except Exception as e:
+            logger.debug(f"Could not assess {backup_file.name}: {e}")
+            return False, 'the archive could not be read'
+
+        return True, None
+
     def list_backups(self):
         """List all available unified backups with metadata"""
         try:
@@ -471,8 +901,28 @@ class FileOperations:
                         except Exception as e:
                             logger.debug(f"Could not read ZIP metadata from {backup_file}: {e}")
 
+                        can_restore, reason = self._backup_restorability(backup_file)
+                        key_files = self._archive_key_files(backup_file)
                         backups["unified"].append({
                             "filename": backup_file.name,
+                            # Whether this archive carries private keys, read
+                            # from the archive itself rather than from its
+                            # manifest — every backup made before v2.26.0 says
+                            # secrets_masked: true and carries them anyway
+                            # (#595). None when the archive cannot be opened
+                            # here, which is not the same as "no keys".
+                            "contains_key_material": (
+                                None if key_files is None else bool(key_files)),
+                            "key_file_count": (
+                                None if key_files is None else len(key_files)),
+                            # Stated per entry rather than left to be inferred
+                            # from `metadata.secrets_masked`: that field names
+                            # the mechanism, and the operator needs the
+                            # consequence. An archive listed as a restore point
+                            # that the restore path then refuses is the whole
+                            # of #655.
+                            "can_restore": can_restore,
+                            "restore_blocked_reason": reason,
                             "metadata": metadata
                         })
                     except Exception as e:
@@ -486,42 +936,71 @@ class FileOperations:
 
     @staticmethod
     def _revalidate_restored_deploy_hooks(settings_data):
-        """Run the current ``DeployManager._validate_hook`` over every
-        hook present in the restored ``settings_data``. Returns ``None``
-        if every hook passes, or a human-readable error string naming
-        the offending hook otherwise. A restore that would install
-        even one rejectable hook is refused (audit finding M1)."""
+        """Validate the restored ``deploy_hooks`` block with the SAME validator
+        the normal save path uses (``DeployManager._validate_deploy_config``),
+        so a restore cannot install a config the UI would reject: global hooks,
+        every per-domain hook, the shape of ``domain_hooks``, and typed targets
+        (audit finding M1). Returns ``None`` when the block is absent or valid,
+        or a human-readable error string naming the offending piece.
+
+        Best-effort by design: if ``DeployManager`` cannot be imported or
+        constructed, this returns ``None`` (does not block the restore) and
+        logs a warning. That is a deliberate trade — a restore should not be
+        held hostage by an import error — so this is a strong check, not a hard
+        guarantee. The value is that it stays in lock-step with save_config;
+        the previous version reimplemented a weaker check inline and drifted
+        (it skipped per-domain hooks entirely)."""
+        deploy_block = settings_data.get('deploy_hooks')
+        if not deploy_block:
+            return None
         try:
             from .deployer import DeployManager
-        except Exception as imp_err:
-            logger.warning(f"Could not import DeployManager for restore validation: {imp_err}")
-            return None
-
-        hooks = []
-        deploy_block = settings_data.get('deploy_hooks') or {}
-        if isinstance(deploy_block, dict):
-            global_hooks = deploy_block.get('global_hooks') or []
-            if isinstance(global_hooks, list):
-                hooks.extend(h for h in global_hooks if isinstance(h, dict))
-        if not hooks:
-            return None
-
-        # Instantiate without a settings_manager argument — _validate_hook
-        # only reads from the hook dict itself, so a bare instance works.
-        try:
             dm = DeployManager.__new__(DeployManager)
-        except Exception as ctor_err:
-            logger.warning(f"Could not construct DeployManager for hook re-validation: {ctor_err}")
+        except Exception as imp_err:
+            logger.warning(
+                f"Could not load DeployManager for restore validation "
+                f"({imp_err}); skipping deploy-hook revalidation")
             return None
 
-        for hook in hooks:
+        try:
+            ok, err = dm._validate_deploy_config(deploy_block)
+        except Exception as ve:
+            return f"deploy config validator raised {type(ve).__name__}: {ve}"
+        return None if ok else (err or "deploy config failed current validator")
+
+    def _refuse_keyless_restore_over_certificates(self, zipf):
+        """Return a reason string when *zipf* is a share-safe archive
+        (``key_material_excluded``) and this instance already has
+        certificates on disk; None when the restore may proceed."""
+        manifest = None
+        names = set(zipf.namelist())
+        for candidate in ("backup_metadata.json", "settings.json"):
+            if candidate not in names:
+                continue
             try:
-                ok, err = dm._validate_hook(hook)
-            except Exception as ve:
-                return f"hook validator raised {type(ve).__name__}: {ve}"
-            if not ok:
-                return err or "hook failed current validator"
-        return None
+                parsed = json.loads(zipf.read(candidate).decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if candidate == "settings.json":
+                parsed = parsed.get("metadata") if isinstance(parsed, dict) else None
+            if isinstance(parsed, dict):
+                manifest = parsed
+                break
+        if not manifest or not manifest.get("key_material_excluded"):
+            return None
+        if not self.cert_dir.exists():
+            return None
+        existing = sorted(
+            d.name for d in self.cert_dir.iterdir()
+            if d.is_dir() and ((d / "privkey.pem").exists() or (d / "cert.pem").exists()))
+        if not existing:
+            return None
+        shown = ", ".join(existing[:5]) + (" …" if len(existing) > 5 else "")
+        return (f"this archive is share-safe and contains no private keys "
+                f"(key_material_excluded); restoring it over an instance that already "
+                f"holds certificates ({shown}) would leave certificates that do not match "
+                f"the keys on disk. Restore a disaster-recovery archive "
+                f"(include_secrets=true) instead, or restore onto an empty instance.")
 
     def restore_unified_backup(self, backup_file_path):
         """Restore from a unified backup file (both settings and certificates).
@@ -547,6 +1026,21 @@ class FileOperations:
            on-disk settings file exists yet, the masked sentinels stay
            in place and the response log surfaces a warning so the
            operator knows to re-enter credentials.
+
+        Returns:
+            True on a clean restore.
+            False if the archive could not be opened or a pre-write safety
+            gate declined (see ``last_restore_error`` for the reason).
+
+        Raises:
+            RestoreIncompleteError: the archive opened and some members were
+                written, but at least one could not be. Each failed member
+                left its pre-existing file intact (extraction is atomic), so
+                nothing was truncated — but the instance is now a mix of old
+                and new, so this is not reported as success. ``.failed`` lists
+                the member names. Callers that only expect True/False must
+                handle this: the API layer turns it into a 500 that names the
+                failed members and points at the pre-restore backup.
         """
         temp_zip_path = None
         try:
@@ -584,10 +1078,26 @@ class FileOperations:
             self.data_dir.mkdir(parents=True, exist_ok=True)
 
             restored_domains = []
+            # Archive members that could not be written. A non-empty list at
+            # the end turns the whole restore into a raised error instead of a
+            # reported success — see RestoreIncompleteError.
+            failed_entries = []
             settings_data = None
 
             # Extract unified backup
+            self.last_restore_error = None
             with zipfile.ZipFile(backup_path, 'r') as zipf:
+                # Gate 0: a share-safe archive carries no private keys. Laid
+                # over an instance that has certificates it would replace
+                # cert.pem/chain.pem/fullchain.pem and leave privkey.pem as it
+                # was — a certificate that does not match its key, written
+                # into the flat copy AND live/ so the two agree and the
+                # flat-vs-live repair sees nothing to fix (review, #582).
+                refusal = self._refuse_keyless_restore_over_certificates(zipf)
+                if refusal:
+                    self.last_restore_error = refusal
+                    logger.error(f"Refusing restore: {refusal}")
+                    return False
                 # First, restore settings
                 if "settings.json" in zipf.namelist():
                     settings_content = zipf.read("settings.json")
@@ -651,10 +1161,10 @@ class FileOperations:
                             if masked_mode:
                                 logger.warning(
                                     "Restoring a masked backup onto a fresh "
-                                    "install: secret fields will remain as the "
-                                    "mask sentinel. Operator must re-enter "
-                                    "DNS / storage / SMTP credentials before "
-                                    "the next renewal."
+                                    "install: the archive carries no "
+                                    "credentials, so DNS / storage / SMTP "
+                                    "settings come back without them and must "
+                                    "be re-entered before the next renewal."
                                 )
 
                         if self.safe_file_write(settings_file, settings_data_to_write, is_json=True):
@@ -665,6 +1175,8 @@ class FileOperations:
                 
                 # Then, restore certificates
                 cert_dir_resolved = self.cert_dir.resolve()
+                data_dir_resolved = self.data_dir.resolve()
+                restored_data_files = 0
                 for file_info in zipf.infolist():
                     if file_info.filename.startswith("certificates/") and file_info.filename != "certificates/":
                         # Remove "certificates/" prefix from the path.
@@ -693,35 +1205,37 @@ class FileOperations:
                             logger.warning(f"Invalid path in ZIP: {file_info.filename}")
                             continue
 
-                        # Decompression bomb protection: reject oversized entries
-                        max_entry_size = 10 * 1024 * 1024  # 10 MB per file
-                        if file_info.file_size > max_entry_size:
-                            logger.warning(f"Skipping oversized ZIP entry: {file_info.filename} ({file_info.file_size} bytes)")
-                            continue
+                        # Decompression bomb protection: 10 MB per PEM file.
+                        max_entry_size = 10 * 1024 * 1024
 
                         logger.info(f"Extracting certificate file: {file_info.filename}")
 
-                        # Ensure target directory exists
-                        target_path.parent.mkdir(parents=True, exist_ok=True)
-
-                        # Extract file with size limit
+                        # Atomic extract: target_path is left untouched until a
+                        # complete copy has been written and promoted by rename.
+                        # A corrupt member (bad CRC from an off-site copy) or an
+                        # oversize one used to truncate the live file to zero and
+                        # then `continue`, while the restore still returned True
+                        # — that is how a working privkey.pem was silently lost.
+                        # The promoted file is 0600.
                         try:
-                            with zipf.open(file_info) as source, open(target_path, 'wb') as target:
-                                data = source.read(max_entry_size + 1)
-                                if len(data) > max_entry_size:
-                                    logger.warning(f"ZIP entry exceeds size limit: {file_info.filename}")
-                                    continue
-                                target.write(data)
+                            _extract_zip_member_atomically(
+                                zipf, file_info, target_path, max_entry_size)
                         except Exception as e:
-                            logger.error(f"Error extracting {file_info.filename}: {e}")
+                            logger.error(
+                                f"Error extracting {file_info.filename}: {e} "
+                                f"(existing file left intact)")
+                            failed_entries.append(file_info.filename)
                             continue
 
-                        # Set appropriate permissions: lock down every private
-                        # key (live, archived, and the ACME account key), leave
-                        # public cert material world-readable.
-                        if _PRIVATE_KEY_FILE_RE.search(target_path.name):
-                            os.chmod(target_path, 0o600)
-                        else:
+                        # Relax public certificate material to 0644 so nginx and
+                        # other containers reading the bind-mounted cert dir can
+                        # see it. Private keys (live, archived, ACME account) and
+                        # any .pfx/keys copy stay 0600 — same predicate the
+                        # share-safe archive uses to leave key material out
+                        # (review, #582). Widening an already-0600 file, so a key
+                        # is never even briefly world-readable.
+                        if not (_is_key_material(target_path)
+                                or _PRIVATE_KEY_FILE_RE.search(target_path.name)):
                             os.chmod(target_path, 0o644)
 
                         # Track restored domains
@@ -730,12 +1244,109 @@ class FileOperations:
                             if domain and domain not in restored_domains:
                                 logger.info(f"Found domain in unified backup: {domain}")
                                 restored_domains.append(domain)
+
+                    # Then, restore the PKI + audit subtrees (#409). Same
+                    # ZIP-slip / size / permission handling as certificates,
+                    # but the first path segment is checked against
+                    # _BACKUP_DATA_SUBTREES so a tampered archive cannot use
+                    # this branch to drop a settings.json (or anything else)
+                    # into data_dir behind the deploy-hook validation gate.
+                    elif file_info.filename.startswith("data/") and file_info.filename != "data/":
+                        relative_path = file_info.filename[len("data/"):]
+
+                        if '..' in relative_path or relative_path.startswith('/'):
+                            logger.warning(f"Skipping suspicious ZIP entry: {file_info.filename}")
+                            continue
+
+                        top_level = relative_path.split('/')[0]
+                        if top_level not in _BACKUP_DATA_SUBTREES:
+                            logger.warning(
+                                f"Skipping non-allowlisted data entry: {file_info.filename}"
+                            )
+                            continue
+
+                        target_path = self.data_dir / relative_path
+
+                        try:
+                            target_resolved = target_path.resolve()
+                            target_resolved.relative_to(data_dir_resolved)
+                        except ValueError:
+                            logger.warning(f"ZIP Slip blocked: {file_info.filename} -> {target_path}")
+                            continue
+                        except OSError:
+                            logger.warning(f"Invalid path in ZIP: {file_info.filename}")
+                            continue
+
+                        # The CA signing key, the audit signing key and every
+                        # client private key land here. Unlike certificates/,
+                        # which operators bind-mount and read from other
+                        # containers, nothing outside the app process reads
+                        # data/ — so everything restored here is 0600. That
+                        # includes the CA cert and the CRL: they are public
+                        # information, but publishing them is the server's
+                        # job (/api/crl/download), not the filesystem's.
+                        #
+                        # Same atomic helper as certificates/: certificate_audit.log
+                        # is append-only and outgrows the 10 MB PEM cap, so the
+                        # limit here is _MAX_DATA_ENTRY_BYTES and the write is
+                        # chunked. An entry that fails or overflows leaves the
+                        # existing file intact and is recorded, not swallowed —
+                        # a half-restored audit chain that "looks restored" was
+                        # the exact hazard the old branch warned about, and now
+                        # it aborts the whole restore instead of reporting
+                        # success.
+                        # The helper promotes at 0600, which is exactly what
+                        # data/ wants for every file: the CA key, the audit
+                        # signing key and client keys are all here, and nothing
+                        # outside the app process reads data/, so even the CA
+                        # cert and CRL stay 0600 (publishing them is the
+                        # server's job, /api/crl/download, not the filesystem's).
+                        try:
+                            _extract_zip_member_atomically(
+                                zipf, file_info, target_path,
+                                _MAX_DATA_ENTRY_BYTES)
+                        except Exception as e:
+                            logger.error(
+                                f"Error extracting {file_info.filename}: {e} "
+                                f"(existing file left intact)")
+                            failed_entries.append(file_info.filename)
+                            continue
+
+                        restored_data_files += 1
             
+            # A ZIP cannot carry symlinks, so certbot's live/<domain>/*.pem
+            # came back as flat files and certbot would parsefail the lineage
+            # and skip it — making every future renewal a silent no-op (#410).
+            # Rebuild the links from the archive/ generation we restored.
+            for domain in restored_domains:
+                try:
+                    if repair_certbot_lineage_symlinks(self.cert_dir / domain, domain):
+                        logger.info(f"Rebuilt certbot lineage symlinks for {domain}")
+                except OSError as e:
+                    logger.warning(f"Could not rebuild lineage symlinks for {domain}: {e}")
+
+            # Symlinks for the good domains are rebuilt above regardless, so a
+            # partially-restored instance is at least internally consistent for
+            # what did land. But if anything failed, the caller must not be told
+            # the restore succeeded: a single lost privkey.pem is the whole
+            # reason this raises. The good entries stay written and the failed
+            # ones kept their pre-existing files (atomic extract), so the
+            # operator can inspect, then roll back via the pre-restore backup.
+            if failed_entries:
+                raise RestoreIncompleteError(failed_entries)
+
             logger.info(f"Unified backup restored successfully from: {backup_path.name}")
             if restored_domains:
                 logger.info(f"Restored {len(restored_domains)} domains: {', '.join(restored_domains)}")
+            if restored_data_files:
+                logger.info(f"Restored {restored_data_files} PKI/audit files under data/")
             return True
-            
+
+        except RestoreIncompleteError:
+            # Must not be swallowed into `return False` below: that path logs a
+            # generic error and discards the list of members that failed. The
+            # API caller turns this into a 500 that names them.
+            raise
         except Exception as e:
             logger.error(f"Error restoring unified backup: {e}")
             return False

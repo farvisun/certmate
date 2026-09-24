@@ -1,15 +1,17 @@
-# CertMate - SSL Certificate Management System
+# CertMate - Certificate Lifecycle Management
 
 <div align="center">
 
 <img src="certmate_logo.png" alt="CertMate Logo" width="180">
 
-**CertMate** is an SSL certificate management system designed for modern infrastructure. Built with multi-DNS provider support, Docker containerization, and a comprehensive REST API, it handles certificates across multiple datacenters and cloud environments.
+**CertMate** is a self-hosted certificate lifecycle management platform: it issues and renews TLS certificates, **discovers the ones you did not issue**, keeps a single inventory of what exists across your estate — what is served where, who issued it, when it expires, which cryptography it uses — and deploys renewed certificates to where they are needed. It supports 29 DNS providers, runs its own private CA for internal names, keeps a tamper-evident audit trail of every operation, and exposes all of it through a REST API.
 
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-try%20it%20now-2563eb?logo=probot&logoColor=white)](https://demo.certmate.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
 [![Docker](https://img.shields.io/badge/docker-ready-blue)](https://hub.docker.com/)
-[![API Documentation](https://img.shields.io/badge/API-Swagger-green)](http://localhost:8000/docs/)
+[![API Documentation](https://img.shields.io/badge/API-Swagger-green)](#api-usage)
+[![PyPI - certmate-cli](https://img.shields.io/pypi/v/certmate-cli?label=certmate-cli&color=3775A9)](https://pypi.org/project/certmate-cli/)
 [![CI](https://github.com/fabriziosalmi/certmate/actions/workflows/ci.yml/badge.svg)](https://github.com/fabriziosalmi/certmate/actions/workflows/ci.yml)
 [![Build Multi-Platform Docker Images](https://github.com/fabriziosalmi/certmate/actions/workflows/docker-multiplatform.yml/badge.svg)](https://github.com/fabriziosalmi/certmate/actions/workflows/docker-multiplatform.yml)
 [![CodeQL](https://github.com/fabriziosalmi/certmate/actions/workflows/codeql.yml/badge.svg)](https://github.com/fabriziosalmi/certmate/actions/workflows/codeql.yml)
@@ -23,7 +25,7 @@
  
 ![screenshot1](screenshot_1.png)
 
-[Quick Start](#quick-start-with-docker) • [Documentation](#documentation) • [Installation](#installation-methods) • [DNS Providers](#supported-dns-providers) • [CA Providers](docs/ca-providers.md) • [Storage Backends](#certificate-storage-configuration) • [Backup and Recovery](#backup-and-recovery) • [API Reference](#api-usage)
+[Quick Start](#quick-start-with-docker) • [CLI](#command-line-interface) • [Documentation](#documentation) • [Installation](#installation-methods) • [DNS Providers](#supported-dns-providers) • [CA Providers](docs/ca-providers.md) • [Storage Backends](#certificate-storage-configuration) • [Backup and Recovery](#backup-and-recovery) • [API Reference](#api-usage)
 
 </div>
 
@@ -41,6 +43,72 @@ CertMate is the open-source core of a small, focused toolset:
 
 ---
 
+## Command-line interface
+
+The whole certificate lifecycle from your terminal — `pip install certmate-cli`:
+
+![CertMate CLI — the full SSL certificate lifecycle from the terminal](demo/certmate-cli.gif)
+
+```bash
+pip install certmate-cli
+
+export CERTMATE_URL=https://certmate.example.com
+export CERTMATE_TOKEN=...                 # omit on a fresh (setup-mode) instance
+
+certmate health
+certmate cert create app.example.com --dns cloudflare --wait   # issue, block until live
+certmate cert ls
+certmate cert info app.example.com
+certmate audit verify
+```
+
+`certmate-cli` is a thin layer over **`certmate-sdk`** (`pip install certmate-sdk`) — a small,
+`httpx`-based Python client for the same REST API the web UI and MCP server drive. Both are
+first-party, live in [`clients/`](clients/), and are published to PyPI. The clip above is a real
+issuance over DNS-01 (Let's Encrypt staging); see [`demo/`](demo/).
+
+---
+
+## AI agents (MCP server)
+
+CertMate ships a first-party **Model Context Protocol** server, so an assistant like Claude can
+drive the same REST API the web UI and the CLI use — with the same auth and the same audit trail.
+It lives in [`mcp/`](mcp/), is Node.js (>= 20), and exposes **16 tools**: inventory and status
+(`certmate_list_certificates`, `certmate_get_certificate`, `certmate_diagnostics`,
+`certmate_get_activity`, …), lifecycle operations (`certmate_create_certificate`,
+`certmate_renew_certificate`, `certmate_get_job`, `certmate_set_auto_renew`, …), and delivery
+(`certmate_download_certificate`, `certmate_deploy_certificate`).
+
+```bash
+cd mcp && npm install
+```
+
+```jsonc
+// claude_desktop_config.json — or any MCP-capable client
+{
+  "mcpServers": {
+    "certmate": {
+      "command": "node",
+      "args": ["/path/to/certmate/mcp/index.js"],
+      "env": {
+        "CERTMATE_URL": "https://certmate.example.com",
+        "CERTMATE_TOKEN": "<a scoped API key with is_agent: true>"
+      }
+    }
+  }
+}
+```
+
+**Give it a scoped key, not your admin token.** A key created with `is_agent: true` (a checkbox
+under Settings → API Keys, or `is_agent` in `POST /api/keys`) makes every action the agent takes
+land in the audit chain as `actor.kind="agent"` rather than being indistinguishable from a human
+operator — which is the difference between an audit trail and a rumour. Scope the key to the
+domains the agent is allowed to touch.
+
+Full tool reference, attribution model and safety notes: **[docs/mcp.md](docs/mcp.md)**.
+
+---
+
 ## Why CertMate?
 
 CertMate solves the complexity of SSL certificate management in modern distributed architectures. Whether you're running a single application or managing certificates across multiple datacenters, CertMate provides:
@@ -53,10 +121,23 @@ CertMate solves the complexity of SSL certificate management in modern distribut
 - **Unified Backup System** - Atomic backups of settings and certificates ensuring data consistency
 - **Real-Time Dashboard** - SSE-powered live updates, command palette, keyboard shortcuts, dark mode
 
+> **CertMate runs as a single instance.** Its renewal scheduler runs inside the
+> web process, so a second replica is a second scheduler issuing against the
+> same certificate store — duplicate ACME orders, and the CA's
+> duplicate-certificate rate limit. The Helm chart refuses to render more than
+> one replica rather than let that happen quietly.
+>
+> This is a deliberate design choice, not a missing feature: one writer is what
+> makes certificate state safe without a distributed lock service. It scales
+> *up* (a single instance manages thousands of certificates across many
+> datacenters), not *out*. For availability, run active/standby with the data
+> volume on shared storage and fail over — see
+> [Availability and failover](docs/architecture.md#availability-and-failover).
+
 ## Key Features
 
 ### **Certificate Management**
-- **Multiple CA Providers** - Support for Let's Encrypt, ZeroSSL, Google Trust Services, Actalis, DigiCert ACME, SSL.com, and Private CAs
+- **Multiple CA Providers** - Support for Let's Encrypt, ZeroSSL, Google Trust Services, Actalis, DigiCert ACME, Sectigo, SSL.com, and Private CAs
 - **Let's Encrypt Integration** - Free, automated SSL certificates, with the staging environment available as a dedicated CA entry for testing
 - **DigiCert ACME Support** - Enterprise-grade certificates with External Account Binding (EAB)
 - **Actalis Support** - Free 90-day DV certificates from a European CA via ACME with EAB
@@ -95,7 +176,7 @@ CertMate solves the complexity of SSL certificate management in modern distribut
 - **Automatic Backups** - Settings and certificates backed up automatically on changes
 - **Manual Backup Creation** - On-demand backup creation via web UI or API
 - **Comprehensive Coverage** - Backs up DNS configurations, certificates, and application settings
-- **Retention Management** - Configurable retention policies with automatic cleanup
+- **Retention Management** - 50 most recent archives per type, and nothing older than 30 days — both constants; keep disaster-recovery archives off the host
 - **Easy Restore** - Simple restore process from any backup point with atomic consistency
 - **Download Support** - Export backups for external storage and disaster recovery
 
@@ -114,6 +195,7 @@ CertMate solves the complexity of SSL certificate management in modern distribut
 - **Multi-Channel Notifications** - Email (SMTP), Slack, Discord, Telegram, ntfy, Gotify, and generic webhooks
 - **Webhook HMAC Signatures** - SHA-256 signed payloads for secure webhook verification
 - **Deploy Hooks** - Post-issuance shell commands to reload Nginx/Apache or run custom scripts
+- **Expiry Warnings** - `certificate_expiring` at 14/7/3/1 days (at the renewal threshold when auto-renew is off), and `domain_expiring` for the domain registration itself at 60/30/14/7/1 days. Each threshold is announced once per expiry date
 - **Weekly Digest** - Scheduled email summary of certificate status and upcoming renewals
 - **SSE Real-Time Events** - Live push updates for certificate operations and deploy hook results
 
@@ -135,7 +217,7 @@ CertMate solves the complexity of SSL certificate management in modern distribut
 - **Activity Timeline** - Chronological view of all certificate and system events
 
 ### **Developer Experience**
-- **One-URL Downloads** - Simple certificate retrieval for automation (`/{domain}/tls`)
+- **One-URL Downloads** - Simple certificate retrieval for automation (`/api/certificates/{domain}/download`)
 - **Individual Component Downloads** - Fetch cert, key, chain, or fullchain separately
 - **Multiple Output Formats** - PEM, ZIP, individual files
 - **SDK Examples** - Python, Bash, Ansible, Terraform examples
@@ -149,37 +231,62 @@ CertMate solves the complexity of SSL certificate management in modern distribut
 
 CertMate supports a wide range of DNS providers through Let's Encrypt DNS-01 challenge via individual certbot plugins that provide reliable, well-tested DNS challenge support. The complete list is in the table below. **Multi-account support** is available for major providers, enabling enterprise-grade deployments with separate accounts for production, staging, and disaster recovery.
 
-| Provider               | Credentials Required          | Multi-Account | Use Case                        | Status     |
-| ---------------------- | ----------------------------- | ------------- | ------------------------------- | ---------- |
+| Provider               | Credentials Required          | Multi-Account | Use Case                        | Availability |
+| ---------------------- | ----------------------------- | ------------- | ------------------------------- | ------------ |
 | **Cloudflare**         | API Token                     | **Yes**       | Global CDN, Free tier available | **Stable** |
 | **AWS Route53**        | Access Key, Secret Key        | **Yes**       | AWS infrastructure, Enterprise  | **Stable** |
 | **Azure DNS**          | Service Principal credentials | **Yes**       | Microsoft ecosystem             | **Stable** |
 | **Google Cloud DNS**   | Service Account JSON          | **Yes**       | Google Cloud Platform           | **Stable** |
 | **DigitalOcean**       | API Token                     | **Yes**       | Cloud infrastructure            | **Stable** |
-| **PowerDNS**           | API URL, API Key              | **Yes**       | Self-hosted, On-premises        | **Stable** |
+| **PowerDNS**           | API URL, API Key              | **Yes**       | Self-hosted, On-premises        | **Separate install** |
+| **EfficientIP SOLIDserver** | Host, API Credentials     | **Yes**       | Enterprise DDI / Smart Architecture | **Stable** |
 | **RFC2136**            | Nameserver, TSIG Key/Secret   | **Yes**       | Standard DNS update protocol    | **Stable** |
 | **Linode** (Akamai Connected Cloud) | API Key             | Single        | Cloud hosting                   | **Stable** |
 | **Akamai Edge DNS**    | EdgeGrid (.edgerc) credentials| Single        | Enterprise managed DNS          | **Stable** |
 | **Gandi**              | API Token                     | Single        | Domain registrar                | **Stable** |
 | **OVH**                | API Credentials               | Single        | European hosting                | **Stable** |
-| **Namecheap**          | Username, API Key             | Single        | Domain registrar                | **Stable** |
+| **Namecheap**          | Username, API Key             | Single        | Domain registrar                | **Unavailable** |
 | **Vultr**              | API Key                       | Single        | Global cloud infrastructure     | **Stable** |
 | **DNS Made Easy**      | API Key, Secret Key           | Single        | Enterprise DNS management       | **Stable** |
 | **NS1**                | API Key                       | Single        | Intelligent DNS platform        | **Stable** |
-| **Hetzner**            | API Token                     | Single        | European cloud hosting          | **Stable** |
+| **Hetzner** (legacy DNS) | API Token                   | Single        | European cloud hosting          | **Stable** |
+| **Hetzner Cloud**      | API Token                     | Single        | Hetzner Cloud DNS (hcloud)      | **Stable** |
 | **Porkbun**            | API Key, Secret Key           | Single        | Domain registrar with DNS       | **Stable** |
 | **GoDaddy**            | API Key, Secret               | Single        | Popular domain registrar        | **Stable** |
-| **Hurricane Electric** | Username, Password            | Single        | Free DNS hosting                | **Stable** |
-| **Dynu**               | API Token                     | Single        | Dynamic DNS service             | **Stable** |
+| **Hurricane Electric** | Username, Password            | Single        | Free DNS hosting                | **Extended image** |
+| **Dynu**               | API Token                     | Single        | Dynamic DNS service             | **Extended image** |
 | **ArvanCloud**         | API Key                       | Single        | Iranian cloud provider          | **Stable** |
 | **Infomaniak**         | API Token                     | Single        | Swiss ISP & cloud provider      | **Stable** |
 | **ACME-DNS**           | JSON Config                   | Single        | Generic ACME-DNS server         | **Stable** |
+| **Scaleway**           | API Token (secret key)        | Single        | European cloud (EU-sovereign)   | **Separate install** |
+| **deSEC**              | API Token                     | Single        | Free, non-profit DNSSEC DNS     | **Stable** |
+| **DuckDNS**            | Token                         | Single        | Free dynamic DNS                | **Stable** |
+| **Custom Script**      | User-provided hook scripts    | Single        | Any provider via custom hooks   | **Stable** |
+
+**What the availability column means.** Until now it said `Stable` on all
+twenty-nine rows, which is not a status — a column with one value cannot be
+wrong about any particular provider, and four of them were wrong:
+
+| Value | Meaning |
+| ----- | ------- |
+| **Stable** | The plugin is pinned in `requirements.txt`, so it is in the default image. |
+| **Extended image** | Pinned in `requirements-extended.txt`. Build with `--build-arg EXTRA_REQUIREMENTS=requirements-extended.txt`. |
+| **Separate install** | Not shipped in any image. `pip install` it yourself, in its own environment where noted. |
+| **Unavailable** | No usable plugin exists for the supported stack. CertMate can be configured for it, but issuance will fail. |
+
+`Namecheap` is the **Unavailable** one: the only release on PyPI is
+`certbot-dns-namecheap` 1.0.0, an alpha targeting Python 2.7-3.8, incompatible
+with certbot 2.x on Python 3.12 — as `NamecheapStrategy`'s own docstring has
+said all along. Use ACME-DNS or the custom-script hook for Namecheap domains.
+`Scaleway` is alpha (0.0.7, declares Python 2.7 support) and `PowerDNS` pulls
+`dns-lexicon<=3.5.6`, which conflicts with the rest of the extended set — hence
+its own environment.
 
 ### Provider Categories
 
 - **Enterprise Multi-Account**: Cloudflare, AWS Route53, Azure DNS, Google Cloud DNS, DigitalOcean, PowerDNS, RFC2136
 - **Cloud Providers**: AWS Route53, Azure DNS, Google Cloud DNS, DigitalOcean, Linode, Akamai Edge DNS, Vultr, Hetzner
-- **Enterprise DNS**: Cloudflare, DNS Made Easy, NS1, PowerDNS
+- **Enterprise DNS**: Cloudflare, DNS Made Easy, NS1, PowerDNS, EfficientIP SOLIDserver
 - **Domain Registrars**: Gandi, OVH, Namecheap, Porkbun, GoDaddy 
 - **European Providers**: OVH, Gandi, Hetzner
 - **Free Services**: Hurricane Electric, Dynu
@@ -224,44 +331,41 @@ cp .env.example .env
 Edit `.env` file with your credentials:
 
 ```bash
-# Required: API Security
+# Recommended for any network-exposed deployment: API Security.
+# Auto-generated if unset, but a not-yet-onboarded instance serves the
+# first-run setup bypass to anyone who can reach it — set this (or bind to
+# localhost) before exposing CertMate. When set, the first-run screen asks
+# you to paste this same token once to create the initial admin.
 API_BEARER_TOKEN=your_super_secure_api_token_here_change_this
 
-# DNS Provider Configuration (choose one or multiple)
-
-# Option 1: Cloudflare (Recommended for beginners)
+# DNS Provider Configuration
+#
+# Cloudflare is the only provider configured from the environment: this token
+# bootstraps the default Cloudflare account on first run. Route53, Azure,
+# Google Cloud DNS, PowerDNS and the other 25+ providers are configured in the
+# web UI (Settings -> DNS Providers) or through the API — CertMate reads no
+# environment variable for any of them, so setting AWS_ACCESS_KEY_ID or
+# AZURE_CLIENT_ID here does nothing at all.
 CLOUDFLARE_TOKEN=your_cloudflare_api_token_here
 
-# Option 2: AWS Route53
-# AWS_ACCESS_KEY_ID=your_aws_access_key
-# AWS_SECRET_ACCESS_KEY=your_aws_secret_key
-# AWS_DEFAULT_REGION=us-east-1
-
-# Option 3: Azure DNS
-# AZURE_SUBSCRIPTION_ID=your_azure_subscription_id
-# AZURE_RESOURCE_GROUP=your_resource_group
-# AZURE_TENANT_ID=your_tenant_id
-# AZURE_CLIENT_ID=your_client_id
-# AZURE_CLIENT_SECRET=your_client_secret
-
-# Option 4: Google Cloud DNS
-# GOOGLE_PROJECT_ID=your_gcp_project_id
-# GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
-
-# Option 5: PowerDNS
-# POWERDNS_API_URL=https://your-powerdns-server:8081
-# POWERDNS_API_KEY=your_powerdns_api_key
+# Backups. Without a passphrase, automatic backups are written with their
+# secrets masked and CANNOT restore this instance — they are configuration
+# snapshots. With one, every automatic backup is complete and encrypted at
+# rest. Set it before you need it; see Backup and Recovery below.
+# CERTMATE_BACKUP_PASSPHRASE=a_long_random_passphrase
 
 # Optional: Application Settings
 SECRET_KEY=your_flask_secret_key_here
 FLASK_ENV=production
-HOST=0.0.0.0
 PORT=8000
+# Note: there is no HOST variable. The container binds 0.0.0.0 in its own
+# namespace — publish it as 127.0.0.1:8000:8000 to reach it on loopback only,
+# and front it with a reverse proxy for external access.
 ```
 
 > **Storage Backends**: By default, certificates are stored locally. For enterprise deployments, you can configure Azure Key Vault, AWS Secrets Manager, HashiCorp Vault, Infisical, or any S3-compatible object storage via the web interface after startup. See [Storage Backends](#certificate-storage-configuration) for details.
 
-> **Backup Best Practices**: CertMate includes a unified backup system that creates atomic snapshots of both settings and certificates. After setup, create your first backup from Settings → Backup Management.
+> **Backup Best Practices**: CertMate includes a unified backup system that creates atomic snapshots of both settings and certificates. **Set `CERTMATE_BACKUP_PASSPHRASE`.** With it, every automatic backup is complete and encrypted at rest, so it can actually restore this instance; without it, automatic backups keep their credentials masked and are configuration snapshots that cannot. The backup list marks which archives can restore, and Settings disables Restore on the ones that cannot. Then keep a copy off the host — archives on the host are pruned after 30 days, and a lost volume takes them with it. `POST /api/backups/upload` brings one back.
 
 ### 3. Deploy
 
@@ -306,7 +410,9 @@ curl -X POST "http://localhost:8000/api/certificates/create" \
 Choose the installation method that best fits your environment:
 
 ### Docker (Recommended)
-Perfect for production deployments with isolation and easy scaling. **Supports multiple architectures**: AMD64 (Intel/AMD), ARM64 (Apple Silicon, ARM servers), and ARM v7 (Raspberry Pi).
+Isolated, reproducible, and the way CertMate is tested and released. Run **one**
+container (see the single-instance note above); give it more CPU and memory
+rather than more replicas. **Published images cover two architectures**: AMD64 (Intel/AMD) and ARM64 (Apple Silicon, ARM servers). ARM v7 (32-bit Raspberry Pi) is not published; build it yourself with `./build-multiplatform.sh --platforms linux/arm/v7`.
 
 ```bash
 # Quick start with Docker Compose
@@ -325,8 +431,9 @@ docker-compose up -d
 # Build and push to Docker Hub for all platforms
 ./build-multiplatform.sh -r YOUR_DOCKERHUB_USERNAME -p
 
-# Use pre-built multi-platform image
-docker run --platform linux/arm64 -d --name certmate --env-file .env -p 8000:8000 USERNAME/certmate:latest
+# Use pre-built multi-platform image (bound to localhost; put it behind a
+# reverse proxy and enable authentication before exposing it externally)
+docker run --platform linux/arm64 -d --name certmate --env-file .env -p 127.0.0.1:8000:8000 fabriziosalmi/certmate:latest
 ```
 
 > **Multi-Platform Guide**: See [Docker Guide](docs/docker.md) for comprehensive multi-architecture setup instructions.
@@ -353,7 +460,9 @@ python app.py
 ```
 
 ### Kubernetes
-For container orchestration and high availability deployments.
+For container orchestration and managed rollouts. **`replicas: 1` is not an
+example value** — it is the supported configuration, and the Helm chart fails at
+template time if you change it.
 
 ```yaml
 # Example Kubernetes deployment
@@ -432,7 +541,7 @@ For production deployments, CertMate should run as a system service. This sectio
 ### Prerequisites
 
 - Linux system with systemd
-- Python 3.9 or higher
+- Python 3.12
 - Root/sudo access
 
 ### 1. Create Dedicated System User
@@ -452,17 +561,21 @@ sudo chown -R certmate:certmate /opt/certmate
 Set up the application in `/opt/certmate`:
 
 ```bash
-# If not already done, clone the repository
-git clone https://github.com/fabriziosalmi/certmate.git
-sudo mv certmate /opt/
+# Clone straight into the path. `useradd --create-home` above populated
+# /opt/certmate from /etc/skel, so it is not empty and `mv certmate /opt/`
+# fails with "Directory not empty" — leaving the next steps to run in a
+# directory with no application in it.
+sudo -u certmate git clone https://github.com/fabriziosalmi/certmate.git /opt/certmate
 cd /opt/certmate
 
 # Create Python virtual environment
 sudo -u certmate python3 -m venv venv
 sudo -u certmate ./venv/bin/pip install -r requirements.txt
 
-# Create necessary directories
-sudo -u certmate mkdir -p certificates data
+# Create necessary directories. All four: the startup writeability probe
+# in modules/core/factory.py checks certificates, data, backups AND logs,
+# and raises at boot if any of them is not writable.
+sudo -u certmate mkdir -p certificates data backups logs
 ```
 
 ### 3. Configure Environment Variables
@@ -471,21 +584,22 @@ Create environment file for the service:
 
 ```bash
 # Create environment file
-sudo tee /opt/certmate/.env > /dev/null <<EOF
+# The unit reads /etc/certmate/certmate.env (see certmate.service), not a
+# .env in the application directory.
+sudo install -d -m 750 /etc/certmate
+sudo tee /etc/certmate/certmate.env > /dev/null <<EOF
 # SECURITY: Change this token!
 API_BEARER_TOKEN=your_super_secure_api_token_here_change_this
-
-# Optional: Set specific host/port
-HOST=127.0.0.1
-PORT=8000
-
-# Optional: Enable debug mode (not recommended for production)
-FLASK_DEBUG=false
 EOF
 
+# PORT has no effect here: the port is the literal in the unit's ExecStart
+# (--bind 0.0.0.0:8000), and nothing in the application reads PORT under
+# gunicorn. To change it, edit ExecStart. PORT is honoured only by the
+# container image.
+
 # Set proper permissions
-sudo chown certmate:certmate /opt/certmate/.env
-sudo chmod 600 /opt/certmate/.env
+sudo chown root:certmate /etc/certmate/certmate.env
+sudo chmod 640 /etc/certmate/certmate.env
 ```
 
 ### 4. Install systemd Service
@@ -558,17 +672,17 @@ sudo chown -R certmate:certmate /opt/certmate
 
 # Set directory permissions
 sudo chmod 755 /opt/certmate
-sudo chmod 750 /opt/certmate/certificates /opt/certmate/data
+sudo chmod 750 /opt/certmate/certificates /opt/certmate/data /opt/certmate/backups /opt/certmate/logs
 
 # Set file permissions
 sudo chmod 644 /opt/certmate/*.py /opt/certmate/*.md
-sudo chmod 600 /opt/certmate/.env
+sudo chmod 640 /etc/certmate/certmate.env
 sudo chmod 755 /opt/certmate/venv/bin/*
 ```
 
 ### Security Notes
 
-- **API Bearer Token**: Always change the default API bearer token in `/opt/certmate/.env`
+- **API Bearer Token**: Always change the default API bearer token in `/etc/certmate/certmate.env`
 - **File Permissions**: The service runs with restricted permissions and limited filesystem access
 - **Network Access**: The service binds to `0.0.0.0:8000` by default - consider using a reverse proxy for production
 - **Environment File**: The `.env` file contains sensitive data and should be readable only by the `certmate` user
@@ -582,7 +696,7 @@ If the service fails to start:
 2. **View logs**: `sudo journalctl -u certmate --lines=100`
 3. **Verify permissions**: Ensure the `certmate` user can read all necessary files
 4. **Test manually**: `sudo -u certmate /opt/certmate/venv/bin/python /opt/certmate/app.py`
-5. **Check dependencies**: `sudo -u certmate /opt/certmate/venv/bin/python validate_dependencies.py`
+5. **Check dependencies**: `sudo -u certmate /opt/certmate/venv/bin/certbot --version` — the ACME client is the dependency that breaks first when the pins drift.
 
 For more detailed installation instructions, see the [Installation Guide](docs/installation.md).
 
@@ -626,15 +740,18 @@ For a Keycloak realm that exposes a `groups` claim, the configuration block in `
   ],
   "default_role": "viewer",
   "auto_create_users": true,
-  "link_by_email": true
+  "link_by_email": true,
+  "sync_role_on_login": true
 }
 ```
 
 ### Provisioning and linking
 
 - **Just-in-time provisioning** (`auto_create_users`) creates a CertMate user row on first login. The row has an empty password hash so JIT-provisioned SSO accounts cannot fall back to local login.
-- **Email linking** (`link_by_email`) detects collisions with existing local users and merges identities — the user keeps their existing role and **their existing password hash**, so a local-then-linked account can still log in either way during a rollout. Disable `link_by_email` if you want JIT-only provisioning with no local-password fallback.
+- **Email linking** (`link_by_email`) detects collisions with existing local users and merges identities — the user keeps **their existing password hash**, so a local-then-linked account can still log in either way during a rollout. Their role is preserved at the moment of linking, and from the *next* login onwards it is governed by `sync_role_on_login` like anyone else's (see below): with the default `true`, a linked local admin whose IdP groups map to `viewer` becomes a viewer on their second login. Disable `link_by_email` if you want JIT-only provisioning with no local-password fallback.
 - Subject (`sub` + `iss`) lookup always wins over email matching, so an already-linked SSO user is never accidentally re-merged when their IdP email changes.
+- **Role sync** (`sync_role_on_login`, default `true`) re-derives the role from the current claims on every login, so removing someone from an admin group in the IdP demotes them in CertMate too. Set it to `false` when the IdP only authenticates and roles are managed inside CertMate — an admin promoting someone by hand then survives their next login.
+- A **disabled** CertMate user is refused at SSO login exactly as at local login: disabling an account locks it out regardless of how it authenticates.
 
 ### Security
 
@@ -656,263 +773,29 @@ Include the Authorization header in all API requests:
 Authorization: Bearer your_api_token_here
 ```
 
-### Core Endpoints
+### Endpoints
 
-#### Health & Status
+The full reference is **[docs/api.md](docs/api.md)**: every endpoint, the role
+it needs, the shape it answers with, and the error format.
+
+This section used to be a second catalogue, and the two had drifted: of the
+endpoints each named, six were in both. A reader had no way to tell which was
+current, and the reference was missing surfaces this file carried, which is
+where the storage backend, backup, metrics and zombie-scan sections in
+docs/api.md came from.
+
+A worked example, so the shape is here even if the list is not:
+
 ```bash
-# Health check
-GET /health
+# Every request carries the token.
+curl -H "Authorization: Bearer $CERTMATE_TOKEN" \
+  https://certmate.example.com/api/certificates
 
-# API documentation
-GET /docs/ # Swagger UI
-GET /redoc/ # ReDoc documentation
-
-# Prometheus/OpenMetrics monitoring
-GET /metrics # Prometheus-compatible metrics
-GET /api/metrics # JSON metrics summary
-```
-
-#### Settings Management
-```bash
-# Get current settings
-GET /api/settings
-Authorization: Bearer your_token_here
-
-# Update settings
-POST /api/settings
-Authorization: Bearer your_token_here
-Content-Type: application/json
-
-{
- "dns_provider": "cloudflare",
- "dns_providers": {
- "cloudflare": {
- "api_token": "your_cloudflare_token"
- }
- },
- "domains": [{
- "domain": "example.com",
- "dns_provider": "cloudflare"
- }
- ],
- "email": "admin@example.com",
- "auto_renew": true
-}
-```
-
-#### Certificate Management
-```bash
-# List all certificates
-GET /api/certificates
-Authorization: Bearer your_token_here
-
-# Create new certificate
-POST /api/certificates/create
-Authorization: Bearer your_token_here
-Content-Type: application/json
-
-{
- "domain": "example.com",
- "dns_provider": "cloudflare", # Optional, uses default from settings
- "account_id": "production" # Optional, specify which account to use
-}
-
-# Create SAN certificate (multiple domains)
-POST /api/certificates/create
-Authorization: Bearer your_token_here
-Content-Type: application/json
-
-{
- "domain": "example.com",
- "san_domains": ["www.example.com", "mail.example.com", "api.example.com"],
- "dns_provider": "cloudflare"
-}
-# This creates a single certificate covering all specified domains.
-# The primary domain is "example.com" and san_domains are additional 
-# Subject Alternative Names included in the certificate.
-# Note: All domains must use the same DNS provider for validation.
-
-# Create certificate with specific account
-POST /api/certificates/create
-Authorization: Bearer your_token_here
-Content-Type: application/json
-
-{
- "domain": "staging.example.com",
- "dns_provider": "cloudflare",
- "account_id": "staging"
-}
-
-# Create certificate with DNS alias via CNAME delegation
-POST /api/certificates/create
-Authorization: Bearer your_token_here
-Content-Type: application/json
-
-{
- "domain": "example.com",
- "dns_provider": "cloudflare",
- "domain_alias": "validation.example.org"
-}
-# DNS alias validation works via CNAME delegation. Before issuing, create
-# a CNAME record in your DNS zone:
-#
-#   _acme-challenge.example.com  CNAME  _acme-challenge.validation.example.org
-#
-# CertMate creates the TXT record on the provider-managed alias name, and
-# Let's Encrypt follows the CNAME chain during the DNS-01 challenge.
-# Alias mode is supported for CertMate's first-class DNS providers; generic
-# fallback providers are rejected until a dedicated adapter exists.
-# This is useful when:
-# - The primary domain's DNS does not support an API
-# - You want to centralize ACME validations on a dedicated domain
-# - There are DNS restrictions on the primary zone
-
-# Renew certificate
-POST /api/certificates/example.com/renew
-Authorization: Bearer your_token_here
-
-# Download certificate bundle as JSON
-GET /api/certificates/example.com/download?format=json
-Authorization: Bearer your_token_here
-
-# Check certificate deployment status
-GET /api/certificates/example.com/deployment-status
-Authorization: Bearer your_token_here
-
-# Scan filesystem for orphan ("zombie") certificates no longer tracked by Certbot
-POST /api/certificates/zombies/scan
-Authorization: Bearer your_token_here
-```
-
-#### Multi-Account Management
-```bash
-# Add multiple accounts for a provider
-POST /api/settings/dns-providers/cloudflare/accounts
-Authorization: Bearer your_token_here
-Content-Type: application/json
-
-{
- "account_id": "production",
- "config": {
- "name": "Production Environment",
- "description": "Main production Cloudflare account",
- "api_token": "your_production_token_here"
- }
-}
-
-# List all accounts for a provider
-GET /api/settings/dns-providers/cloudflare/accounts
-Authorization: Bearer your_token_here
-
-# Set default account for a provider
-PUT /api/settings/dns-providers/cloudflare/default-account
-Authorization: Bearer your_token_here
-Content-Type: application/json
-
-{
- "account_id": "production"
-}
-
-# Update account configuration
-PUT /api/settings/dns-providers/cloudflare/accounts/staging
-Authorization: Bearer your_token_here
-Content-Type: application/json
-
-{
- "config": {
- "name": "Staging & Testing",
- "description": "Updated staging environment",
- "api_token": "new_staging_token_here"
- }
-}
-```
-
-#### Storage Backend Management
-```bash
-# Get current storage backend information
-GET /api/storage/info
-Authorization: Bearer your_token_here
-
-# Update storage backend configuration
-POST /api/storage/config
-Authorization: Bearer your_token_here
-Content-Type: application/json
-
-{
- "backend": "azure_keyvault",
- "azure_keyvault": {
- "vault_url": "https://yourvault.vault.azure.net/",
- "tenant_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
- "client_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
- "client_secret": "your_client_secret"
- }
-}
-
-# Test storage backend connectivity
-POST /api/storage/test
-Authorization: Bearer your_token_here
-Content-Type: application/json
-
-{
- "backend": "aws_secrets_manager",
- "config": {
- "region": "us-east-1",
- "access_key_id": "AKIAIOSFODNN7EXAMPLE",
- "secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
- }
-}
-
-# Migrate certificates between storage backends
-POST /api/storage/migrate
-Authorization: Bearer your_token_here
-Content-Type: application/json
-
-{
- "source_backend": "local_filesystem",
- "target_backend": "azure_keyvault",
- "source_config": {
- "cert_dir": "certificates"
- },
- "target_config": {
- "vault_url": "https://yourvault.vault.azure.net/",
- "tenant_id": "...",
- "client_id": "...",
- "client_secret": "..."
- }
-}
-```
-
-#### Backup Management
-```bash
-# List all available backups
-GET /api/backups
-Authorization: Bearer your_token_here
-
-# Create new backup
-POST /api/backups/create
-Authorization: Bearer your_token_here
-Content-Type: application/json
-
-{
- "reason": "manual_backup"
-}
-
-# Download specific backup
-GET /api/backups/download/unified/{filename}
-Authorization: Bearer your_token_here
-
-# Example:
-GET /api/backups/download/unified/unified_backup_20241225_120000.zip
-
-# Restore from backup
-POST /api/backups/restore/unified
-Authorization: Bearer your_token_here
-Content-Type: application/json
-
-{
- "filename": "unified_backup_20241225_120000.zip",
- "create_backup_before_restore": true
-}
+# Issue one. The response is the certificate record, not a job id.
+curl -X POST -H "Authorization: Bearer $CERTMATE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"domain": "api.example.com", "dns_provider": "cloudflare"}' \
+  https://certmate.example.com/api/certificates/create
 ```
 
 ### Automation-Friendly Download URL
@@ -920,16 +803,21 @@ Content-Type: application/json
 **Certificate downloads for infrastructure automation:**
 
 ```bash
-# Download certificates via simple URL pattern
-GET /{domain}/tls
+# Download every certificate file as one ZIP
+GET /api/certificates/{domain}/download
 Authorization: Bearer your_token_here
 ```
 
 This endpoint returns a ZIP file containing all certificate files:
 - `cert.pem` - Server certificate
-- `chain.pem` - Intermediate certificate chain 
+- `chain.pem` - Intermediate certificate chain
 - `fullchain.pem` - Full certificate chain (cert + chain)
 - `privkey.pem` - Private key
+
+For a single file, use the path form
+`GET /api/certificates/{domain}/download/{cert|chain|fullchain|privkey|combined}`.
+`privkey` and `combined` require operator; a viewer may pull the public
+material only.
 
 ### Integration Examples
 
@@ -1003,62 +891,13 @@ The same JSON response shape can be consumed directly by Ansible's `uri` module 
 
 #### Infrastructure as Code Examples
 
-**Terraform Provider Example:**
-```hcl
-# Configure the CertMate provider
-terraform {
- required_providers {
- certmate = {
- source = "local/certmate"
- version = "~> 1.0"
- }
- }
-}
+**Terraform:** there is no CertMate Terraform provider. This README used to
+show one, with `source = "local/certmate"` and `certmate_certificate`
+resources; neither the registry nor any repository has it, so the example
+could not be run. Drive the REST API from Terraform with the `http` provider
+or a `local-exec`, or use the Ansible and shell examples below, which are
+against the real API.
 
-provider "certmate" {
- endpoint = "https://certmate.company.com"
- token = var.certmate_token
-}
-
-# Create certificates for multiple domains with different accounts
-resource "certmate_certificate" "api" {
- domain = "api.company.com"
- dns_provider = "cloudflare"
- account_id = "production"
-}
-
-resource "certmate_certificate" "web" {
- domain = "web.company.com" 
- dns_provider = "route53"
- account_id = "main-aws"
-}
-
-resource "certmate_certificate" "staging" {
- domain = "staging.company.com"
- dns_provider = "cloudflare"
- account_id = "staging"
-}
-
-# Download certificates to local files
-data "certmate_certificate_download" "api" {
- domain = certmate_certificate.api.domain
-}
-
-# Use in nginx configuration
-resource "kubernetes_secret" "api_tls" {
- metadata {
- name = "api-tls"
- namespace = "default"
- }
- 
- type = "kubernetes.io/tls"
- 
- data = {
- "tls.crt" = data.certmate_certificate_download.api.fullchain_pem
- "tls.key" = data.certmate_certificate_download.api.private_key_pem
- }
-}
-```
 **Bash Automation Script:**
 ```bash
 #!/bin/bash
@@ -1077,7 +916,7 @@ log() {
 }
 
 create_backup() {
- if [[-d "$CERT_DIR" ]]; then
+ if [[ -d "$CERT_DIR" ]]; then
  log "Creating backup of existing certificates"
  mkdir -p "$BACKUP_DIR"
  cp -r "$CERT_DIR"/* "$BACKUP_DIR/" || true
@@ -1160,7 +999,7 @@ main "$@"
  tasks:
  - name: Configure Cloudflare accounts
  uri:
- url: "{{ certmate_url }}/api/settings/dns-providers/cloudflare/accounts"
+ url: "{{ certmate_url }}/api/dns/cloudflare/accounts"
  method: POST
  headers:
  Authorization: "Bearer {{ certmate_token }}"
@@ -1356,6 +1195,55 @@ main "$@"
  loop: "{{ services_to_restart | default([]) }}"
 ```
 
+### API contract version
+
+Two versions appear in API responses and they answer different questions.
+
+| | what it is | when it moves |
+|---|---|---|
+| `version` (in `/health`, in the Swagger document) | the **release** number | every release |
+| `api_contract_version` (in `/health`), `X-CertMate-API-Version` (on **every** response) | the **interface** | only when this surface changes |
+
+A client deciding whether it still works should read the second. The first moves
+on every patch whether or not anything a caller depends on moved with it.
+
+- **minor** bump — the surface grew in a way you can ignore: a new endpoint, a
+  new field on a response, a new optional request field;
+- **major** bump — something you may depend on went away or changed meaning: an
+  endpoint removed, a response field removed or retyped, a request field that
+  became required, a status code that changed for an existing condition.
+
+Deprecating something bumps **neither** — that is the point of deprecating
+rather than removing.
+
+### Deprecation
+
+An endpoint on its way out answers normally and says so in its headers, so a
+client can warn instead of failing:
+
+```
+Deprecation: @1757289600                      # RFC 9745 — when it became deprecated
+Sunset: Mon, 08 Mar 2027 00:00:00 GMT         # RFC 8594 — earliest it may stop answering
+Link: <https://…/docs/api.md#…>; rel="deprecation"
+```
+
+Nothing is deprecated today. The headers appear only on an endpoint that is.
+
+### Request validation
+
+The API validates request bodies against the models published in
+`/api/swagger.json`. A missing required field or a wrong type is refused with
+`400` and a body naming the field, before the request reaches the application.
+
+One consequence worth knowing: **send a field or leave it out — do not send
+`null`.** Omitting an optional field means "use the default"; an explicit
+`null` is a type error (`"None is not of type 'integer'"`), because `null` is
+not an integer.
+
+Values outside a documented `enum` are refused by the application rather than
+by the schema, with a message naming the accepted set — for example
+`key_size must be one of [2048, 3072, 4096], got 1024`.
+
 ## Configuration Guide
 
 ### Environment Variables
@@ -1365,11 +1253,69 @@ main "$@"
 | `API_BEARER_TOKEN`      |          | auto-generated | Bearer token for API authentication |
 | `API_BEARER_TOKEN_FILE` |          | -              | Path to a file containing the API bearer token (takes precedence over `API_BEARER_TOKEN`) |
 | `SECRET_KEY`            |          | auto-generated | Flask secret key for sessions       |
-| `SECRET_KEY_FILE`       |          | -              | Path to a file containing the Flask secret key (takes precedence over `SECRET_KEY`) |
-| `HOST`             |          | `127.0.0.1`    | Server bind address                 |
-| `PORT`             |          | `8000`         | Server port                         |
-| `FLASK_ENV`        |          | `production`   | Flask environment                   |
-| `FLASK_DEBUG`      |          | `false`        | Enable debug mode                   |
+| `SECRET_KEY_FILE`       |          | -              | Path to a file containing the Flask secret key (takes precedence over `SECRET_KEY`). **If set and unreadable or empty, CertMate refuses to start** rather than inventing one: a secret that failed to mount is a configuration error, and a fresh key would sign out every user on every restart |
+| `PORT`             |          | `8000`         | Server port (honoured by the container entrypoint) |
+| `FLASK_ENV`        |          | `production`   | Flask environment. `production` refuses `--debug`  |
+| `CERTMATE_LOG_FILE` |         | -              | Also write logs to this path. Off by default: the container logs to stdout, which is what `docker logs` and log shippers expect. Set it (e.g. `/app/logs/certmate.log`) to keep a file on the mounted volume — it is what the web UI's log stream reads |
+| `CERTMATE_LOG_MAX_BYTES` |    | `10485760`     | Rotate the log file at this size (10 MB). File logging is always rotated — there is no way to configure an unbounded one |
+| `CERTMATE_LOG_BACKUP_COUNT` | | `5`            | How many rotated files to keep (~60 MB ceiling with the default size) |
+| `CERTMATE_AUDIT_LOG_MAX_BYTES` | | `10485760`  | Rotate the human-readable audit log (`logs/audit/certificate_audit.log`) at this size. `0` disables rotation. Does **not** apply to the tamper-evident hash chain in `data/audit/`, which is never rotated |
+| `CERTMATE_AUDIT_LOG_BACKUP_COUNT` | | `5`       | How many rotated audit logs to keep. Note the Activity page tails only the active file, so it shows fewer entries immediately after a roll |
+| `CERTMATE_LOG_LEVEL` |        | `INFO`         | DEBUG / INFO / WARNING / ERROR |
+| `CERTMATE_LOG_JSON` |         | `true`         | JSON log lines (set `false` for human-readable) |
+
+#### Deployment and networking
+
+| Variable           | Required | Default        | Description                         |
+| ------------------ | -------- | -------------- | ----------------------------------- |
+| `BEHIND_PROXY`     |          | `false`        | Trust `X-Forwarded-*` from one reverse proxy hop (`ProxyFix`). Set it only when a proxy actually sits in front: with it on and no proxy, a client can forge its own address, which is what the login rate limit is keyed on |
+| `PREFERRED_URL_SCHEME` |      | -              | Set to `https` when TLS terminates in front of CertMate. It marks the session cookie `Secure`, so the browser stops sending it over plain HTTP |
+| `CORS_ORIGINS`     |          | -              | Comma-separated origins allowed to call the API from a browser. Empty means the built-in default; this is not a way to open the API to everyone |
+| `ACME_CHALLENGES_DIR` |       | `<cwd>/data/acme-challenges` | Where http-01 tokens are written and served from. Override it when the webroot is somewhere else; the hook, the pre-creation and the route all read this one value |
+| `LETSENCRYPT_EMAIL` |         | -              | ACME account email. **Takes precedence over the value saved in the UI**, so an instance that keeps changing its email back is usually this |
+| `CLOUDFLARE_TOKEN` |          | -              | Seeds the default Cloudflare DNS account on first start, so a container can be brought up already able to issue. Once settings.json exists the stored value is what is used |
+
+#### Security behaviour
+
+| Variable           | Required | Default        | Description                         |
+| ------------------ | -------- | -------------- | ----------------------------------- |
+| `CERTMATE_ENABLE_HSTS` |      | `false`        | Send `Strict-Transport-Security`, and mark the session cookie `Secure`. Only set it when TLS really terminates in front — an HSTS header on a plain-HTTP instance locks browsers out of it |
+| `SESSION_TIMEOUT_HOURS` |     | `8`            | How long a login session stays valid. The server record and the browser cookie both use this value, so they cannot drift apart |
+| `CERTMATE_ALLOW_INTERNAL_WEBHOOKS` | | `false` | Allow notification webhooks to private, loopback and link-local addresses. Off by default because a webhook URL is operator-supplied and an SSRF into the host network is the obvious abuse |
+| `CERTMATE_PROBE_ALLOW_PRIVATE` | |  `false`      | Same relaxation for the certificate probe behind `POST /api/probe` (discovery sweeps ignore it and use `monitored_endpoints.allow_private` from settings): allow it to connect to private addresses. Needed to probe a service on the same host, and it removes an SSRF guard |
+| `CERTMATE_AUDIT_CHAIN` |      | `1`            | Set `0` to stop writing the tamper-evident audit hash chain. A kill switch, not a tuning knob: with it off, `/api/audit/verify` can no longer prove the log was not edited |
+| `AUDIT_SIGNING_KEY_FILE` |    | -              | Path to an Ed25519 private key that signs audit checkpoints, so the key can live off this box. If set and unreadable, signing is DISABLED rather than a new key generated — a fresh key would fork the instance's identity and make earlier signatures unverifiable |
+| `CERTMATE_ALLOW_SCHEMA_DOWNGRADE` | | `0`       | Set `1` to let this build read and overwrite a `settings.json` or `metadata.json` written by a NEWER version. It will drop fields it does not understand — that is the whole reason it refuses by default |
+
+#### Timing and diagnostics
+
+| Variable           | Required | Default        | Description                         |
+| ------------------ | -------- | -------------- | ----------------------------------- |
+| `CERTMATE_DOMAIN_LOCK_TIMEOUT` | | `5`         | Seconds to wait for a domain's lock before answering 409 "operation in progress". Clamped to 0-60 |
+| `CERTMATE_CERT_INFO_CACHE_TTL` | | `60`        | Seconds a parsed certificate's details stay cached. `0` re-reads from disk on every request. Clamped to 0-3600 |
+| `CERTMATE_ISSUANCE_WORKERS` | | `2`            | Threads serving asynchronous issuance jobs. Clamped to 1-16; each one can be running a certbot subprocess |
+| `CERTMATE_CERT_DIR` |    | `<install>/certificates` | Where issued certificates live. Absolute, or relative to the working directory. The local storage backend follows it too, unless `certificate_storage.cert_dir` names a directory of its own |
+| `CERTMATE_DATA_DIR` |    | `<install>/data`         | Settings, the certificate inventory and the audit chain |
+| `CERTMATE_BACKUP_DIR` |  | `<install>/backups`      | Where backups are written and restored from |
+| `CERTMATE_LOGS_DIR` |    | `<install>/logs`         | Application and audit logs |
+| `CERTMATE_ISSUANCE_QUEUE_LIMIT` | | `20`        | How much unfinished issuance may exist at once, counting queued and running jobs. Clamped to 1-500. Beyond it the async endpoints answer `429 ISSUANCE_QUEUE_FULL` instead of accepting work that will not be reached for hours |
+| `CERTMATE_ISSUANCE_JOB_HISTORY` | | `200`      | How many finished issuance jobs stay queryable via `/api/certificates/jobs`. Clamped to 20-2000 |
+| `CERTMATE_EVENT_WORKERS` |    | `4`            | Threads dispatching event listeners (deploy hooks, cache invalidation). Clamped to 1-32. Nothing is dropped when they are busy; the backlog is logged instead |
+| `CERTMATE_EVENT_DRAIN_SECONDS` |    | `5`            | How long a shutdown waits for queued event dispatches to start before giving up on them. Clamped to 0-60. Whatever is left is logged with its event and domain, so a deploy hook that never ran after a renewal is named rather than lost |
+| `CERTMATE_CERTBOT_PROBE_TTL` |    | `300`          | Seconds before the certbot readiness answer is re-checked. Clamped to 30-3600. The probe used to run once per process, so a transient failure at boot made the instance permanently unready and a certbot that broke later never turned `/health/ready` red |
+| `CERTMATE_PROBE_TIMEOUT_SECONDS` | | `5`       | Connection timeout of the certificate probe used by discovery sweeps and `POST /api/probe`. Clamped to 1-30. The deployment check has its own, `CERTMATE_TLS_PROBE_TIMEOUT_SECONDS` |
+| `CERTMATE_LAST_USED_PERSIST_SECONDS` | | `60`  | How often a session's "last used" timestamp is written to disk. `0` writes on every request, which is the original behaviour and one write per request |
+| `CERTMATE_SLOW_REQUEST_LOGGING` | | `true`       | Log a warning, with the thread's stack, for requests that outlive the threshold below. The stack is what makes a hung request diagnosable after the fact |
+| `CERTMATE_SLOW_REQUEST_THRESHOLD_SECONDS` | | `30` | How long a request must run before it is reported |
+| `CERTMATE_SLOW_REQUEST_SCAN_SECONDS` | | `10`  | How often the watchdog looks for requests that are still running |
+| `CERTMATE_SLOW_REQUEST_REPEAT_SECONDS` | | threshold | How often a still-running request is reported again |
+
+> **Bind address is not an environment variable.** The container always binds
+> `0.0.0.0` inside its own network namespace; to expose it only on loopback,
+> publish it that way — `-p 127.0.0.1:8000:8000`. Running `app.py` directly
+> (development only) takes `--host` / `--port` / `--debug` as CLI flags.
+> `HOST` and `FLASK_DEBUG` are read by nothing, and setting them has never
+> had any effect (#429).
 
 ### DNS Provider Configuration
 
@@ -1454,6 +1400,7 @@ CertMate supports multiple storage backends for certificates, providing flexibil
 > - **AWS Secrets Manager**: Ideal for AWS infrastructure and cross-region deployments
 > - **HashiCorp Vault**: Excellent for multi-cloud environments and advanced secret management
 > - **Infisical**: Great for teams wanting open-source secret management with collaboration features
+> - **S3-compatible object storage**: One bucket on any S3 endpoint (Hetzner, Contabo, OVHcloud, Scaleway, Exoscale, Wasabi, MinIO, AWS)
 
 #### Local Filesystem (Default)
 The default storage backend stores certificates in the local filesystem with secure permissions:
@@ -1466,6 +1413,7 @@ certificates/
  chain.pem # Certificate chain
  fullchain.pem # Full chain
  privkey.pem # Private key (600 permissions)
+ metadata.json # Certificate metadata (600 permissions)
 ```
 
 **Configuration:**
@@ -1627,6 +1575,30 @@ pip install -r requirements-infisical-storage.txt
 - Self-hosted secret management
 - Multi-environment certificate management
 
+#### S3-Compatible Object Storage
+One backend for any S3 endpoint, selected by `endpoint_url`: Hetzner, Contabo, OVHcloud, Scaleway, Exoscale, Wasabi, self-hosted MinIO, or AWS S3 itself. Each domain is stored as one JSON object, `<prefix>/<domain>.json`, holding the certificate files and their metadata.
+
+**Required Dependencies:** `boto3`, already in `requirements.txt` and `requirements-storage-all.txt` (not in `requirements-minimal.txt`).
+
+**Configuration:**
+```json
+{
+ "certificate_storage": {
+ "backend": "s3_compatible",
+ "s3_compatible": {
+ "endpoint_url": "https://fsn1.your-objectstorage.com",
+ "bucket": "certmate",
+ "access_key_id": "your_access_key_id",
+ "secret_access_key": "your_secret_access_key",
+ "region": "us-east-1",
+ "prefix": "certmate/certificates"
+ }
+ }
+}
+```
+
+`endpoint_url`, `bucket`, `access_key_id` and `secret_access_key` are required; `region` defaults to `us-east-1` and `prefix` to `certmate/certificates`.
+
 #### Quick Installation Guide
 
 **Install All Storage Backends:**
@@ -1648,6 +1620,8 @@ pip install -r requirements-vault-storage.txt
 
 # Infisical only
 pip install -r requirements-infisical-storage.txt
+
+# S3-compatible storage: no separate file — boto3 is in requirements.txt
 ```
 
 **Requirements File Overview:**
@@ -1687,13 +1661,15 @@ curl -X POST "http://localhost:8000/api/storage/test" \
 curl -X GET "http://localhost:8000/api/storage/info" \
  -H "Authorization: Bearer your_token"
 
-# Update storage backend configuration
+# Update storage backend configuration. Unlike /api/storage/test, the settings
+# go under a key named after the backend, not under "config" — a "config" key
+# here is ignored and the backend is saved with no credentials.
 curl -X POST "http://localhost:8000/api/storage/config" \
  -H "Authorization: Bearer your_token" \
  -H "Content-Type: application/json" \
  -d '{
  "backend": "hashicorp_vault",
- "config": {
+ "hashicorp_vault": {
  "vault_url": "https://vault.example.com:8200",
  "vault_token": "hvs.xxxxxxxxxxxxxxxxxxxx",
  "mount_point": "secret",
@@ -1702,14 +1678,16 @@ curl -X POST "http://localhost:8000/api/storage/config" \
  }'
 ```
 
-** Migrating Between Backends:**
+**Migrating Between Backends:**
 
-*Zero-Downtime Migration Process:*
-1. Configure the new storage backend
-2. Test connectivity and verify access
-3. Use the migration tool in Settings or API
-4. Verify all certificates are accessible in new backend
-5. Optionally clean up old storage
+Migration copies every certificate from a source backend to a target backend,
+one domain at a time. When no `source_backend` is given, the source is the
+backend currently saved in settings, so migrate **before** switching:
+1. Test the new backend (`POST /api/storage/test`)
+2. Migrate (`POST /api/storage/migrate`, or the migration tool in Settings)
+3. Check the response: `migrated_count`, `failed_count`, and `migration_results`, one `true`/`false` per domain
+4. Switch the active backend (`POST /api/storage/config`)
+5. Optionally clean up the old storage — CertMate never deletes it
 
 *Migration via API:*
 ```bash
@@ -1723,16 +1701,14 @@ curl -X POST "http://localhost:8000/api/storage/migrate" \
  "region": "us-east-1",
  "access_key_id": "AKIAIOSFODNN7EXAMPLE", 
  "secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
- },
- "verify_migration": true
+ }
  }'
 ```
 
-*Migration Benefits:*
-- Zero downtime during migration
-- Automatic verification of migrated certificates
-- Rollback capability if issues are detected
-- Preservation of certificate metadata and permissions
+Each certificate's metadata is copied along with its files. There is no
+separate verification pass and no rollback: a domain whose copy failed is
+reported as `false` in `migration_results`, and the source is left untouched,
+so re-running the migration or staying on the old backend are both safe.
 
 **Backward Compatibility:**
 - Existing installations continue working without changes
@@ -1748,7 +1724,7 @@ certmate/
  requirements.txt # Python dependencies
  docker-compose.yml # Docker Compose configuration
  Dockerfile # Container build instructions
- nginx.conf # Nginx reverse proxy config
+ nginx.conf.example # Nginx reverse proxy config template (copy to nginx.conf)
  .env.example # Environment template
  README.md # This documentation
  CONTRIBUTING.md # Contribution guidelines
@@ -1812,6 +1788,9 @@ certmate/
   Unknown or rejected keys are returned in a `400` response with a `hint` field pointing at the correct endpoint.
 - **Audit Trail for Configuration Changes**: every mutation to settings, the auth-config toggle, users, scoped API keys, and deploy hooks is recorded with operator identity and source IP. Authorization denials (out-of-scope domain access, blocked field writes) are recorded too. Logs are written to `data/audit/certificate_audit.log` as one JSON object per line — pipeable into your SIEM of choice.
 
+#### The Setup Window
+Until the first operator credential exists — a local admin with local auth enabled, `API_BEARER_TOKEN`, or OIDC — every request is served as admin to anyone who can reach the instance. So during setup CertMate only **bootstraps**: it creates the first admin and turns login on. API keys and further users are refused with `409 SETUP_BOOTSTRAP_ONLY` until setup is complete, because anything created in that window would be created by whoever was there and would outlive it. API keys that an older version let be created during setup stay valid but are flagged in Settings → API Keys and in the startup log, until an operator confirms or revokes each one.
+
 #### Certificate Security
 - **File Permissions**: Private keys stored with `600` permissions
 - **Directory Permissions**: Certificate directories with `700` permissions
@@ -1856,7 +1835,14 @@ services:
   certmate:
     image: certmate:latest
     deploy:
-      replicas: 2
+      # CertMate runs an in-process renewal scheduler and per-domain locks, so
+      # it must run as a SINGLE writer. Multiple replicas (or >1 gunicorn
+      # worker) each fire the renewal check and would issue duplicate ACME
+      # orders and hit the CA's duplicate-certificate rate limit. A host-local
+      # flock guards multiple workers/containers on a *shared* data volume, but
+      # the safe default is one writer. For HA, front a single active instance
+      # rather than scaling this service.
+      replicas: 1
       resources:
         limits:
           cpus: '1.0'
@@ -1866,8 +1852,11 @@ services:
           memory: 256M
     environment:
       - FLASK_ENV=production
-      - GUNICORN_WORKERS=4
-      - GUNICORN_THREADS=2
+      # The worker and thread counts are fixed in the image
+      # (`--workers 1 --threads 8`): one worker because the scheduler runs
+      # in-process and a second would duplicate every renewal. GUNICORN_TIMEOUT
+      # is the one that is read.
+      - GUNICORN_TIMEOUT=300   # the image default; raise it for slow DNS providers
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
@@ -1914,12 +1903,34 @@ CertMate provides comprehensive backup and recovery capabilities built directly 
 - **Atomic Operation**: Creates a single ZIP file containing both settings and certificates
 - **Data Consistency**: Ensures settings and certificates are always in sync
 - **Prevents Corruption**: Eliminates configuration/certificate mismatches
-- **Simplified Management**: One backup file contains everything needed for complete restoration
+- **Simplified Management**: One file per snapshot. A disaster-recovery archive (`include_secrets=true`) contains everything needed for complete restoration; the default share-safe archive contains certificates, chains, metadata, the audit chain and the inventory — no credentials and no private keys
+
+**Two kinds of archive:**
+- **Share-safe**: settings with every credential masked, and **no private keys** — no ACME `privkey.pem`, no ACME account key, no private-CA key, no `.pfx`. Certificates, chains, metadata, the audit chain and the inventory are all there. The manifest says so (`secrets_masked`, `key_material_excluded`). Such an archive cannot restore an instance on its own: `GET /api/backups` reports it with `can_restore: false` and Settings disables its Restore button. The restore API does not read `can_restore`. It refuses a share-safe archive when this instance already holds certificates; otherwise it restores it, keeping the credentials already in this instance's `settings.json`, or — on an instance with no `settings.json` — leaving every credential masked, to be re-entered before the next renewal.
+- **Disaster recovery**: plaintext settings and every key — encrypted at rest when `CERTMATE_BACKUP_PASSPHRASE` is set. This is the archive to keep off-site.
+
+**Which one you get automatically depends on one thing:** whether a backup passphrase is
+configured. With `CERTMATE_BACKUP_PASSPHRASE` set, automatic backups are disaster-recovery
+archives, encrypted at rest. Without it they stay share-safe, because a complete archive
+that cannot be encrypted would be a plaintext credential dump written to disk on every
+settings change. Without a passphrase, the instance logs a notice once per process, at the first automatic backup it takes.
+
+CertMate never generates or stores that passphrase: keeping it beside the archive it
+protects would make the encryption meaningless. It is yours to set and to keep.
+
+`POST /api/backups/create` with `{"include_secrets": true}` (admin, audited) still takes a
+disaster-recovery archive on demand, passphrase or not — a deliberate opt-in.
+
+**Getting a backup back onto a new instance:** `POST /api/backups/upload` (admin,
+`multipart/form-data`, field `file`), or the *Restore From Elsewhere* control in Settings.
+Uploading only stores the archive under a name CertMate generates — the name you send is
+discarded. Restoring it is a separate, explicit step, so an upload is never destructive on
+its own.
 
 **Automatic Backups:**
-- **Unified Snapshots** - Automatically created when DNS providers, domains, certificates, or application settings are modified
-- **Retention Management** - Configurable retention policy (default: 10 most recent backups)
-- **Automatic Cleanup** - Old backups are automatically removed based on retention settings
+- **Unified Snapshots** - Automatically created when DNS providers, domains, certificates, or application settings are modified. Disaster-recovery archives when `CERTMATE_BACKUP_PASSPHRASE` is set, share-safe otherwise (see above)
+- **Retention** - Two rules, whichever hits first: the 50 most recent archives per type are kept (`MAX_BACKUPS_PER_TYPE`), **and any archive older than 30 days is deleted regardless of how few there are** (`BACKUP_RETENTION_DAYS`). Both are constants, not settings. This is why a disaster-recovery archive must be kept off the host: one left in `backups/unified/` is deleted after 30 days like any other. Logging in no longer writes a backup, so routine sign-ins do not consume restore points
+- **Automatic Cleanup** - Pruning runs after every backup, applying both rules above
 
 **Manual Backups:**
 - **On-Demand Creation** - Create backups anytime via the web interface or API
@@ -1945,23 +1956,25 @@ Access backup features from the Settings page:
 
 **Create Backup:**
 ```bash
-# Create backup (settings + certificates)
+# Create backup (settings + certificates); "type" is required
 curl -X POST "http://localhost:8000/api/backups/create" \
  -H "Authorization: Bearer your_token" \
  -H "Content-Type: application/json" \
- -d '{"reason": "manual_backup"}'
+ -d '{"type": "unified", "reason": "manual_backup"}'
 
-# Response includes backup file information
+# Response (201)
 {
- "success": true,
- "backup_file": "unified_backup_20241225_120000.zip",
- "size": "2.5MB",
- "contents": {
- "settings": true,
- "certificates": 15
- }
+ "message": "Backup created successfully",
+ "backups": [
+ {"type": "unified", "filename": "backup_20241225_120000_123456_manual_backup.zip"}
+ ],
+ "secrets_masked": true,
+ "recommendation": null
 }
 ```
+
+Archives are named `backup_<YYYYmmdd_HHMMSS_ffffff>_<reason>.zip` (UTC timestamp), or
+`.zip.enc` when `CERTMATE_BACKUP_PASSPHRASE` is set.
 
 **List and Download Backups:**
 ```bash
@@ -1971,7 +1984,7 @@ curl -H "Authorization: Bearer your_token" \
 
 # Download backup
 curl -H "Authorization: Bearer your_token" \
- "http://localhost:8000/api/backups/download/unified/unified_backup_20241225_120000.zip" \
+ "http://localhost:8000/api/backups/download/unified/backup_20241225_120000_123456_manual_backup.zip" \
  -o backup.zip
 ```
 
@@ -1979,24 +1992,21 @@ curl -H "Authorization: Bearer your_token" \
 
 **Backup File (ZIP):**
 ```
-unified_backup_20241225_120000.zip
- settings.json # Complete application settings
- timestamp: "2024-12-25T12:00:00Z"
- version: "2.3.0"
- dns_providers: {...}
- domains: [...]
- settings: {...}
- certificates/ # All certificate files
- domain1.com/
- cert.pem
- chain.pem
- fullchain.pem
- privkey.pem
- domain2.com/
- cert.pem
- chain.pem
- fullchain.pem
- privkey.pem
+backup_20260821_120000_000000_manual.zip
+ backup_metadata.json  # manifest: secrets_masked, key_material_excluded, key_files_excluded, encrypted
+ settings.json         # application settings — credentials masked in a share-safe archive, plaintext in a DR one
+ certificates/
+   domain1.com/
+     cert.pem
+     chain.pem
+     fullchain.pem
+     privkey.pem       # DR archive only (include_secrets=true); absent from a share-safe archive
+     metadata.json
+     live/ archive/ renewal/ accounts/   # certbot lineage (keys under accounts/ and live/ DR only)
+ data/
+   certs/ca/ca.crt      # ca.key: DR only
+   certs/client/...     # client certificates (.key/.pfx: DR only)
+   audit/ inventory/
 ```
 
 #### Recovery Procedures
@@ -2007,7 +2017,7 @@ unified_backup_20241225_120000.zip
 1. Navigate to Settings → Backup Management
 2. Select the backup to restore from
 3. Confirm restoration (restores both settings and certificates atomically)
-4. Application will restart to apply new settings
+4. The page reloads the restored settings; nothing is restarted
 5. Verify all certificates and configurations are working
 
 *API Restoration:*
@@ -2016,7 +2026,7 @@ unified_backup_20241225_120000.zip
 curl -X POST "http://localhost:8000/api/backups/restore/unified" \
  -H "Authorization: Bearer your_token" \
  -H "Content-Type: application/json" \
- -d '{"filename": "unified_backup_20241225_120000.zip", "create_backup_before_restore": true}'
+ -d '{"filename": "backup_20241225_120000_123456_manual_backup.zip", "create_backup_before_restore": true}'
 ```
 
 #### External Backup Integration
@@ -2036,10 +2046,14 @@ RETENTION_DAYS=30
 # Create backup directory
 mkdir -p "$BACKUP_DIR"
 
-# Download latest backup via API
+# Download the newest backup that can restore (there is no "latest" alias;
+# the list is ordered oldest to newest by name)
+LATEST=$(curl -s -H "Authorization: Bearer $API_TOKEN" http://localhost:8000/api/backups \
+ | jq -r '[.unified[] | select(.can_restore)] | last | .filename // empty')
+[ -n "$LATEST" ] || { echo "No restorable backup on this instance" >&2; exit 1; }
 curl -H "Authorization: Bearer $API_TOKEN" \
- "http://localhost:8000/api/backups/download/unified/latest" \
- -o "$BACKUP_DIR/certmate_backup.zip"
+ "http://localhost:8000/api/backups/download/unified/$LATEST" \
+ -o "$BACKUP_DIR/$LATEST"
 
 # Backup certificates directory
 tar -czf "$BACKUP_DIR/certificates.tar.gz" "$CERT_DIR"
@@ -2049,8 +2063,8 @@ tar -czf "$BACKUP_DIR/data.tar.gz" "$DATA_DIR"
 
 # Encrypt backups (optional)
 gpg --cipher-algo AES256 --compress-algo 1 --symmetric \
- --output "$BACKUP_DIR/certmate_backup.zip.gpg" \
- "$BACKUP_DIR/certmate_backup.zip"
+ --output "$BACKUP_DIR/$LATEST.gpg" \
+ "$BACKUP_DIR/$LATEST"
 
 # Cleanup old backups
 find /backup/certmate -type d -mtime +$RETENTION_DAYS -exec rm -rf {} \;
@@ -2100,25 +2114,19 @@ curl -H "Authorization: Bearer your_token" \
 ```
 
 #### Prometheus Metrics Integration
-```python
-# Add to app.py for Prometheus monitoring
-from prometheus_client import Counter, Histogram, generate_latest
 
-# Metrics
-certificate_requests = Counter('certmate_certificate_requests_total', 
- 'Total certificate requests', ['domain', 'status'])
-certificate_expiry = Histogram('certmate_certificate_expiry_days',
- 'Days until certificate expiry', ['domain'])
-
-@app.route('/metrics')
-def metrics():
- return generate_latest()
-```
+Nothing to add: `/metrics` is already a registered route
+([`modules/web/misc_routes.py`](modules/web/misc_routes.py)), and the metrics
+themselves are declared in
+[`modules/core/metrics.py`](modules/core/metrics.py). This section used to
+show a snippet headed "Add to app.py", which would have registered a second,
+unauthenticated `/metrics` on top of the real one.
 
 A ready-to-import **Grafana dashboard**, **Prometheus alert rules**, and an
 authenticated **scrape config** ship in [`monitoring/`](monitoring/) — see
 [monitoring/README.md](monitoring/README.md). The `/metrics` endpoint requires
-the admin role, so scrape it with an admin-scoped API token (Bearer).
+the viewer role, so scrape it with a viewer-scoped API token (Bearer) — a
+scraper reads, so it does not need admin.
 
 #### Log Aggregation
 ```yaml
@@ -2185,7 +2193,7 @@ CertMate includes a built-in notification system configurable from Settings > No
 - **Telegram** - Bot API messages (bot token + chat ID)
 - **ntfy** - Push to an [ntfy](https://ntfy.sh) topic (self-hostable); optional access token, per-message priority
 - **Gotify** - Push to a self-hosted [Gotify](https://gotify.net) server (server URL + app token, numeric priority)
-- **Generic Webhooks** - HTTP POST with HMAC-SHA256 signed payloads for custom integrations
+- **Generic Webhooks** - HTTP POST/PUT/PATCH with HMAC-SHA256 signed payloads, bearer/basic/header authentication, and a JSON **payload template** with `{{placeholders}}` so the body fits whatever receives it — see [docs/webhooks.md](docs/webhooks.md)
 - **Weekly Digest** - Scheduled summary of certificate status and upcoming renewals
 
 All notification channels support per-event filtering (created, renewed, expiring, failed) and can be tested from the settings UI.
@@ -2196,18 +2204,32 @@ All notification channels support per-event filtering (created, renewed, expirin
 
 ### Downgrades & Recovery
 
-Downgrading to a version older than the one that wrote `settings.json` is not supported and may result in a broken configuration or loss of accounts. If you see a `DOWNGRADE DETECTED` message in the logs after rolling back, **restore the latest unified backup before using the UI**:
+Downgrading to a version older than the one that wrote `settings.json` is not supported and may result in a broken configuration or loss of accounts. If you see a `DOWNGRADE DETECTED` message in the logs after rolling back, **restore the most recent backup that can actually restore**.
+
+> **Not every backup is a restore point.** Unless `CERTMATE_BACKUP_PASSPHRASE`
+> was set when the backup was taken, automatic backups are written with secrets
+> masked and **cannot restore this instance** — they are configuration
+> snapshots. On an instance that has never had a passphrase set, the newest
+> archive is almost certainly one of those, so picking "the latest" by
+> timestamp picks one that will be refused. Ask the API which ones qualify: it
+> reports `can_restore` per archive, and `restore_blocked_reason` when it is
+> false.
 
 ```bash
-# List available backups inside the container
-docker exec certmate ls -lt /app/backups/unified/
+# Which backups can actually restore, newest first
+curl -s -H "Authorization: Bearer $API_TOKEN" http://localhost:8000/api/backups \
+  | jq -r '.unified[] | "\(.filename)  can_restore=\(.can_restore)  \(.restore_blocked_reason // "")"'
 
-# Restore the most recent one
+# Restore the newest one whose can_restore is true
 curl -H "Authorization: Bearer $API_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"filename": "backup_YYYYMMDD_HHMMSS.zip", "create_backup_before_restore": true}' \
+  -d '{"filename": "backup_YYYYmmdd_HHMMSS_ffffff_<reason>.zip", "create_backup_before_restore": true}' \
   http://localhost:8000/api/backups/restore/unified
 ```
+
+If nothing reports `can_restore: true`, this instance has no restore point.
+Set `CERTMATE_BACKUP_PASSPHRASE`, take a backup immediately, and keep a copy
+off this node — see [Backup and Recovery](#backup-and-recovery).
 
 If you have lost the admin password and cannot log in, use the emergency reset script (requires container shell access):
 
@@ -2221,7 +2243,7 @@ docker exec -it certmate python scripts/reset_admin_password.py
 
 #### Certificate Creation Failures
 
-**Issue**: `DNS validation failed`
+**Issue**: `Certificate creation failed: ...` with a DNS-01 challenge error (the text after the prefix is certbot's own)
 ```bash
 # Check DNS propagation
 dig TXT _acme-challenge.example.com @8.8.8.8
@@ -2258,22 +2280,18 @@ sudo chmod 600 /opt/certmate/certificates/*/privkey.pem
 curl -H "Authorization: Bearer your_token_here" \
  http://localhost:8000/api/certificates
 
-# Check token in settings
-docker exec certmate cat /app/data/settings.json | jq .api_bearer_token
+# The token cannot be read back: settings.json stores only an HMAC of it
+# (api_bearer_token_hash). Compare against what you set in API_BEARER_TOKEN
+# or API_BEARER_TOKEN_FILE.
 ```
 
-**Issue**: `Token not found`
+**Issue**: lost or forgotten API token
 ```bash
-# Reset API token
-docker exec -it certmate python -c "
-import json
-with open('/app/data/settings.json', 'r+') as f:
- data = json.load(f)
- data['api_bearer_token'] = 'new_secure_token_here'
- f.seek(0)
- json.dump(data, f, indent=2)
- f.truncate()
-"
+# Set a new token and restart: at startup, the token from API_BEARER_TOKEN
+# (or API_BEARER_TOKEN_FILE) replaces the stored one.
+# (32+ characters; a malformed token is ignored and the old one stays.)
+openssl rand -hex 32   # put the output in .env as API_BEARER_TOKEN=...
+docker-compose up -d --force-recreate certmate
 ```
 
 #### Docker & Container Issues
@@ -2303,20 +2321,52 @@ docker inspect certmate | jq '.[0].Mounts'
 
 **Q: All my certificates show "Backend: Unreachable" even though they are issued, served, and downloadable. Is something broken?**
 
-No. The deployment-status badge is an optional health indicator — it does not affect issuance, renewal, or download. CertMate's own process opens a plain TLS connection to `<domain>:443` and compares the served certificate's fingerprint against the stored one. There is nothing to "report back": the badge only answers whether CertMate itself can reach the domain on 443 and see the expected certificate.
+No. The deployment-status badge is an optional health indicator — it does not affect issuance, renewal, or download. CertMate's own process opens a TLS connection to `<domain>:<port>` and compares the served certificate's fingerprint against the stored one. The badge only answers whether CertMate itself can reach the service and see the expected certificate.
 
 - **Deployed** — handshake succeeded and the fingerprint matches.
 - **Wrong Cert** — handshake succeeded but a different certificate is served.
 - **Unreachable** — CertMate could not open a TLS connection to the domain at all.
 
-"Unreachable" for every certificate is common in Kubernetes/ingress setups where the CertMate pod cannot dial the public/ingress IP directly (split-horizon DNS, an egress `NetworkPolicy`, or TLS terminated by an ingress controller / load balancer). If the target is merely slow, raise the probe budget:
+**Configuring the probe per certificate**
+
+By default the probe connects on port 443 with a direct TLS handshake (HTTPS). You can change the port and protocol per certificate via the API or the dashboard:
+
+| Protocol | Port (default) | Use case |
+|---|---|---|
+| `https-tls` | 443 | Standard HTTPS |
+| `tls` | 465 | SMTPS, IMAPS, or any direct TLS service |
+| `smtp-starttls` | 587 | SMTP with STARTTLS (port 25 also works) |
+
+From the **dashboard**, open a certificate's detail panel and click **Configure Probe**, then enter the port and protocol.
+
+From the **API**:
+
+```bash
+# Set probe to SMTP STARTTLS on port 587
+curl -X PATCH https://certmate.example.com/api/certificates/example.com \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"deployment_port": 587, "deployment_protocol": "smtp-starttls"}'
+
+# Reset to defaults (HTTPS on port 443)
+curl -X PATCH https://certmate.example.com/api/certificates/example.com \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"deployment_port": null, "deployment_protocol": "https-tls"}'
+```
+
+The probe protocol defaults to the global timeout (3s) and can be tuned via the `CERTMATE_TLS_PROBE_TIMEOUT_SECONDS` environment variable.
+
+**Global timeout tuning:**
 
 ```bash
 # Accepts 1–30 seconds; default is 3
 CERTMATE_TLS_PROBE_TIMEOUT_SECONDS=10
 ```
 
-Otherwise the badge is safe to ignore. See [docs/kubernetes.md](docs/kubernetes.md#deployment-status-badge-shows-backend-unreachable) for the Kubernetes-specific note. (Reference: [#263](https://github.com/fabriziosalmi/certmate/issues/263).)
+**"Unreachable" for every certificate** is common in Kubernetes/ingress setups where the CertMate pod cannot dial the public/ingress IP directly (split-horizon DNS, an egress `NetworkPolicy`, or TLS terminated by an ingress controller / load balancer). If the target is merely slow, raise the probe budget or configure the port/protocol to match your topology.
+
+See [docs/kubernetes.md](docs/kubernetes.md#deployment-status-badge-shows-backend-unreachable) for the Kubernetes-specific note. (Reference: [#263](https://github.com/fabriziosalmi/certmate/issues/263).)
 
 #### DNS Provider Specific Issues
 
@@ -2357,12 +2407,16 @@ az network dns zone list
 Enable debug logging for troubleshooting:
 
 ```bash
-# Environment variable
-FLASK_DEBUG=true
-FLASK_ENV=development
+# Docker / gunicorn: CERTMATE_LOG_LEVEL. The stock docker-compose.yml does not
+# pass it through, so add it under the certmate service's environment: and
+# recreate the container
+      - CERTMATE_LOG_LEVEL=DEBUG
 
-# Or in Docker Compose
-docker-compose -f docker-compose.yml -f docker-compose.debug.yml up
+# Development server: --log-level overrides CERTMATE_LOG_LEVEL (default INFO)
+python app.py --debug --log-level DEBUG
+
+# FLASK_ENV=production makes --debug refuse to start, by design
+FLASK_ENV=development
 ```
 
 ### What's New in v2.0.0
@@ -2433,6 +2487,15 @@ curl -sS -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/diagnostics
 | **[docs/testing.md](docs/testing.md)**             | Testing framework and CI/CD         | Developers            |
 | **[docs/architecture.md](docs/architecture.md)**   | System architecture                 | Developers            |
 | **[docs/api.md](docs/api.md)**                     | Client certificates API reference   | Developers            |
+| **[docs/mcp.md](docs/mcp.md)**                     | MCP server for AI agents: tools, auth, audit attribution | Developers, SRE |
+| **[docs/guide.md](docs/guide.md)**                 | Step-by-step guide for common tasks | All users             |
+| **[docs/discovery-inventory.md](docs/discovery-inventory.md)** | Discovery, inventory, adopt, crypto readiness, domain registration + health | SRE, security |
+| **[docs/deploy-hooks.md](docs/deploy-hooks.md)**   | Post-issuance deploy hooks          | DevOps engineers      |
+| **[docs/csr-only-certificates.md](docs/csr-only-certificates.md)** | Issuing from a CSR when the key stays on the device | Appliance operators |
+| **[docs/webhooks.md](docs/webhooks.md)**           | Generic webhooks: payload templates, auth, signature verification | Integrators |
+| **[docs/compliance.md](docs/compliance.md)**       | Audit chain, attribution, NIS2/eIDAS posture | Compliance, security |
+| **[docs/kubernetes.md](docs/kubernetes.md)**       | Pod sizing, OOM troubleshooting, Helm chart | SRE              |
+| **[docs/probes.en.md](docs/probes.en.md)**         | Deployment probe configuration      | DevOps engineers      |
 | **[CONTRIBUTING.md](CONTRIBUTING.md)**             | Development and contribution guide  | Developers            |
 | **[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)**       | Community guidelines                | Contributors          |
 
@@ -2441,7 +2504,7 @@ curl -sS -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/diagnostics
 - **API Documentation**: http://your-server:8000/docs/ (Swagger UI)
 - **Alternative API Docs**: http://your-server:8000/redoc/ (ReDoc)
 - **GitHub Repository**: https://github.com/fabriziosalmi/certmate
-- **Docker Hub**: https://hub.docker.com/r/certmate/certmate
+- **Docker Hub**: https://hub.docker.com/r/fabriziosalmi/certmate
 - **Issue Tracker**: https://github.com/fabriziosalmi/certmate/issues
 
 ### Examples Repository
@@ -2460,6 +2523,12 @@ We welcome contributions! Areas where we need help:
 - **Testing** - DNS provider testing, edge cases
 - **Integrations** - New DNS providers, monitoring tools
 - **Features** - UI improvements, API enhancements
+
+## Commercial Support & Consulting
+
+Running CertMate in production? I offer paid support, custom development, and
+security consulting — certificate/TLS automation, hardening, WAF, and cloud
+detection & alerting. Reach out: **[fabrizio.salmi@gmail.com](mailto:fabrizio.salmi@gmail.com)**.
 
 ## Contributing
 
@@ -2483,10 +2552,12 @@ cd certmate
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-pip install -r requirements-dev.txt
+pip install -r requirements-test.txt
 
-# Set up pre-commit hooks
-pre-commit install
+# Lint, format, and security-scan (the same tools CI runs)
+make lint
+make format
+make security
 
 # Run tests
 pytest

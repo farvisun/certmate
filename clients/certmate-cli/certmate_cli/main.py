@@ -1,0 +1,530 @@
+"""CertMate CLI — a thin, pleasant terminal front-end over certmate-sdk.
+
+    certmate cert create app.example.com --dns cloudflare --wait
+    certmate cert ls
+    certmate cert renew app.example.com --force
+    certmate audit verify
+
+Connection comes from --url/--token or CERTMATE_URL/CERTMATE_TOKEN.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import stat
+import sys
+from pathlib import Path
+from typing import List, Optional
+
+import typer
+from rich.console import Console
+from rich.table import Table
+
+from certmate import Client, CertMateError, Job
+
+app = typer.Typer(no_args_is_help=True, add_completion=False,
+                  help="CertMate — the SSL certificate lifecycle from your terminal.")
+cert_app = typer.Typer(no_args_is_help=True, help="Manage certificates.")
+dns_app = typer.Typer(no_args_is_help=True, help="DNS providers and accounts.")
+audit_app = typer.Typer(no_args_is_help=True, help="Tamper-evident audit trail.")
+backup_app = typer.Typer(no_args_is_help=True, help="Backups.")
+deploy_app = typer.Typer(no_args_is_help=True, help="Post-issuance deploy hooks.")
+app.add_typer(cert_app, name="cert")
+app.add_typer(dns_app, name="dns")
+app.add_typer(audit_app, name="audit")
+app.add_typer(backup_app, name="backup")
+app.add_typer(deploy_app, name="deploy")
+
+out = Console()
+err = Console(stderr=True)
+
+
+def _version_callback(value: bool) -> None:
+    """`--version` prints the version and exits 0, before anything else runs.
+
+    It has to be eager: the flag must work with no server configured, no
+    token, and no network — reporting which build you have is the first thing
+    anyone does when something is wrong.
+    """
+    if value:
+        from certmate_cli import __version__
+
+        # Plain print, not `out.print`: a version string gets piped and
+        # compared, so it must not pick up Rich's wrapping or markup.
+        print(__version__)
+        raise typer.Exit(0)
+
+
+
+# A lax hostname/wildcard check for the client-side --dry-run preflight; the
+# server is the real authority, this just catches obvious typos before we
+# spend an API call.
+_DOMAIN_RE = re.compile(
+    r"^(\*\.)?([a-zA-Z0-9_](-*[a-zA-Z0-9_])*\.)+[a-zA-Z]{2,}$")
+
+
+def _token_on_argv() -> bool:
+    """True when the token was passed as a command-line flag (as opposed to
+    the CERTMATE_TOKEN environment variable). argv is what leaks to `ps`
+    output and shell history, so it is exactly the thing to check."""
+    return any(a == "--token" or a.startswith("--token=") for a in sys.argv)
+
+
+def _stderr_isatty() -> bool:
+    # Indirection so tests can stub interactivity; CliRunner's captured
+    # stderr never reports a TTY.
+    try:
+        return sys.stderr.isatty()
+    except Exception:
+        return False
+
+
+@app.callback()
+def _main(
+    ctx: typer.Context,
+    url: Optional[str] = typer.Option(None, "--url", envvar="CERTMATE_URL",
+                                      help="CertMate base URL (default http://localhost:8000)."),
+    token: Optional[str] = typer.Option(None, "--token", envvar="CERTMATE_TOKEN",
+                                        help="API bearer token. Prefer the CERTMATE_TOKEN "
+                                             "environment variable: --token is visible to other "
+                                             "local processes (ps) and shell history."),
+    # Lives on THIS callback rather than a second one: Typer keeps only one
+    # root callback, so a separate `@app.callback()` silently replaces this
+    # whole function — including the --token warning above.
+    version: Optional[bool] = typer.Option(None, "--version", "-V",
+                                           callback=_version_callback,
+                                           is_eager=True,
+                                           help="Show the certmate-cli version and exit."),
+):
+    # Kept for compatibility, but discourage --token interactively: argv is
+    # world-readable via ps and lands in shell history. Warn only on a TTY so
+    # scripts and pipelines stay quiet.
+    if token and _token_on_argv() and _stderr_isatty():
+        err.print("[yellow]warning[/]: --token is visible in ps output and shell history; "
+                  "prefer the CERTMATE_TOKEN environment variable.")
+    ctx.obj = {"url": url, "token": token}
+
+
+def _client(ctx: typer.Context) -> Client:
+    o = ctx.obj or {}
+    return Client(o.get("url"), o.get("token"))
+
+
+def _die(msg: str, code: int = 1):
+    err.print(f"[bold red]error[/]: {msg}")
+    raise typer.Exit(code)
+
+
+def _run(fn):
+    """Execute an SDK call, turning SDK errors into clean CLI failures."""
+    try:
+        return fn()
+    except CertMateError as e:
+        _die(str(e))
+
+
+def _records(data) -> List[dict]:
+    """Coerce a list/dict API response into a list of record dicts."""
+    if isinstance(data, list):
+        return [d for d in data if isinstance(d, dict)]
+    if isinstance(data, dict):
+        for key in ("items", "accounts", "backups", "results", "data", "unified"):
+            v = data.get(key)
+            if isinstance(v, list):
+                return [d for d in v if isinstance(d, dict)]
+    return []
+
+
+def _table(records: List[dict], columns: List[str]) -> None:
+    """Print a rich table of ``records`` over ``columns`` (missing keys -> '-')."""
+    if not records:
+        out.print("[dim]nothing to show.[/]")
+        return
+    table = Table(box=None, header_style="bold")
+    for c in columns:
+        table.add_column(c.upper())
+    for r in records:
+        table.add_row(*[str(r.get(c, "-")) for c in columns])
+    out.print(table)
+
+
+# --------------------------------------------------------------------------
+# cert
+# --------------------------------------------------------------------------
+
+@cert_app.command("ls")
+def cert_ls(ctx: typer.Context):
+    """List certificates with expiry and status."""
+    certs = _run(lambda: _client(ctx).list_certificates())
+    if not certs:
+        out.print("[dim]No certificates.[/]")
+        return
+    table = Table(box=None, header_style="bold")
+    table.add_column("DOMAIN")
+    table.add_column("EXPIRES")
+    table.add_column("DAYS", justify="right")
+    table.add_column("CA")
+    table.add_column("AUTO-RENEW")
+    # Sort by seconds where the server sends them: a certificate with 23 hours
+    # left and one that lapsed an hour ago are both 0 or -1 in whole days, and
+    # would otherwise land next to each other in either order.
+    def _remaining(cert):
+        if cert.seconds_left is not None:
+            return cert.seconds_left
+        if cert.days_until_expiry is not None:
+            return cert.days_until_expiry * 86400
+        return 1 << 40
+
+    for c in sorted(certs, key=_remaining):
+        days = c.days_until_expiry
+        expired = c.has_expired()
+        # "0" for a certificate with 23 hours left was read as expired by
+        # everything that saw it, including CertMate's own dashboard until
+        # server 2.32.2. Say which of the two it is instead of printing the
+        # number that cannot tell them apart.
+        if expired is True:
+            days_str, colour = "expired", "red"
+        elif days is None:
+            days_str, colour = "-", "green"
+        elif days == 0:
+            days_str, colour = ("<1" if expired is False else "?"), "red"
+        else:
+            days_str = str(days)
+            colour = "red" if days < 7 else ("yellow" if days < 30 else "green")
+        table.add_row(
+            c.domain,
+            (c.expiry_date or "-")[:10],
+            f"[{colour}]{days_str}[/]",
+            c.ca_provider or "-",
+            "on" if c.auto_renew else ("off" if c.auto_renew is not None else "-"),
+        )
+    out.print(table)
+
+
+@cert_app.command("info")
+def cert_info(ctx: typer.Context, domain: str):
+    """Show a certificate's details."""
+    c = _run(lambda: _client(ctx).get_certificate(domain))
+    out.print(f"[bold]{c.domain}[/]")
+    if c.has_expired() is True:
+        remaining = "[red]expired[/]"
+    elif c.days_until_expiry is None:
+        remaining = "? days"
+    elif c.days_until_expiry == 0:
+        # Under a day, and not expired, or the server is too old to say.
+        remaining = "less than a day" if c.has_expired() is False else "? days"
+    else:
+        remaining = f"{c.days_until_expiry} days"
+    out.print(f"  expires:     {c.expiry_date or '-'}  ({remaining})")
+    out.print(f"  CA:          {c.ca_provider or '-'}")
+    out.print(f"  DNS:         {c.dns_provider or '-'}")
+    out.print(f"  auto-renew:  {c.auto_renew}")
+    if c.san_domains:
+        out.print(f"  SAN:         {', '.join(c.san_domains)}")
+    if c.needs_renewal:
+        out.print("  [yellow]needs renewal[/]")
+
+
+@cert_app.command("create")
+def cert_create(
+    ctx: typer.Context,
+    domain: str,
+    dns: Optional[str] = typer.Option(None, "--dns", help="DNS provider (e.g. cloudflare)."),
+    ca: Optional[str] = typer.Option(None, "--ca", help="CA provider (e.g. letsencrypt)."),
+    san: Optional[str] = typer.Option(None, "--san", help="Comma-separated SAN domains."),
+    wait: bool = typer.Option(True, "--wait/--no-wait", help="Wait for issuance to finish."),
+    dry_run: bool = typer.Option(False, "--dry-run",
+                                 help="Validate inputs and preflight the DNS provider WITHOUT issuing."),
+):
+    """Issue a certificate (async; waits for completion by default)."""
+    # Drop empties so a trailing comma ("a.com,b.com,") never produces a
+    # bogus "" SAN entry — mirrors cert_reissue.
+    sans: List[str] = [s.strip() for s in san.split(",") if s.strip()] if san else []
+    client = _client(ctx)
+
+    if dry_run:
+        problems = []
+        if not _DOMAIN_RE.match(domain):
+            problems.append(f"domain {domain!r} does not look valid")
+        for s in sans:
+            if not _DOMAIN_RE.match(s):
+                problems.append(f"SAN {s!r} does not look valid")
+        if dns:
+            res = _run(lambda: client.test_dns_provider(dns))
+            ok = bool(res.get("success", res.get("ok", True)))
+            msg = res.get("message") or res.get("error") or ("reachable" if ok else "failed")
+            out.print(f"DNS provider [bold]{dns}[/]: {'[green]OK[/]' if ok else '[red]FAIL[/]'} — {msg}")
+            if not ok:
+                problems.append("DNS provider preflight failed")
+        else:
+            out.print("[dim]No --dns given; skipping provider preflight.[/]")
+        if problems:
+            _die("dry-run found issues:\n  - " + "\n  - ".join(problems))
+        out.print(f"[green]dry-run OK[/] — would issue [bold]{domain}[/]"
+                  f"{(' (+' + str(len(sans)) + ' SAN)') if sans else ''}"
+                  f"{(' via ' + dns) if dns else ''}{(' on ' + ca) if ca else ''}. Nothing issued.")
+        return
+
+    def _issue():
+        with out.status(f"Issuing [bold]{domain}[/] …") as status:
+            def _progress(j: Job):
+                if j.status:
+                    status.update(f"Issuing [bold]{domain}[/] … [{j.status}]")
+            return client.create_certificate(
+                domain, dns_provider=dns, ca_provider=ca, san_domains=sans or None,
+                wait=wait, on_progress=_progress)
+
+    job = _run(_issue)
+    if wait:
+        out.print(f"[green]issued[/] [bold]{domain}[/]"
+                  f"{(' (' + job.status + ')') if job.status else ''}.")
+    else:
+        out.print(f"[yellow]accepted[/] — job [bold]{job.job_id}[/] "
+                  f"(poll: certmate cert job {job.job_id}).")
+
+
+@cert_app.command("job")
+def cert_job(ctx: typer.Context, job_id: str):
+    """Show the status of an async issuance/renewal job."""
+    j = _run(lambda: _client(ctx).get_job(job_id))
+    out.print(f"job [bold]{j.job_id}[/]: {j.status or '?'}"
+              f"{(' — ' + j.error) if j.error else ''}")
+
+
+@cert_app.command("renew")
+def cert_renew(ctx: typer.Context, domain: str,
+               force: bool = typer.Option(False, "--force", help="Force renewal even if not due.")):
+    """Renew a certificate."""
+    res = _run(lambda: _client(ctx).renew_certificate(domain, force=force))
+    renewed = res.get("renewed")
+    # Only servers v2.21.1+ report the outcome (`renewed: true/false`). Green
+    # requires an explicit true — an absent key means the server did not say,
+    # and claiming success would be a lie.
+    if renewed is True:
+        out.print(f"[green]renewed[/] {domain}.")
+    elif renewed is False:
+        msg = res.get("message") or f"{domain} was not yet due for renewal."
+        out.print(f"[yellow]not due[/] — {msg}")
+    else:
+        out.print(f"renew requested for [bold]{domain}[/] — server did not report "
+                  "the outcome (server v2.21.1+ reports it).")
+
+
+@cert_app.command("rm")
+def cert_rm(ctx: typer.Context, domain: str,
+            yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation.")):
+    """Delete a certificate."""
+    if not yes:
+        typer.confirm(f"Delete certificate {domain}?", abort=True)
+    _run(lambda: _client(ctx).delete_certificate(domain))
+    out.print(f"[green]deleted[/] {domain}.")
+
+
+_FILE_DEFAULT_NAME = {
+    "cert": "cert.pem",
+    "chain": "chain.pem",
+    "fullchain": "fullchain.pem",
+    "privkey": "privkey.pem",
+    "combined": "combined.pem",
+    "pfx": "cert.pfx",
+}
+# Anything that can carry key material is written owner-only. The public
+# files get the same treatment: a deploy script that later relaxes them is
+# an explicit act, whereas a private key written 0644 is a silent one.
+_DOWNLOAD_MODE = 0o600
+
+
+@cert_app.command("download")
+def cert_download(
+    ctx: typer.Context,
+    domain: str,
+    file: str = typer.Option(
+        "fullchain", "--file", "-f",
+        help="Which file: cert, chain, fullchain, privkey, combined, pfx. "
+             "Use --bundle for a whole-certificate archive instead."),
+    output: Optional[str] = typer.Option(
+        None, "--output", "-o",
+        help="Where to write it. Defaults to the file's usual name in the "
+             "current directory; '-' writes to stdout."),
+    key_format: Optional[str] = typer.Option(
+        None, "--key-format",
+        help="pkcs1 or pkcs8, for --file privkey. certbot writes pkcs8; "
+             "pkcs1 is the legacy 'BEGIN RSA PRIVATE KEY' form."),
+    bundle: Optional[str] = typer.Option(
+        None, "--bundle",
+        help="Download a bundle instead of a single file: zip or json."),
+):
+    """Download a certificate file, so a host can pull what it needs.
+
+    Pulling beats pushing when the certificate manager would otherwise need
+    credentials on every target host: give each host an API key scoped to its
+    own domain and let it fetch on a timer.
+
+        certmate cert download example.com --file fullchain -o /etc/ssl/certs/x.pem
+        certmate cert download example.com --file privkey   -o /etc/ssl/private/x.key
+    """
+    # Every one of these is checked before a request goes out: being told
+    # "invalid key_format" by the server after a round trip is a worse error
+    # than being told here, and it costs an authenticated call to learn it.
+    if bundle is not None and bundle not in ("zip", "json"):
+        _die("--bundle must be zip or json")
+    if bundle and key_format:
+        _die("--key-format applies to --file privkey, not to a bundle")
+    if key_format is not None:
+        if key_format not in ("pkcs1", "pkcs8"):
+            _die(f"unknown --key-format {key_format!r}; use pkcs1 or pkcs8")
+        if not bundle and file != "privkey":
+            _die(f"--key-format applies to --file privkey, not to {file!r}")
+
+    if bundle:
+        data = _run(lambda: _client(ctx).download_certificate(domain, fmt=bundle))
+        default_name = f"{domain}.zip" if bundle == "zip" else f"{domain}.json"
+        payload = json.dumps(data, indent=2).encode() if bundle == "json" else data
+    else:
+        if file not in _FILE_DEFAULT_NAME:
+            _die(f"unknown --file {file!r}; use one of "
+                 f"{', '.join(sorted(_FILE_DEFAULT_NAME))}")
+        payload = _run(lambda: _client(ctx).download_certificate_file(
+            domain, file, key_format=key_format))
+        default_name = _FILE_DEFAULT_NAME[file]
+
+    if output == "-":
+        # Binary-safe: .pfx and .zip are not text.
+        sys.stdout.buffer.write(payload)
+        return
+
+    target = Path(output or default_name)
+    # Create with the restrictive mode rather than chmod-ing after: between
+    # an open() and a chmod() the key is readable by anyone on the box.
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _DOWNLOAD_MODE)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(payload)
+    # An existing file keeps its old mode through O_CREAT, so state what was
+    # actually written rather than claiming 0600 unconditionally.
+    mode = stat.S_IMODE(os.stat(target).st_mode)
+    out.print(f"[green]wrote[/] {target} ({len(payload)} bytes, mode {mode:04o})")
+
+
+@cert_app.command("reissue")
+def cert_reissue(ctx: typer.Context, domain: str,
+                 san: Optional[str] = typer.Option(None, "--san", help="Comma-separated SAN domains.")):
+    """Reissue a certificate (e.g. to change its SAN list)."""
+    body = {}
+    if san is not None:
+        body["san_domains"] = [s.strip() for s in san.split(",") if s.strip()]
+    _run(lambda: _client(ctx).reissue_certificate(domain, **body))
+    out.print(f"[green]reissued[/] {domain}.")
+
+
+# --------------------------------------------------------------------------
+# dns
+# --------------------------------------------------------------------------
+
+@dns_app.command("providers")
+def dns_providers(ctx: typer.Context):
+    """List supported DNS providers."""
+    out.print(_run(lambda: _client(ctx).list_dns_providers()))
+
+
+@dns_app.command("accounts")
+def dns_accounts(ctx: typer.Context,
+                 provider: Optional[str] = typer.Argument(None, help="Filter by provider.")):
+    """List configured DNS accounts."""
+    data = _run(lambda: _client(ctx).list_dns_accounts(provider))
+    _table(_records(data), ["provider", "account_id", "name", "email"])
+
+
+@dns_app.command("test")
+def dns_test(ctx: typer.Context, provider: str):
+    """Preflight a DNS provider (does not issue)."""
+    res = _run(lambda: _client(ctx).test_dns_provider(provider))
+    ok = bool(res.get("success", res.get("ok", True)))
+    msg = res.get("message") or res.get("error") or ("reachable" if ok else "failed")
+    out.print(f"[bold]{provider}[/]: {'[green]OK[/]' if ok else '[red]FAIL[/]'} — {msg}")
+    if not ok:
+        raise typer.Exit(1)
+
+
+# --------------------------------------------------------------------------
+# audit
+# --------------------------------------------------------------------------
+
+@audit_app.command("verify")
+def audit_verify(ctx: typer.Context):
+    """Verify the tamper-evident audit chain."""
+    res = _run(lambda: _client(ctx).audit_verify())
+    ok = bool(res.get("ok"))
+    reason = res.get("reason") or ""
+    cp = res.get("checkpoint_verified")
+    # Benign ONLY when the server says state='absent' (200: fresh instance,
+    # nothing audited yet). The reason wording is NOT a signal: a chain file
+    # DELETED after signed checkpoints attested it existed comes back as a 409
+    # with the very same "chain file does not exist" text — that is tampering
+    # and must exit non-zero, like every other not-ok result.
+    if not ok and res.get("state") == "absent":
+        out.print(f"audit chain: [dim]none yet[/] — {reason or 'nothing audited yet'}")
+        return
+    detail = (
+        f" — {reason}"
+        if reason and not (ok and reason.lower() == "intact")
+        else ""
+    )
+    out.print(
+        f"audit chain: {'[green]intact[/]' if ok else '[red]BROKEN[/]'}{detail}"
+    )
+    if cp is not None:
+        out.print(f"  signed checkpoint: {'[green]verified[/]' if cp else '[dim]not cross-checked[/]'}"
+                  f"{(' @ seq ' + str(res.get('checkpoint_seq'))) if res.get('checkpoint_seq') is not None else ''}")
+    if not ok:
+        raise typer.Exit(1)
+
+
+# --------------------------------------------------------------------------
+# backup
+# --------------------------------------------------------------------------
+
+@backup_app.command("ls")
+def backup_ls(ctx: typer.Context):
+    """List backups."""
+    data = _run(lambda: _client(ctx).list_backups())
+    # Items are {filename, metadata:{size, created, backup_reason, ...}} — flatten.
+    flat = [{**r, **(r.get("metadata") or {})} for r in _records(data)]
+    _table(flat, ["filename", "backup_reason", "created", "size"])
+
+
+@backup_app.command("create")
+def backup_create(ctx: typer.Context):
+    """Create a backup now."""
+    res = _run(lambda: _client(ctx).create_backup())
+    name = (res or {}).get("filename") or (res or {}).get("backup") or "ok"
+    out.print(f"[green]backup created[/] {name}")
+
+
+# --------------------------------------------------------------------------
+# deploy
+# --------------------------------------------------------------------------
+
+@deploy_app.command("run")
+def deploy_run(ctx: typer.Context, domain: str):
+    """Run the configured deploy hooks for a domain now."""
+    res = _run(lambda: _client(ctx).deploy_certificate(domain))
+    ok = bool((res or {}).get("ok", True))
+    out.print(f"deploy [bold]{domain}[/]: {'[green]ok[/]' if ok else '[red]failed[/]'}"
+              f"{(' — ' + str(res.get('message'))) if isinstance(res, dict) and res.get('message') else ''}")
+    if not ok:
+        raise typer.Exit(1)
+
+
+# --------------------------------------------------------------------------
+# top-level convenience
+# --------------------------------------------------------------------------
+
+@app.command("health")
+def health(ctx: typer.Context):
+    """Check the CertMate instance health."""
+    out.print(_run(lambda: _client(ctx).health()))
+
+
+if __name__ == "__main__":
+    app()

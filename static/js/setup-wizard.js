@@ -23,6 +23,7 @@
         godaddy:       { label: 'GoDaddy', icon: 'fa-globe', fields: [{ key: 'api_key', label: 'API Key', type: 'password' }, { key: 'secret', label: 'API Secret', type: 'password' }] },
         namecheap:     { label: 'Namecheap', icon: 'fa-globe', fields: [{ key: 'username', label: 'Username', type: 'text' }, { key: 'api_key', label: 'API Key', type: 'password' }] },
         vultr:         { label: 'Vultr', icon: 'fa-cloud', fields: [{ key: 'api_key', label: 'API Key', type: 'password' }] },
+        solidserver:   { label: 'SOLIDserver', icon: 'fa-server', fields: [{ key: 'host', label: 'Host', type: 'text' }, { key: 'username', label: 'Username', type: 'text' }, { key: 'password', label: 'Password', type: 'password' }, { key: 'dns_name', label: 'DNS Server Name', type: 'text' }] },
         ovh:           { label: 'OVH', icon: 'fa-globe', fields: [{ key: 'endpoint', label: 'Endpoint', type: 'text', placeholder: 'ovh-eu' }, { key: 'application_key', label: 'Application Key', type: 'text' }, { key: 'application_secret', label: 'Application Secret', type: 'password' }, { key: 'consumer_key', label: 'Consumer Key', type: 'password' }] },
         azure:         { label: 'Azure DNS', icon: 'fa-cube', fields: [{ key: 'subscription_id', label: 'Subscription ID', type: 'text' }, { key: 'resource_group', label: 'Resource Group', type: 'text' }, { key: 'tenant_id', label: 'Tenant ID', type: 'text' }, { key: 'client_id', label: 'Client ID', type: 'text' }, { key: 'client_secret', label: 'Client Secret', type: 'password' }] },
         google:        { label: 'Google Cloud DNS', icon: 'fa-cloud-meatball', fields: [{ key: 'project_id', label: 'Project ID', type: 'text' }, { key: 'service_account_key', label: 'Service Account Key (JSON)', type: 'textarea' }] },
@@ -463,8 +464,13 @@
         if (el) el.remove();
     }
 
-    // Auto-check on page load (only on dashboard)
-    if (window.location.pathname === '/') {
+    // Auto-check on page load (only on the dashboard, never on the first-run
+    // setup screen). setup.html also renders at '/' when no users exist yet,
+    // and it carries the admin-creation form (#setupForm); the wizard collects
+    // email + DNS, which is premature before an admin account exists, so it
+    // must not overlay setup.html. Let setup.html own first-run; the wizard
+    // owns dashboard onboarding once an admin account is in place.
+    if (window.location.pathname === '/' && !document.getElementById('setupForm')) {
         setTimeout(checkSetup, 500);
     }
 })();

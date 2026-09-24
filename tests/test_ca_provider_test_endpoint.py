@@ -17,6 +17,38 @@ ACTALIS_DIRECTORY = "https://acme-api.actalis.com/acme/directory"
 
 
 class TestCAProviderTestEndpoint:
+    @pytest.mark.parametrize('url', [
+        'https://acme.sectigo.com/v2/DV',
+        'https://acme.sectigo.com/v2/OV',
+    ])
+    def test_sectigo_uses_supplied_directory_without_exposing_hmac(self, api, url):
+        r = api.post_json('/api/settings/test-ca-provider', {
+            'ca_provider': 'sectigo',
+            'config': {'acme_url': url, 'eab_kid': 'example-kid',
+                       'eab_hmac': 'example-secret', 'email': 'ops@example.com'},
+        })
+        assert r.status_code == 200
+        assert r.json()['success'] is True
+        assert r.json()['acme_url'] == url
+        assert 'example-secret' not in r.text
+
+    @pytest.mark.parametrize('missing, expected', [
+        ('acme_url', 'ACME Directory URL'),
+        ('eab_kid', 'EAB Key ID'),
+        ('eab_hmac', 'HMAC Key'),
+    ])
+    def test_sectigo_missing_required_field(self, api, missing, expected):
+        config = {'acme_url': 'https://acme.sectigo.com/v2/OV',
+                  'eab_kid': 'example-kid', 'eab_hmac': 'example-secret',
+                  'email': 'ops@example.com'}
+        del config[missing]
+        r = api.post_json('/api/settings/test-ca-provider', {
+            'ca_provider': 'sectigo', 'config': config,
+        })
+        assert r.status_code == 200
+        assert r.json()['success'] is False
+        assert expected in r.json()['message']
+
     def test_actalis_requires_eab(self, api):
         r = api.post_json("/api/settings/test-ca-provider", {
             "ca_provider": "actalis",
@@ -61,7 +93,7 @@ class TestCAProviderTestEndpoint:
         r = api.post_json("/api/settings/test-ca-provider", {
             "ca_provider": "digicert",
             "config": {
-                "acme_url": "https://acme.digicert.com/v2/acme/directory",
+                "acme_url": "https://one.digicert.com/mpki/api/v1/acme/v2/directory",
                 "eab_key_id": "kid-canonical-spelling",
                 "eab_hmac_key": "hmac-canonical-spelling-long-enough-to-pass",
                 "email": "admin@example.com",

@@ -25,17 +25,19 @@ env:
 
 # Default to read-only. The build job authenticates to Docker Hub via the
 # DOCKERHUB_TOKEN secret, not the workflow GITHUB_TOKEN, so no write
-# permission on the repo is needed for the push. If we ever add SLSA
-# attestation here (Phase 2), `id-token: write` lands at the job level.
+# permission on the repo is needed for the push. The build publishes BuildKit
+# SBOM and provenance attestations, which travel with the image in the registry
+# and need no extra token; a keyless-signing scheme (cosign / GitHub
+# attestations) would be what requires `id-token: write` at the job level.
 permissions: read-all
 
 jobs:
   build:
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     
     steps:
     - name: Checkout repository
-      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
     - name: Isolate docker config dir (per-run)
       # Install the buildx CLI plugin into a per-run docker config dir instead
@@ -51,14 +53,19 @@ jobs:
         mkdir -p "$cfg"
         echo "DOCKER_CONFIG=$cfg" >> "$GITHUB_ENV"
 
+    - name: Set up QEMU
+      # GitHub-hosted runners have no binfmt for arm64; QEMU emulation lets
+      # buildx cross-build linux/arm64 on push/tag (PRs build amd64 only).
+      uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1  # v4.4.0
+
     - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+      uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
       with:
         version: latest
 
     - name: Log in to Docker Hub
       if: github.event_name != 'pull_request'
-      uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
+      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
       with:
         registry: ${{ env.REGISTRY }}
         username: ${{ secrets.DOCKERHUB_USER }}
@@ -79,9 +86,12 @@ jobs:
 
     - name: Extract metadata
       id: meta
-      uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051  # v5
+      uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
       with:
         images: ${{ env.REGISTRY }}/${{ steps.ns.outputs.namespace }}/${{ env.IMAGE_NAME }}
+        # latest = released: only v* tag builds (cut after the release.sh
+        # real-cert e2e gate) may publish :latest; pushes to main get branch
+        # tags only (e.g. :main), because CI performs no real-ACME validation.
         tags: |
           type=ref,event=branch
           type=ref,event=pr
@@ -90,7 +100,7 @@ jobs:
           type=semver,pattern={{major}}
           type=semver,pattern=v{{version}}
           type=semver,pattern=v{{major}}.{{minor}}
-          type=raw,value=latest,enable={{is_default_branch}}
+          type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
         flavor: |
           latest=auto
           
@@ -99,6 +109,10 @@ jobs:
       run: |
         if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
           echo "platforms=${{ github.event.inputs.platforms }}" >> $GITHUB_OUTPUT
+        elif [ "${{ github.event_name }}" = "pull_request" ]; then
+          # PR builds validate the Dockerfile only; amd64 is enough and avoids
+          # slow arm64 QEMU emulation on GitHub-hosted runners.
+          echo "platforms=linux/amd64" >> $GITHUB_OUTPUT
         else
           echo "platforms=linux/amd64,linux/arm64" >> $GITHUB_OUTPUT
         fi
@@ -115,7 +129,8 @@ jobs:
         fi
         
     - name: Build and push Docker image
-      uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25  # v5
+      id: build
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
       with:
         context: .
         platforms: ${{ steps.platforms.outputs.platforms }}
@@ -124,13 +139,30 @@ jobs:
         labels: ${{ steps.meta.outputs.labels }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
+        # A bill of materials and build provenance, pushed alongside the image
+        # as OCI attestations. Without them the published artefact says nothing
+        # about what is inside it or where it came from, which for a container
+        # that custodies private keys is the one artefact most worth being able
+        # to audit after the fact. `mode=max` records the full build context
+        # (base image digests, build args, the source commit) rather than the
+        # minimal summary.
+        #
+        # Inspect a published tag with:
+        #   docker buildx imagetools inspect <image> --format '{{ json .SBOM }}'
+        #   docker buildx imagetools inspect <image> --format '{{ json .Provenance }}'
+        #
+        # BuildKit writes these as extra manifests in the image index. The
+        # image is already a multi-arch index, so this is additive: `docker
+        # pull` and `--platform` selection are unaffected.
+        sbom: true
+        provenance: mode=max
         build-args: |
           REQUIREMENTS_FILE=requirements.txt
           
     - name: Update Docker Hub description
       if: github.ref == 'refs/heads/main' && steps.should_push.outputs.push == 'true'
       continue-on-error: true  # Don't fail build if description update fails
-      uses: peter-evans/dockerhub-description@432a30c9e07499fd01da9f8a49f0faf9e0ca5b77  # v4 (was v3)
+      uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa  # v4 (was v3)
       with:
         username: ${{ secrets.DOCKERHUB_USER }}
         password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -143,9 +175,14 @@ jobs:
       run: echo ${{ steps.build.outputs.digest }}
       
   security-scan:
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     needs: build
-    if: github.event_name != 'pull_request'
+    # Runs on pull requests too (#412). It used to be skipped there, and on
+    # pushes it scanned the floating `:latest` tag — which, on a push to main,
+    # is still the PREVIOUS release's image (see the tag policy above). So a
+    # CRITICAL introduced by the current change was never scanned by anyone.
+    # The image under test is now rebuilt here from the same buildx cache and
+    # loaded locally, so what is scanned is what was just built.
     # Job-level permission override: the workflow default is read-all
     # (set at the top of this file in v2.6.2), but the Trivy SARIF
     # upload step needs to write into the Security > Code scanning
@@ -155,55 +192,81 @@ jobs:
       contents: read
 
     steps:
-    - name: Ensure Trivy is installed
-      # aquasecurity/trivy-action internally invokes setup-trivy, which
-      # on this self-hosted runner reports "Cache restored successfully"
-      # but does not leave a working binary on PATH — the next
-      # entrypoint.sh step fails with `trivy: command not found`
-      # (exit 127, run 26595913239). Install the versioned release
-      # tarball directly into a user-writable PATH entry and tell
-      # trivy-action to skip its own setup. Pin matches the version
-      # setup-trivy was trying to cache.
-      run: |
-        set -euo pipefail
-        if command -v trivy >/dev/null 2>&1; then
-          echo "trivy already on PATH: $(command -v trivy)"
-          exit 0
-        fi
-        TRIVY_VERSION=0.70.0
-        case "$(uname -m)" in
-          x86_64) BIN_ARCH=64bit ;;
-          aarch64|arm64) BIN_ARCH=ARM64 ;;
-          *) echo "Unsupported arch: $(uname -m)" >&2; exit 1 ;;
-        esac
-        tmp=$(mktemp -d)
-        trap 'rm -rf "$tmp"' EXIT
-        curl -fsSL \
-          "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-${BIN_ARCH}.tar.gz" \
-          -o "$tmp/trivy.tgz"
-        tar -xzf "$tmp/trivy.tgz" -C "$tmp" trivy
-        install -d "$HOME/.local/bin"
-        install -m 0755 "$tmp/trivy" "$HOME/.local/bin/trivy"
-        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-        echo "Installed trivy ${TRIVY_VERSION} at $HOME/.local/bin/trivy"
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-    - name: Run Trivy vulnerability scanner
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+
+    - name: Build the image under test (amd64, loaded locally)
+      # Reuses the buildx cache the build job just populated, so this is a
+      # cache hit rather than a second full build.
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
+      with:
+        context: .
+        platforms: linux/amd64
+        load: true
+        push: false
+        tags: certmate:scan
+        cache-from: type=gha
+        build-args: |
+          REQUIREMENTS_FILE=requirements.txt
+
+    - name: Run Trivy vulnerability scanner (report)
       # Pinned to v0.36.0 (was @master — never pin to a mutable branch
       # in CI; upstream HEAD changes silently bring new behaviour or
       # become an attack surface if compromised).
       uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
       with:
-        # Use the trivy installed by the previous step. setup-trivy's
-        # cache hit on this self-hosted runner was reporting success
-        # without producing a usable binary.
-        skip-setup-trivy: true
-        image-ref: ${{ env.REGISTRY }}/${{ secrets.DOCKERHUB_USER }}/${{ env.IMAGE_NAME }}:latest
+        image-ref: 'certmate:scan'
         format: 'sarif'
         output: 'trivy-results.sarif'
         severity: 'HIGH,CRITICAL'
-        
+
+    - name: Capture the dependency set that actually ships
+      # From inside the image, so every version is the one pip resolved.
+      # Scanning the requirements files instead resolves each transitive
+      # constraint to the lowest version it admits: on 2026-09-08 that
+      # reported pyjwt 2.9.0 with seven advisories against an image holding
+      # 2.13.0 with none, and the same for requests, idna, filelock,
+      # protobuf and a pygments that is not installed at all.
+      run: |
+        docker run --rm --entrypoint /opt/venv/bin/pip \
+          certmate:scan freeze > resolved-requirements.txt
+        wc -l < resolved-requirements.txt
+
+    - name: Every advisory against a shipped package is in SECURITY.md
+      # The other half of scripts/check_advisories.py, which reconciles
+      # SECURITY.md with Dependabot — and Dependabot reads the manifests.
+      run: python3 scripts/check_resolved_advisories.py resolved-requirements.txt
+
+    - name: Fail on a fixable CRITICAL
+      # The reporting step above deliberately does not gate: the image
+      # carries a long tail of unfixable base-image findings tracked in #403,
+      # and a gate that is always red is a gate nobody reads. This one has
+      # teeth precisely where action is possible — a CRITICAL with a fix
+      # available means a base-image or dependency bump is due.
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+      with:
+        image-ref: 'certmate:scan'
+        format: 'table'
+        # Vulnerabilities only. The secret scanner flags a .pyc inside the
+        # third-party certbot_dns_google package as a GCP service account —
+        # a false positive that would make this gate permanently red. Secret
+        # findings still reach the Security tab via the SARIF above.
+        scanners: 'vuln'
+        severity: 'CRITICAL'
+        ignore-unfixed: true
+        exit-code: '1'
+
     - name: Upload Trivy scan results to GitHub Security tab
-      uses: github/codeql-action/upload-sarif@458d36d7d4f47d0dd16ca424c1d3cda0060f1360  # v3
-      if: always()
+      uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd  # v4.38.1
+      # Push/tag only. On a pull request the SARIF lands on the PR ref, so the
+      # image's long tail of unfixable base-image CVEs (tracked in #403) shows
+      # up as new code-scanning alerts and blocks the merge — the
+      # always-red-gate failure mode this scan was fixed to avoid (#412). On a
+      # PR the *gate* is the "Fail on a fixable CRITICAL" step above, which is
+      # actionable; the Security-tab inventory belongs to main.
+      if: always() && github.event_name != 'pull_request'
       with:
         sarif_file: 'trivy-results.sarif'

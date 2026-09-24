@@ -9,7 +9,7 @@
 **CertMate** is an SSL certificate management system for modern infrastructure. Multi-DNS provider support, Docker-ready, comprehensive REST API.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
 [![Docker](https://img.shields.io/badge/docker-ready-blue)](https://hub.docker.com/)
 
  **Full Documentation**: https://github.com/fabriziosalmi/certmate
@@ -19,7 +19,7 @@
 ## Key Features
 
 - **Zero-Downtime Automation** - Auto-renewal 30 days before expiry
-- **22 DNS Providers** - Cloudflare, AWS, Azure, GCP, Hetzner, and more
+- **23 DNS Providers** - Cloudflare, AWS, Azure, GCP, Hetzner, SOLIDserver, and more
 - **Multiple CA Support** - Let's Encrypt, DigiCert ACME, Private CAs
 - **Unified Backups** - Atomic snapshots of settings and certificates
 - **Multiple Storage Backends** - Local, Azure Key Vault, AWS Secrets Manager, Vault, Infisical
@@ -153,7 +153,7 @@ curl "http://localhost:8000/api/certificates" \
 - `SECRET_KEY` - Flask secret key (auto-generated if not set)
 - `SECRET_KEY_FILE` - Path to a file containing the Flask secret key (takes precedence over `SECRET_KEY`)
 - `FLASK_ENV` - Environment mode (default: production)
-- `HOST` - Bind address (default: 0.0.0.0)
+- The bind address is fixed to `0.0.0.0` inside the container; publish it as `-p 127.0.0.1:8000:8000` to reach it on loopback only
 - `PORT` - Listen port (default: 8000)
 
 ## Security Best Practices
@@ -212,10 +212,13 @@ curl http://localhost:8000/health
 # Response
 {
  "status": "healthy",
- "version": "2.1.0",
- "uptime": "24h 15m",
- "certificates": 42,
- "storage": "local_filesystem"
+ "version": "2.35.0",
+ "checks": {
+  "cert_dir": "ok",
+  "disk_space": "ok",
+  "disk_free_mb": 94504,
+  "scheduler": "running"
+ }
 }
 ```
 

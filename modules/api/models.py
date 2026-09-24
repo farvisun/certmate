@@ -1,15 +1,25 @@
 from flask_restx import fields
 
+from ..core.settings import SECRET_MASK_SENTINEL
+
 
 class MaskedString(fields.String):
-    """Custom field that masks sensitive string values"""
+    """Field that masks a secret completely in API responses.
+
+    It used to reveal the first four and last four characters (#432). That is
+    a meaningful head start on a DNS API token — and `GET /api/settings`,
+    where these fields live, is readable by the **viewer** role: the role you
+    hand to people you do not fully trust. The web settings route already
+    masked the same values as a flat sentinel, so the API was the weaker of
+    two answers about identical data.
+
+    Uses the same sentinel as the settings path, so a client can recognise
+    "this is masked, not the value" one way everywhere.
+    """
     def format(self, value):
         if not value:
             return value
-        s = str(value)
-        if len(s) > 8:
-            return f"{s[:4]}...{s[-4:]}"
-        return "***"
+        return SECRET_MASK_SENTINEL
 
 
 def create_api_models(api):
@@ -150,7 +160,53 @@ def create_api_models(api):
         'expiry_date': fields.String(description='Certificate expiry date'),
         'days_left': fields.Integer(description='Days until expiry'),
         'days_until_expiry': fields.Integer(description='Days until expiry (alias for days_left)'),
+        'expired': fields.Boolean(
+            description=(
+                'Whether this certificate has expired. Read this rather than '
+                'comparing days_left to zero: days_left is a whole number of '
+                'days and rounds down, so a certificate with 23 hours of life '
+                'left reports 0 and that comparison calls it expired. Null '
+                'when the certificate could not be parsed, which is neither '
+                'expired nor fine. Added in API contract 2.2.'
+            )),
+        'seconds_left': fields.Integer(
+            description=(
+                'Remaining life in seconds, negative once expired. The field '
+                'to use for ordering or for anything finer than a day; '
+                'days_left cannot separate a certificate with hours left from '
+                'one that lapsed hours ago. Null when the certificate could '
+                'not be parsed. Added in API contract 2.2.'
+            )),
         'needs_renewal': fields.Boolean(description='Whether certificate needs renewal'),
+        'usable': fields.Boolean(
+            description=(
+                'Whether this certificate can actually serve TLS: it exists AND '
+                'a matching private key is beside it. Null only when the '
+                'storage backend does not fetch key material on this path and '
+                'says so, which today means Azure Key Vault; the default '
+                'filesystem backend answers. It used to be null on every '
+                'storage-backed read, including the default one, which is how '
+                'a certificate with no key at all was reported as needing '
+                'nothing (#830). A false here forces needs_renewal, because a '
+                'keyless certificate has nothing to wait for.'
+            )),
+        'private_key_present': fields.Boolean(
+            description=(
+                'Whether a private key was found beside the certificate. Null '
+                'when it was not looked for. Restoring a share-safe backup '
+                'produces certificates with no key, which is why this is '
+                'reported rather than assumed.'
+            )),
+        'private_key_state': fields.String(
+            description=(
+                "One of 'present', 'missing', 'mismatched', 'unknown' or "
+                "'external'. 'external' is a CSR-only certificate (#599): the "
+                "key was generated on the device that will serve it and was "
+                "never sent here, so its absence is the design rather than a "
+                "fault. Unlike 'missing' it does not force needs_renewal, and "
+                "`usable` is null because this node cannot answer for a key it "
+                "does not hold."
+            )),
         'auto_renew': fields.Boolean(description='Whether automatic renewal is enabled for this certificate'),
         'dns_provider': fields.String(description='DNS provider used for the certificate'),
         'domain_alias': fields.String(description='DNS alias target used for DNS-01 validation'),
@@ -159,12 +215,26 @@ def create_api_models(api):
         'ca_provider': fields.String(description='CA provider the certificate was issued with (from metadata; null for older certificates)'),
         'challenge_type': fields.String(description='Challenge type used at issuance (from metadata)'),
         'account_id': fields.String(description='DNS provider account used at issuance (from metadata)'),
+        'storage_warning': fields.String(
+            description=(
+                'Why the last write to the configured external storage did not '
+                'land, or null when it did. Surfaced on the certificate rather '
+                'than left in the logs, because a disaster-recovery copy that '
+                'is missing or stale is not something to discover during a '
+                'recovery.'
+            )),
+        'created_at': fields.String(
+            description='When the certificate was first issued, ISO 8601, from its metadata.'),
+        'renewed_at': fields.String(
+            description='When the certificate was last renewed, ISO 8601, from its metadata. Null if it has never been renewed.'),
         'total_issued': fields.Integer(description='Total certificates issued'),
         'total_active': fields.Integer(description='Total active certificates'),
         'total_revoked': fields.Integer(description='Total revoked certificates'),
         'total_expired': fields.Integer(description='Total expired certificates'),
         'latest_issuance': fields.String(description='Latest issuance timestamp'),
-        'oldest_active_issuance': fields.String(description='Oldest active issuance timestamp')
+        'oldest_active_issuance': fields.String(description='Oldest active issuance timestamp'),
+        'deployment_port': fields.Integer(description='TCP port for deployment probe'),
+        'deployment_protocol': fields.String(description='Protocol used by deployment probe (https-tls, tls, or smtp-starttls)')
     })
 
     # Single source of truth: the dns_provider enum is derived from the
@@ -178,7 +248,10 @@ def create_api_models(api):
 
     settings_model = api.model('Settings', {
         'cloudflare_token': MaskedString(description='Cloudflare API token (deprecated, use dns_providers)'),
-        'domains': fields.List(fields.Raw, description='List of domains (can be strings or objects)'),
+        'domains': fields.List(fields.Raw, description=(
+            'Managed domains. A request may send either a bare domain string or an '
+            'object carrying the domain plus per-domain overrides; both are accepted '
+            'and stored as objects, so a response always returns the object form.')),
         'email': fields.String(description='Email for Let\'s Encrypt'),
         'auto_renew': fields.Boolean(description='Enable auto-renewal'),
         'api_bearer_token': MaskedString(description='API bearer token for authentication'),
@@ -213,8 +286,13 @@ def create_api_models(api):
         'ca_provider': fields.String(description='CA provider (optional)',
                                      enum=['letsencrypt', 'letsencrypt_staging', 'zerossl',
                                            'google', 'digicert', 'sslcom',
-                                           'actalis', 'private_ca']),
+                                           'actalis', 'sectigo', 'private_ca']),
+        'ca_account_id': fields.String(description='CA provider account ID (optional)'),
         'domain_alias': fields.String(description='Optional domain alias for DNS validation'),
+        'alias_dns_provider': fields.String(
+            description=('DNS provider that hosts the alias zone, when it is '
+                         'not the one hosting the primary. Ignored without '
+                         'domain_alias.')),
         'key_type': fields.String(
             description=(
                 "Optional override of the global default key type. Omit to "
@@ -229,6 +307,26 @@ def create_api_models(api):
         'elliptic_curve': fields.String(
             description="ECDSA curve — required when key_type='ecdsa'.",
             enum=['secp256r1', 'secp384r1']
+        ),
+        'csr': fields.String(
+            description=(
+                "PEM certificate signing request generated elsewhere (#599). "
+                "When given, CertMate never sees or stores the private key: "
+                "the certificate covers the names inside the CSR, so "
+                "san_domains and the key options must be omitted, and the "
+                "primary `domain` must be one of them. These certificates "
+                "report private_key_state='external' and are renewed by "
+                "re-submitting the stored CSR to the CA."
+            )),
+        # Declared here because callers already send it and the server already
+        # honours it (`_wants_async`, resources.py). certmate-sdk has sent
+        # `async: True` on every create since 0.1.x; leaving it out of the model
+        # meant the published Swagger contract described a request the shipped
+        # client does not make, and would reject it outright if validation were
+        # ever turned on. ReissueCertificate has always declared it.
+        'async': fields.Boolean(
+            description='Defer issuance to a background job (202 + job id). '
+                        'Poll GET /api/certificates/jobs/<job_id>.'
         )
     })
 
@@ -244,6 +342,15 @@ def create_api_models(api):
         'challenge_type': fields.String(description='Omit to keep the value the certificate was issued with'),
         'domain_alias': fields.String(description='Omit to keep the current alias; pass "" to clear it'),
         'alias_dns_provider': fields.String(description='Provider managing the alias zone when it differs from dns_provider. Omit to keep the issued value'),
+        'csr': fields.String(
+            description=(
+                "PEM certificate signing request, to rotate the key of a "
+                "CSR-only certificate without deleting it first (#876). The "
+                "certificate covers the names inside the CSR, so san_domains "
+                "and the key options must be omitted; SANs inherited from the "
+                "current certificate are replaced rather than added to. Same "
+                "field name and same rules as on create."
+            )),
         'key_type': fields.String(
             description='Omit to keep the existing key shape (no key flags are '
                         'sent and certbot preserves the lineage key). Set to '
@@ -290,12 +397,22 @@ def create_api_models(api):
         'reachable': fields.Boolean(description='Whether the domain responds over HTTPS'),
         'certificate_match': fields.Raw(description='Whether the served certificate matches the local certificate'),
         'method': fields.String(description='Check method'),
+        'port': fields.Integer(description='TCP port probed', default=443),
+        'protocol': fields.String(description='Probe protocol (https-tls, tls, smtp-starttls)'),
         'timestamp': fields.String(description='Check timestamp'),
         'error': fields.String(description='Optional error message'),
         # Machine-readable error code surfaced when _check_domain_scope denies
         # a scoped API key (e.g. 'DOMAIN_OUT_OF_SCOPE'). Without listing it
         # here, @api.marshal_with would silently strip it from the 403 body.
         'code': fields.String(description='Optional machine-readable error code'),
+        # Deployment-probe diagnostics (#381). @api.marshal_with strips any key
+        # not declared here, so these MUST be listed for the UI to receive them.
+        'probe_host': fields.String(description='Host the probe actually connected to / SNI-d'),
+        'probe_status': fields.String(description="Probe outcome: 'match', 'mismatch', 'unreachable', or 'unverifiable' (wildcard with no deployment_host)"),
+        'mismatch_reason': fields.String(description='Human-readable explanation of a mismatch or why the status is inconclusive'),
+        'served_subject': fields.String(description='Subject CN/SAN of the certificate actually served on a mismatch'),
+        'served_fingerprint': fields.String(description='Fingerprint prefix of the served certificate on a mismatch'),
+        'expected_fingerprint': fields.String(description='Fingerprint prefix of the stored certificate on a mismatch'),
         'browser': fields.Nested(browser_deployment_model, description='Browser-reported reachability')
     })
 
@@ -316,6 +433,27 @@ def create_api_models(api):
         'filename': fields.String(description='Backup filename'),
         'size': fields.Integer(description='File size in bytes'),
         'created': fields.String(description='Creation timestamp'),
+        'can_restore': fields.Boolean(
+            description=(
+                'Whether this archive can actually restore the instance. '
+                'Automatic backups are taken with secrets masked so a leaked '
+                'archive is not also a credential dump, and those cannot '
+                'restore: installing one writes the mask in place of every '
+                'credential. Decided with the same predicate the restore path '
+                'applies, and false whenever the archive cannot be inspected.'
+            )),
+        'contains_key_material': fields.Boolean(
+            description=(
+                'Whether this archive carries private keys, read from the '
+                'archive itself rather than from its manifest. Every backup '
+                'made before v2.26.0 says secrets_masked: true and carries '
+                'them anyway. Null when the archive could not be inspected — '
+                'which is not the same as carrying none.'
+            )),
+        'key_file_count': fields.Integer(
+            description='How many key files were found; null when uninspectable.'),
+        'restore_blocked_reason': fields.String(
+            description='Why it cannot restore; null when it can.'),
         'metadata': fields.Raw(description='Backup metadata')
     })
 

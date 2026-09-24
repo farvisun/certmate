@@ -5,13 +5,18 @@ Provides an interface for executing shell commands, enabling easier testing and 
 
 import subprocess
 import logging
-from typing import List, Optional, Union, Dict, Any
+from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
 class ShellExecutor:
     """Interface for executing shell commands"""
-    
+
+    # A real execution runs certbot, which materialises certificate files on
+    # disk. Callers can key post-execution filesystem assertions on this so a
+    # non-executing double (MockShellExecutor) doesn't trip them.
+    produces_artifacts = True
+
     def run(self, cmd: List[str], check: bool = False, capture_output: bool = True, 
             text: bool = True, timeout: Optional[int] = None, **kwargs) -> subprocess.CompletedProcess:
         """
@@ -38,7 +43,7 @@ class ShellExecutor:
                 timeout=timeout,
                 **kwargs
             )
-        except subprocess.TimeoutExpired as e:
+        except subprocess.TimeoutExpired:
             logger.error(f"Command timed out: {' '.join(cmd)}")
             raise
         except Exception as e:
@@ -47,7 +52,11 @@ class ShellExecutor:
 
 class MockShellExecutor(ShellExecutor):
     """Mock implementation for testing"""
-    
+
+    # The mock returns canned results without running certbot, so no
+    # certificate files appear on disk; skip artifact-existence checks.
+    produces_artifacts = False
+
     def __init__(self):
         self.commands_executed = []
         self.envs_executed = []  # env dict passed alongside each command

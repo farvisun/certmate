@@ -1,0 +1,344 @@
+# Fornitori di Certificate Authority (CA)
+
+<!-- CERTMATE-TRANSLATED-FROM 646f409a30787dbd -->
+<!-- CERTMATE-STALE-TRANSLATION -->
+
+> Questa traduzione non è aggiornata. Consulta la [versione inglese](../ca-providers.md) per il nuovo provider Sectigo ACME, gli URL HTTPS delle directory per account e le credenziali EAB.
+
+CertMate supporta diversi fornitori di Certificate Authority, consentendoti di scegliere la CA più adatta alle tue esigenze.
+
+---
+
+## Fornitori CA supportati
+
+### Let's Encrypt (Predefinito)
+
+- **Tipo**: Certificati SSL gratuiti e automatizzati
+- **Tipi di certificati**: Domain Validation (DV)
+- **Supporto Wildcard**: Si
+- **EAB Richiesto**: No
+- **Ideale per**: Sviluppo, piccole imprese, progetti personali
+
+**Configurazione:**
+- **Email**: Contatto dell'account ACME (vedi [Email dell'account](#email-dellaccount))
+
+### Let's Encrypt (Staging)
+
+- **Tipo**: Certificati di test dall'ambiente di staging di Let's Encrypt
+- **Tipi di certificati**: Domain Validation (DV) — NON riconosciuti dai browser
+- **Supporto Wildcard**: Si
+- **EAB Richiesto**: No
+- **Ideale per**: Validare la configurazione DNS, il deployment e il rinnovo senza consumare i rate limit di produzione
+
+Lo staging e una voce di Certificate Authority separata (dalla v2.12.0), non un flag per singolo certificato: selezionala come CA durante la creazione di un certificato, oppure impostala come CA predefinita durante i test. L'email utilizza come fallback l'account Let's Encrypt quando lasciata vuota. La conversione di un certificato di staging in produzione richiede una riemissione con la CA di produzione.
+
+### ZeroSSL
+
+- **Tipo**: Certificati DV gratuiti da 90 giorni
+- **Tipi di certificati**: Domain Validation (DV)
+- **Supporto Wildcard**: Si
+- **EAB Richiesto**: Si
+
+**Requisiti di configurazione:**
+- **URL directory ACME**: `https://acme.zerossl.com/v2/DV90` (fisso, preconfigurato)
+- **EAB Key ID**: Dalla Developer Dashboard di ZeroSSL
+- **EAB HMAC Key**: Dalla Developer Dashboard di ZeroSSL
+- **Email**: Contatto dell'account ACME (vedi [Email dell'account](#email-dellaccount))
+
+### Google Trust Services
+
+- **Tipo**: Certificati DV gratuiti
+- **Tipi di certificati**: Domain Validation (DV)
+- **Supporto Wildcard**: Si
+- **EAB Richiesto**: Si
+
+**Requisiti di configurazione:**
+- **URL directory ACME**: `https://dv.acme-v02.api.pki.goog/directory` (fisso, preconfigurato)
+- **EAB Key ID**: Dal tuo progetto Google Cloud
+- **EAB HMAC Key**: Dal tuo progetto Google Cloud
+- **Email**: Contatto dell'account ACME (vedi [Email dell'account](#email-dellaccount))
+
+### DigiCert ACME
+
+- **Tipo**: Certificati SSL di livello enterprise
+- **Tipi di certificati**: DV, OV, EV
+- **Supporto Wildcard**: Si
+- **EAB Richiesto**: Si
+- **Ideale per**: Ambienti enterprise, applicazioni commerciali
+
+**Requisiti di configurazione:**
+- **URL directory ACME**: `https://one.digicert.com/mpki/api/v1/acme/v2/directory`
+  — è il valore predefinito, ed è **regionale**. Un account fuori dalla regione
+  predefinita ha un proprio URL di directory, mostrato in CertCentral: inseriscilo
+  qui e l'emissione lo usa. Lasciato com'è, viene usato il predefinito. Deve
+  essere `https`.
+- **EAB Key ID**: Fornito da DigiCert
+- **EAB HMAC Key**: Fornita da DigiCert
+- **Email**: Contatto dell'account ACME (vedi [Email dell'account](#email-dellaccount))
+
+### Actalis
+
+- **Tipo**: Certificati DV gratuiti da 90 giorni di una CA europea (italiana)
+- **Tipi di certificati**: Domain Validation (DV)
+- **Supporto Wildcard**: No (non disponibile tramite ACME)
+- **EAB Richiesto**: Si
+- **Ideale per**: Utenti UE che desiderano un'alternativa europea a Let's Encrypt, ambienti eIDAS
+
+**Requisiti di configurazione:**
+- **URL directory ACME**: `https://acme-api.actalis.com/acme/directory` (fisso, preconfigurato)
+- **EAB Key ID**: Dall'area clienti Actalis
+- **EAB HMAC Key**: Dall'area clienti Actalis
+- **Email**: Contatto dell'account ACME (vedi [Email dell'account](#email-dellaccount))
+
+**Limiti del piano gratuito:**
+- Solo certificati a dominio singolo — una richiesta con voci SAN viene rifiutata con
+  `Your account only grants single-domain 90-days DV certificates`
+- Validita di 90 giorni
+- Nessun certificato wildcard (i piani SAN a pagamento coprono fino a 5 hostname)
+
+### SSL.com
+
+- **Tipo**: Certificati commerciali
+- **Tipi di certificati**: DV, OV, EV
+- **Supporto Wildcard**: Si
+- **EAB Richiesto**: Si
+
+**Requisiti di configurazione:**
+- **URL directory ACME**: `https://acme.ssl.com/sslcom-dv-rsa` (fisso, preconfigurato)
+- **EAB Key ID**: Fornito da SSL.com
+- **EAB HMAC Key**: Fornita da SSL.com
+- **Email**: Contatto dell'account ACME (vedi [Email dell'account](#email-dellaccount))
+
+### CA Privata
+
+- **Tipo**: Certificate Authority interna/aziendale
+- **Tipi di certificati**: Privati/Interni
+- **Supporto Wildcard**: Si (dipende dall'implementazione della CA)
+- **EAB Richiesto**: Facoltativo
+- **Ideale per**: Reti interne, ambienti aziendali, sistemi isolati
+
+**Software compatibili:**
+- [step-ca](https://smallstep.com/docs/step-ca/)
+- [Boulder](https://github.com/letsencrypt/boulder)
+- [Pebble](https://github.com/letsencrypt/pebble)
+- Altre CA private compatibili con ACME
+
+**Utilizzo di una CA ACME pubblica tramite la voce CA Privata:**
+
+La voce CA Privata e anche la via d'uscita generica per qualsiasi CA ACME priva di una voce dedicata in CertMate: puntala all'URL della directory della CA e, se la CA impone il binding dell'account, compila l'EAB Key ID e la HMAC Key facoltativi. Ad esempio, Actalis funziona sia tramite la sua voce dedicata (consigliato) sia come CA Privata con:
+
+- **URL directory ACME**: `https://acme-api.actalis.com/acme/directory`
+- **EAB Key ID / HMAC Key**: dall'area clienti Actalis
+- **Certificato CA**: lasciare vuoto (root di fiducia pubblici)
+
+---
+
+## Configurazione
+
+### Tramite interfaccia Web
+
+1. Vai su **Impostazioni**
+2. Scorri fino a **Fornitori di Certificate Authority (CA)**
+3. Seleziona il fornitore CA predefinito
+4. Configura i campi obbligatori
+5. Clicca su **Testa connessione CA** per controllare i campi
+6. Salva le impostazioni
+
+**Testa connessione CA** contatta la CA solo per una CA Privata: scarica l'URL
+della directory ACME (usando il certificato CA, se indicato). Per tutte le altre
+CA controlla che i campi obbligatori siano compilati (e, per DigiCert, che le
+credenziali EAB non siano troppo corte) senza contattare la CA, quindi un test
+superato non dimostra che le credenziali funzionino. Lo dimostra la prima
+emissione.
+
+### Email dell'account
+
+L'email con cui certbot registra l'account ACME e l'impostazione globale
+`email`, qualunque sia la CA che emette il certificato. Salvando le impostazioni
+dall'interfaccia web, l'email della sezione della CA **predefinita** viene
+copiata in quell'impostazione; i campi email delle sezioni delle altre CA
+vengono salvati ma non passati a certbot. L'emissione fallisce con
+`Email not configured` quando l'impostazione globale e vuota.
+
+### CA predefinita vs. CA per certificato
+
+Imposta una CA predefinita per tutti i nuovi certificati. Puoi sovrascriverla per singolo certificato durante la creazione:
+
+1. Vai alla pagina **Certificati**
+2. Seleziona la CA desiderata dal menu a tendina **Certificate Authority**
+3. Procedi con la creazione del certificato
+
+Se la CA scelta non ha una configurazione salvata (o l'account CA richiesto non
+esiste), la richiesta viene **rifiutata**. Emettere da una CA diversa non
+sostituisce quella che hai chiesto: era possibile chiedere DigiCert e ricevere
+un certificato Let's Encrypt con un `201`, e chiedere a una CA privata un nome
+interno e vederlo pubblicato in un certificato pubblico. Il rifiuto nomina la
+CA che manca.
+
+Let's Encrypt fa eccezione, e solo perché i valori predefiniti di certbot
+*sono* la sua configurazione: una richiesta per lei riesce senza nulla di
+salvato, e una richiesta di staging resta su staging.
+
+La colonna **CA** nella pagina Certificati indica con quale autorità è stato
+emesso ciascun certificato; lo stesso valore è `ca_provider` nella risposta
+dell'API e nei metadati del certificato. I certificati emessi prima che
+CertMate registrasse la CA mostrano lì `—` invece di un'ipotesi.
+
+### Tramite API
+
+```bash
+# Create certificate with specific CA
+curl -X POST http://localhost:8000/api/certificates/create \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "domain": "example.com",
+    "ca_provider": "digicert"
+  }'
+
+# Test CA connection
+curl -X POST http://localhost:8000/api/settings/test-ca-provider \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "ca_provider": "digicert",
+    "config": {
+      "acme_url": "https://one.digicert.com/mpki/api/v1/acme/v2/directory",
+      "eab_kid": "your_key_id",
+      "eab_hmac": "your_hmac_key",
+      "email": "admin@example.com"
+    }
+  }'
+```
+
+---
+
+## External Account Binding (EAB)
+
+ZeroSSL, Google Trust Services, DigiCert, SSL.com e Actalis richiedono l'External Account Binding per collegare il client ACME al proprio account CA.
+
+### Cos'e l'EAB?
+
+- **Key ID**: Un identificatore univoco per il tuo account
+- **HMAC Key**: Una chiave segreta utilizzata per firmare le richieste
+
+### Ottenere le credenziali EAB
+
+**DigiCert:**
+1. Accedi al tuo account DigiCert
+2. Vai alle impostazioni ACME
+3. Genera o recupera il tuo EAB Key ID e la HMAC Key
+
+**ZeroSSL:**
+- Genera le credenziali EAB nella Developer Dashboard di ZeroSSL
+
+**Actalis:**
+1. Registra un account gratuito su [actalis.com](https://www.actalis.com/)
+2. Nell'area clienti, apri **Manage with ACME**
+3. Recupera il KID e la chiave HMAC sotto **ACME Credentials**
+
+**CA Privata:**
+- **step-ca**: L'EAB puo essere abilitato/disabilitato per provisioner
+- Consulta la documentazione della tua CA privata per i requisiti specifici
+
+---
+
+## Attendibilita dei certificati SSL
+
+### CA pubbliche (Let's Encrypt, ZeroSSL, Google Trust Services, DigiCert, SSL.com, Actalis)
+
+I certificati sono automaticamente riconosciuti dai browser e dai sistemi operativi (tranne quelli di Let's Encrypt staging).
+
+### CA private
+
+Affinche i certificati di una CA privata siano ritenuti attendibili:
+1. Installa il certificato root della CA sui sistemi client
+2. Configura le applicazioni per una trust personalizzata
+3. Importa il certificato root nei trust store dei browser
+
+Puoi facoltativamente fornire il certificato root della CA in CertMate per la verifica della catena di fiducia durante la creazione del certificato.
+
+---
+
+## Risoluzione dei problemi
+
+### Let's Encrypt
+- **Certificato non attendibile dopo l'emissione**: Verifica se il certificato e stato emesso dalla CA di staging — seleziona la voce di produzione "Let's Encrypt" e riemettilo
+- **Rate limit raggiunto**: Passa alla voce CA "Let's Encrypt (Staging)" durante i test
+- **Email valida**: Assicurati che il formato dell'email sia corretto
+
+### DigiCert
+- **Credenziali EAB non valide**: Verifica la Key ID e la HMAC Key
+- **Account non autorizzato**: Assicurati che ACME sia abilitato sul tuo account DigiCert
+- **URL ACME errato**: Verifica l'URL della directory con il supporto DigiCert
+
+### Actalis
+- **`Your account only grants single-domain 90-days DV certificates`**: Il piano gratuito rifiuta le richieste SAN/multi-dominio — emetti un certificato per hostname oppure passa a un piano superiore
+- **Credenziali EAB non valide**: Recupera credenziali aggiornate dall'area clienti sotto Manage with ACME
+- **Wildcard rifiutato**: I certificati wildcard non sono disponibili tramite ACME su Actalis
+
+### CA Privata
+- **URL ACME non raggiungibile**: Verifica la connettivita di rete
+- **Certificato CA non valido**: Verifica il formato PEM e la validita
+- **EAB mismatch**: Controlla se l'EAB e richiesto dalla tua CA
+
+### Generale
+- Assicurati che il provider DNS sia configurato correttamente
+- Verifica la proprieta del dominio e la propagazione DNS
+- Controlla le regole del firewall per la porta ACME (di solito 443)
+
+---
+
+## Migrazione tra CA
+
+1. **I nuovi certificati** utilizzano la nuova CA predefinita
+2. **I certificati esistenti** restano sulla CA che li ha emessi: il rinnovo esegue
+   `certbot renew` verso la CA originale, anche se manuale o forzato
+3. **Spostare un certificato su un'altra CA**: riemettilo con la nuova CA
+   (`POST /api/certificates/<domain>/reissue` con `ca_provider`; vedi il
+   [riferimento API](api.md))
+
+**Best practice:**
+- Testa la nuova configurazione CA prima di impostarla come predefinita
+- Pianifica la migrazione durante le finestre di manutenzione
+- Conserva backup dei certificati esistenti
+- Monitora la validita dopo la migrazione
+
+---
+
+## Considerazioni sulla sicurezza
+
+- Le chiavi HMAC EAB non vengono visualizzate dopo il salvataggio
+- Le chiavi private vengono generate localmente e non vengono mai inviate alla CA (un backend di storage remoto o un deploy target che configuri le riceve)
+- Utilizza un URL di directory ACME `https://` per una CA Privata
+- Valuta l'uso di una VPN per l'accesso alla CA privata
+
+---
+
+## Risorse
+
+### Let's Encrypt
+- [Documentazione](https://letsencrypt.org/docs/)
+- [Rate Limit](https://letsencrypt.org/docs/rate-limits/)
+- [Ambiente di staging](https://letsencrypt.org/docs/staging-environment/)
+
+### DigiCert
+- [Documentazione ACME](https://docs.digicert.com/certificate-tools/acme-user-guide/)
+- [Configurazione account](https://docs.digicert.com/certificate-tools/acme-user-guide/acme-account-setup/)
+
+### Actalis
+- [Come abilitare ACME](https://guide.actalis.com/ssl/activation/acme)
+- [FAQ ACME](https://guide.actalis.com/faq/SSL/ACME)
+
+### CA Privata
+- [Documentazione step-ca](https://smallstep.com/docs/step-ca/)
+- [Progetto Boulder](https://github.com/letsencrypt/boulder)
+- [Server di test Pebble](https://github.com/letsencrypt/pebble)
+
+---
+
+<div align="center">
+
+[← Torna alla documentazione](./README.md) • [Provider DNS →](./dns-providers.md) • [Docker →](./docker.md)
+
+</div>

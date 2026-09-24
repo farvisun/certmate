@@ -6,12 +6,27 @@ SSL certificate infrastructure health and status.
 """
 
 import time
-from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Dict, List, Any, Optional
+from datetime import datetime, timezone
 import logging
+from .domain_entries import entry_domain
 
-from .constants import iter_cert_domain_dirs
+from .constants import DEFAULT_RENEWAL_THRESHOLD_DAYS, iter_cert_domain_dirs
+
+
+def _iso_to_epoch(value):
+    """ISO-8601 text (naive = UTC, or with offset) -> unix timestamp, else None."""
+    if not value or not isinstance(value, str):
+        return None
+    text = value.strip()
+    if text.endswith('Z'):
+        text = text[:-1] + '+00:00'
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
 
 logger = logging.getLogger(__name__)
 
@@ -19,8 +34,7 @@ logger = logging.getLogger(__name__)
 try:
     from prometheus_client import (
         Counter, Gauge, Histogram, Info, 
-        generate_latest, CONTENT_TYPE_LATEST,
-        CollectorRegistry, REGISTRY
+        generate_latest, CONTENT_TYPE_LATEST
     )
     PROMETHEUS_AVAILABLE = True
     logger.info("Prometheus client library loaded successfully")
@@ -83,10 +97,20 @@ except Exception as e:
 # METRICS DEFINITIONS
 # =============================================
 
-# Application info
-certmate_info = Info(
-    'certmate_build_info', 
-    'CertMate application build information',
+# Application info.
+#
+# This used to be Info('certmate_build_info', ..., ['version',
+# 'python_version']). An Info metric declared WITH labelnames is a family:
+# calling .info() on the parent raises AttributeError on every version of
+# prometheus_client (0.21 and the pinned 0.26 both), and the caller swallowed
+# it and built this Gauge in the handler instead. So the Gauge was always the
+# only metric that carried a value, while /metrics exported a permanently
+# sample-less `certmate_build_info_info` HELP/TYPE stanza. The dashboard
+# (monitoring/grafana-dashboard.json) and the docs already query
+# certmate_version_info — the working one is now the only one.
+application_version = Gauge(
+    'certmate_version_info',
+    'CertMate version information',
     ['version', 'python_version']
 )
 
@@ -159,6 +183,38 @@ certificate_renewal_duration = Histogram(
     buckets=[30, 60, 120, 300, 600, 1200, 3600]
 )
 
+# The nightly renewal sweep, as a graph rather than as an inference.
+#
+# The sweep counted what it did and logged the counts, but nothing recorded how
+# long it took and nothing was exported — so an instance whose sweep was taking
+# longer every night, and would eventually stop finishing between runs, looked
+# exactly like one that was fine. These four series make "past capacity" visible
+# before it becomes "certificates stopped renewing".
+#
+# Gauges, not counters: the question is always about the LAST sweep. A counter
+# would answer "how much work since the process started", which nobody asks.
+renewal_sweep_duration = Gauge(
+    'certmate_renewal_sweep_duration_seconds',
+    'How long the last renewal sweep took'
+)
+
+renewal_sweep_examined = Gauge(
+    'certmate_renewal_sweep_certificates_examined',
+    'How many certificates the last renewal sweep looked at'
+)
+
+renewal_sweep_completed_at = Gauge(
+    'certmate_renewal_sweep_completed_timestamp_seconds',
+    'Unix time the last renewal sweep finished. Stops moving when the sweep '
+    'stops finishing, which is the signal a duration alone cannot give'
+)
+
+renewal_sweep_unfinished = Gauge(
+    'certmate_renewal_sweep_unfinished',
+    '1 when a sweep started and did not reach the end (the process died, or '
+    'it was still running when the next one began), else 0'
+)
+
 # ACME/Let's Encrypt metrics
 acme_errors_total = Counter(
     'certmate_acme_errors_total',
@@ -179,11 +235,17 @@ dns_provider_accounts = Gauge(
     ['provider']
 )
 
-dns_provider_api_calls = Counter(
-    'certmate_dns_provider_api_calls_total',
-    'Total DNS provider API calls',
-    ['provider', 'operation', 'status']
-)
+# There is no certmate_dns_provider_api_calls_total, and there deliberately is
+# not one. It existed here, declared and never incremented, and it cannot be
+# incremented from where the calls happen: CertMate does not talk to a DNS
+# provider's API in this process. certbot does, in its own subprocess, and the
+# one path where CertMate itself does — the DNS-alias manual hook — is a
+# separate short-lived Python process that certbot spawns, so a counter it
+# increments dies with it and never reaches this registry. Recording it would
+# need a multiprocess collector, which is a larger decision than the metric is
+# worth. Removed rather than left exported, because a series that is always
+# zero reads as "no calls are failing".
+
 
 # System health metrics
 application_uptime = Gauge(
@@ -220,6 +282,25 @@ cache_entries = Gauge(
     'Number of entries in cache'
 )
 
+# Work waiting for a worker. Both queues live in this process and neither was
+# visible from outside it: an operator raising CERTMATE_ISSUANCE_WORKERS or
+# CERTMATE_EVENT_WORKERS was guessing, and a 429 from a full issuance queue
+# had no number behind it that anyone could graph.
+issuance_queue_depth = Gauge(
+    'certmate_issuance_queue_depth',
+    'Async issuance jobs queued or running'
+)
+
+issuance_queue_limit = Gauge(
+    'certmate_issuance_queue_limit',
+    'Configured ceiling on queued or running issuance jobs'
+)
+
+event_dispatch_backlog = Gauge(
+    'certmate_event_dispatch_backlog',
+    'Listener invocations waiting for an event-bus worker'
+)
+
 # =============================================
 # METRICS COLLECTION FUNCTIONS
 # =============================================
@@ -231,7 +312,17 @@ class CertMateMetricsCollector:
         self.start_time = time.time()
         self.last_collection = 0
         self.collection_interval = 30  # Collect metrics every 30 seconds
-        
+        # (domain, dns_provider) pairs that got a sample on the previous
+        # pass. A Gauge keeps its last value forever, so a certificate that
+        # is deleted stops being collected and its series FREEZES instead of
+        # disappearing: prometheus-alerts.yml alerts on
+        # `min by (domain) (certmate_certificate_expiry_days)`, so a
+        # certificate deleted while expiring pins a low value and fires for
+        # ever, and one deleted while healthy hides its own disappearance
+        # behind a stale `valid`. Tracked here rather than read back off the
+        # Gauge, whose label index is private API.
+        self._certificate_series = set()
+
         # Set application info
         if PROMETHEUS_AVAILABLE:
             import sys
@@ -239,26 +330,17 @@ class CertMateMetricsCollector:
                 from app import __version__
             except ImportError:
                 __version__ = 'unknown'
-            try:
-                # Try the newer way first
-                certmate_info.info({
-                    'version': __version__,
-                    'python_version': f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
-                })
-            except AttributeError as e:
-                # Fall back to older prometheus_client API or use Gauge
-                logger.debug(f"Info metric not supported in this prometheus_client version: {e}")
-                try:
-                    global application_version
-                    application_version = Gauge('certmate_version_info', 'CertMate version information', ['version', 'python_version'])
-                    application_version.labels(
-                        version=__version__,
-                        python_version=f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
-                    ).set(1)
-                except Exception as fallback_error:
-                    logger.debug(f"Could not set version metric: {fallback_error}")
-            except Exception as e:
-                logger.debug(f"Could not set application info metric: {e}")
+            # One call, no fallback cascade. The three handlers that used to
+            # be here existed to survive an AttributeError that fired every
+            # single time, on every supported prometheus_client — they were
+            # not defending against a version difference, they WERE the code
+            # path. Labelling a Gauge cannot raise for a reason worth hiding.
+            application_version.labels(
+                version=__version__,
+                python_version=f"{sys.version_info.major}."
+                               f"{sys.version_info.minor}."
+                               f"{sys.version_info.micro}"
+            ).set(1)
     
     def should_collect(self) -> bool:
         """Check if it's time to collect metrics."""
@@ -279,6 +361,7 @@ class CertMateMetricsCollector:
                 self._collect_certificate_metrics(app_context)
                 self._collect_dns_provider_metrics(app_context)
                 self._collect_cache_metrics(app_context)
+                self._collect_queue_metrics(app_context)
             
             self.last_collection = time.time()
             logger.debug("Metrics collection completed")
@@ -289,9 +372,6 @@ class CertMateMetricsCollector:
     def _collect_certificate_metrics(self, app_context):
         """Collect certificate-related metrics."""
         try:
-            # Import here to avoid circular imports
-            from . import utils
-            
             settings = app_context.get('settings', {})
             cert_dir = app_context.get('cert_dir')
             get_certificate_info = app_context.get('get_certificate_info')
@@ -300,7 +380,8 @@ class CertMateMetricsCollector:
                 return
                 
             # Get configurable renewal threshold (default 30 days for backward compatibility)
-            renewal_threshold_days = settings.get('renewal_threshold_days', 30)
+            renewal_threshold_days = settings.get(
+                'renewal_threshold_days', DEFAULT_RENEWAL_THRESHOLD_DAYS)
                 
             domains = settings.get('domains', [])
             total_domains.set(len(domains))
@@ -308,12 +389,25 @@ class CertMateMetricsCollector:
             # Collect certificate metrics
             cert_count = 0
             provider_counts = {}
+            # The four states a certificate on disk can be in, and they
+            # partition it: the branch below picks exactly one per domain.
+            #
+            # A fifth, 'renewal_failed', used to be here. Nothing ever assigned
+            # it — every scrape exported
+            # certmate_certificates_by_status{status="renewal_failed"} 0 — and
+            # it could not be assigned, because it is not a state a certificate
+            # is IN. A certificate whose renewal failed is still valid,
+            # expiring_soon or expired; the failure is an event, and it is
+            # already counted as one by
+            # certmate_certificate_renewals_total{status="failure"}, which the
+            # renewal sweep increments and which CertMateRenewalsFailing alerts
+            # on. A constant zero is worse than an absent series: an alert
+            # written against it can never fire, and reads as "no failures".
             status_counts = {
                 'valid': 0,
                 'expiring_soon': 0,
                 'expired': 0,
                 'missing': 0,
-                'renewal_failed': 0
             }
             
             # Check existing certificate directories (filters out FS artifacts
@@ -322,10 +416,11 @@ class CertMateMetricsCollector:
             
             # Process all domains (from settings and disk)
             all_domains = set()
+            seen_series = set()
             
             # Add domains from settings
             for domain_config in domains:
-                domain_name = domain_config.get('domain') if isinstance(domain_config, dict) else domain_config
+                domain_name = entry_domain(domain_config)
                 if domain_name:
                     all_domains.add(domain_name)
             
@@ -342,7 +437,8 @@ class CertMateMetricsCollector:
                     continue
                 
                 dns_provider = cert_info.get('dns_provider', 'unknown')
-                
+                seen_series.add((domain, dns_provider))
+
                 # Count by provider
                 provider_counts[dns_provider] = provider_counts.get(dns_provider, 0) + 1
                 
@@ -369,21 +465,55 @@ class CertMateMetricsCollector:
                             dns_provider=dns_provider
                         ).set(max(0, days_left))
                     
-                    # Set renewal timestamps (mock data for now)
-                    # In a real implementation, you'd track these from actual renewal events
-                    certificate_last_renewal.labels(
-                        domain=domain,
-                        dns_provider=dns_provider
-                    ).set(time.time() - (renewal_threshold_days - days_left) * 24 * 3600 if days_left is not None else 0)
-                    
-                    certificate_next_renewal.labels(
-                        domain=domain,
-                        dns_provider=dns_provider
-                    ).set(time.time() + (days_left - renewal_threshold_days) * 24 * 3600 if days_left is not None and days_left > renewal_threshold_days else time.time())
-                    
+                    # Last renewal: the real event, from metadata (renewed_at,
+                    # else created_at for a certificate never renewed). The
+                    # previous value was derived from the expiry date — a
+                    # "mock for now" that shipped, and for a 90-day
+                    # certificate with a 30-day threshold it pointed into the
+                    # future. No sample when neither timestamp is known.
+                    last_renewal_ts = _iso_to_epoch(
+                        cert_info.get('renewed_at') or cert_info.get('created_at'))
+                    if last_renewal_ts is not None:
+                        certificate_last_renewal.labels(
+                            domain=domain,
+                            dns_provider=dns_provider
+                        ).set(last_renewal_ts)
+                    else:
+                        # A gauge that stops being set keeps its last value.
+                        # If the timestamp became unknown (metadata.json
+                        # quarantined, say) the series must go away, not
+                        # freeze on a stale date (review, #584).
+                        try:
+                            certificate_last_renewal.remove(domain, dns_provider)
+                        except KeyError:
+                            pass
+                    # Next renewal: the scheduler renews once days_left falls
+                    # to the threshold, so this is a real prediction — due
+                    # now when already inside the window.
+                    if days_left is not None:
+                        due_in_days = max(0, days_left - renewal_threshold_days)
+                        certificate_next_renewal.labels(
+                            domain=domain,
+                            dns_provider=dns_provider
+                        ).set(time.time() + due_in_days * 24 * 3600)
                 else:
                     status_counts['missing'] += 1
             
+            # Forget the certificates that are gone. Without this a deleted
+            # domain's last reading stays in /metrics for the lifetime of the
+            # process, and Prometheus cannot tell a frozen series from a live
+            # one. Only series this collector created are removed, so a pass
+            # that fails early (settings unreadable, say) cannot wipe the
+            # registry — it just leaves the previous set in place.
+            for stale in self._certificate_series - seen_series:
+                for gauge in (certificate_expiry_days, certificate_next_renewal,
+                              certificate_last_renewal):
+                    try:
+                        gauge.remove(*stale)
+                    except KeyError:
+                        pass
+            self._certificate_series = seen_series
+
             # Set aggregate metrics
             total_certificates.set(cert_count)
             
@@ -416,6 +546,25 @@ class CertMateMetricsCollector:
         except Exception as e:
             logger.error(f"Error collecting DNS provider metrics: {e}")
     
+    def _collect_queue_metrics(self, app_context):
+        """Depth of the two in-process work queues.
+
+        Read through the accessors rather than the internals: both objects
+        already published one, and `EventBus.pending_dispatches` had no caller
+        at all — a number computed for nobody.
+        """
+        try:
+            executor = app_context.get('cert_executor')
+            if executor is not None:
+                issuance_queue_depth.set(executor.pending())
+                issuance_queue_limit.set(executor.queue_limit())
+
+            events = app_context.get('events')
+            if events is not None:
+                event_dispatch_backlog.set(events.pending_dispatches())
+        except Exception as e:
+            logger.error(f"Error collecting queue metrics: {e}")
+
     def _collect_cache_metrics(self, app_context):
         """Collect cache-related metrics."""
         try:
@@ -445,6 +594,18 @@ class CertMateMetricsCollector:
             status=status
         ).inc()
     
+    def record_renewal_sweep(self, examined: int, duration: float,
+                             completed_at: float):
+        """Record the shape of a renewal sweep that finished."""
+        renewal_sweep_examined.set(examined)
+        renewal_sweep_duration.set(duration)
+        renewal_sweep_completed_at.set(completed_at)
+        renewal_sweep_unfinished.set(0)
+
+    def record_renewal_sweep_unfinished(self):
+        """A previous sweep started and never reached the end."""
+        renewal_sweep_unfinished.set(1)
+
     def record_certificate_creation_time(self, dns_provider: str, duration: float):
         """Record certificate creation duration."""
         certificate_creation_duration.labels(dns_provider=dns_provider).observe(duration)
@@ -466,15 +627,6 @@ class CertMateMetricsCollector:
         acme_rate_limit_hits.labels(
             limit_type=limit_type,
             dns_provider=dns_provider
-        ).inc()
-    
-    def record_dns_api_call(self, provider: str, operation: str, success: bool):
-        """Record a DNS provider API call."""
-        status = 'success' if success else 'failure'
-        dns_provider_api_calls.labels(
-            provider=provider,
-            operation=operation,
-            status=status
         ).inc()
     
     def record_background_job(self, job_type: str, duration: float):

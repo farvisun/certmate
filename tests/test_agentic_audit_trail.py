@@ -9,7 +9,6 @@ Phase 1 of the agentic cert-lifecycle audit trail (l0 #408):
 - attribution of unattended, scheduler-driven renewals.
 """
 
-import json
 
 import pytest
 
@@ -20,6 +19,9 @@ from modules.core.audit_context import (
 )
 from modules.core.cert_service import CertificateService
 from modules.core.certificates import CertificateManager
+
+
+pytestmark = [pytest.mark.unit]
 
 
 @pytest.fixture

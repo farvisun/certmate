@@ -1,7 +1,8 @@
 """
 Certificate storage backends module for CertMate
 Provides pluggable storage solutions for certificate storage including 
-local filesystem, Azure Key Vault, AWS Secrets Manager, HashiCorp Vault, and Infisical
+local filesystem, Azure Key Vault, AWS Secrets Manager, HashiCorp Vault, Infisical,
+and S3-compatible object storage
 """
 
 import os
@@ -12,17 +13,67 @@ import shutil
 import tempfile
 import threading
 import time
-import zipfile
 from abc import ABC, abstractmethod
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 
 from .constants import CERTIFICATE_FILES
+from .domain_paths import STORAGE_DOMAIN_RE, reject_unsafe_domain
 
 logger = logging.getLogger(__name__)
 
-_SAFE_DOMAIN_RE = re.compile(r'^(\*\.)?[a-zA-Z0-9]([a-zA-Z0-9._-]{0,253}[a-zA-Z0-9])?$')
+
+class CertificateExistenceUnknown(RuntimeError):
+    """The backend could not determine whether the certificate is there.
+
+    `certificate_exists()` used to answer `False` for any exception, so a
+    timeout, a 403 or an expired credential all read as "the certificate is not
+    there" — a reassuring answer to a question nobody managed to ask, and the
+    shape that makes a present certificate get re-issued.
+
+    Two call sites in this file already refused to use it for that reason and
+    hand-rolled the probe instead, and AzureKeyVaultBackend carried a comment
+    describing the defect rather than fixing it. Three workarounds and no fix
+    is what a bad contract looks like from the inside.
+
+    So the contract is now three-valued, and the third value is an exception
+    because a bool cannot carry it:
+
+      True   the certificate is there
+      False  the certificate is definitely not there
+      raise  the backend could not tell, and says which error stopped it
+
+    Every backend narrows to the "absent" signal its own SDK raises, matched
+    the way this file already matches hvac's InvalidPath: by class name and by
+    error code, not by importing an optional dependency.
+    """
+
+
+
+def _looks_absent(error, *, codes=(), names=()) -> bool:
+    """True when *error* is the SDK's way of saying "no such thing".
+
+    Matched by error code and by exception class NAME, never by importing the
+    SDK: every one of these clients is an optional dependency, and the offline
+    suite runs these backends against fakes in an environment where the real
+    package is absent. `import hvac.exceptions` inside a handler once turned
+    every fake-backed call into "No module named 'hvac'".
+
+    Both forms are needed for boto3 alone. `get_object` raises `NoSuchKey`,
+    while `head_object` raises a generic `ClientError` carrying HTTP 404 — the
+    delete path in this file already checks for both, and a narrowing that
+    knew only the class name would pass against the in-memory fake and fail
+    against real S3.
+    """
+    if type(error).__name__ in names:
+        return True
+    response = getattr(error, 'response', None)
+    if not isinstance(response, dict):
+        return False
+    code = str(response.get('Error', {}).get('Code', ''))
+    status = response.get('ResponseMetadata', {}).get('HTTPStatusCode')
+    return code in codes or status == 404
 
 
 def _is_transient(exc):
@@ -89,12 +140,47 @@ def _retry_call(fn, *args, **kwargs):
     return _with_retry()(fn)(*args, **kwargs)
 
 
+
+def _as_text(filename: str, content: bytes) -> str:
+    """Decode one certificate file for a backend that stores text.
+
+    Every remote backend serialises certificate files as text: a JSON blob for
+    S3, AWS Secrets Manager and Vault, one secret per file for Azure and
+    Infisical. That is fine — certificate material is PEM, which is ASCII.
+
+    They all used `errors='replace'`, which turns anything that is not valid
+    UTF-8 into U+FFFD and stores it. Measured against a real MinIO:
+
+        in:  b"\x00\x01\xff\xfe"
+        out: b"\x00\x01\xef\xbf\xbd\xef\xbf\xbd"
+
+    Nothing sends such content today — both places that assemble `cert_files`
+    iterate CERTIFICATE_FILES, which is four PEM files. But the signature says
+    `Dict[str, bytes]`, and `cert.pfx` (PKCS#12, binary) already exists
+    elsewhere in the product. The day it is added to that tuple, the local copy
+    would be correct and every remote copy silently truncated to mojibake, with
+    a successful store reported.
+
+    So: refuse. The caller's `except` turns this into a False return and a
+    logged error, which is a bad day rather than a bad certificate. Fixing the
+    format to carry base64 is the other option and a larger one — it changes
+    what is on disk for every existing stored certificate.
+    """
+    try:
+        return content.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError(
+            f"{filename} is not valid UTF-8 and this backend stores text; "
+            f"storing it would corrupt the remote copy while the local one "
+            f"stayed correct ({error})"
+        ) from error
+
 def _validate_storage_domain(domain: str) -> str:
     """Validate domain name for use in storage backend paths/keys.
     Raises ValueError if domain contains path traversal or invalid chars."""
-    if not domain or '..' in domain or '/' in domain or '\\' in domain or '\x00' in domain:
-        raise ValueError(f"Invalid domain for storage: contains illegal characters")
-    if not _SAFE_DOMAIN_RE.match(domain):
+    reject_unsafe_domain(
+        domain, "Invalid domain for storage: contains illegal characters")
+    if not STORAGE_DOMAIN_RE.match(domain):
         raise ValueError(f"Invalid domain for storage: does not match domain pattern")
     return domain
 
@@ -152,12 +238,21 @@ class CertificateStorageBackend(ABC):
     @abstractmethod
     def store_certificate(self, domain: str, cert_files: Dict[str, bytes], metadata: Dict[str, Any]) -> bool:
         """Store certificate files and metadata for a domain"""
-        pass
     
     @abstractmethod
     def retrieve_certificate(self, domain: str) -> Optional[Tuple[Dict[str, bytes], Dict[str, Any]]]:
         """Retrieve certificate files and metadata for a domain"""
-        pass
+
+    # Does this backend's retrieve_certificate_info answer about private keys?
+    #
+    # The caller needs to tell "there is no key" from "I did not look", because
+    # the first means a certificate that cannot serve TLS and the second means
+    # nothing at all. A backend that overrides the method below with a genuinely
+    # cheap path, one that never fetches key material, sets this False and its
+    # certificates are reported with an unknown key state rather than a missing
+    # one (#608). The default implementation does a full retrieve, so it always
+    # knows, and says so.
+    info_includes_private_key = True
 
     def retrieve_certificate_info(self, domain: str) -> Optional[Tuple[Dict[str, bytes], Dict[str, Any]]]:
         """Retrieve only the certificate material needed by list/info views.
@@ -165,6 +260,15 @@ class CertificateStorageBackend(ABC):
         Backends can override this to avoid fetching private keys or full
         bundles. The default preserves compatibility by falling back to the
         full retrieve path.
+
+        privkey.pem is carried through when the retrieve produced one. This
+        default has already paid for it: it fetches the whole bundle and used
+        to drop everything but cert.pem, so the cost was incurred and the
+        information discarded. On the local filesystem backend, which is what a
+        default installation runs, that discarding is why every certificate
+        reported private_key_state 'unknown' and a certificate with no key at
+        all was reported healthy (#830). Dropping it never saved a fetch here;
+        the backends where it does save one override this method.
         """
         result = self.retrieve_certificate(domain)
         if not result:
@@ -173,27 +277,32 @@ class CertificateStorageBackend(ABC):
         cert_pem = cert_files.get('cert.pem')
         if not cert_pem:
             return None
-        return {'cert.pem': cert_pem}, metadata
+        info = {'cert.pem': cert_pem}
+        key_pem = cert_files.get('privkey.pem')
+        if key_pem:
+            info['privkey.pem'] = key_pem
+        return info, metadata
     
     @abstractmethod
     def list_certificates(self) -> List[str]:
         """List all stored certificate domains"""
-        pass
     
     @abstractmethod
     def delete_certificate(self, domain: str) -> bool:
         """Delete certificate for a domain"""
-        pass
     
     @abstractmethod
     def certificate_exists(self, domain: str) -> bool:
-        """Check if certificate exists for a domain"""
-        pass
+        """Whether the domain's certificate is in this backend.
+
+        True means present and False means definitely absent. A backend that
+        cannot tell raises CertificateExistenceUnknown rather than answering
+        False; see that class for why a bool was not enough.
+        """
 
     @abstractmethod
     def get_backend_name(self) -> str:
         """Get the name of this storage backend"""
-        pass
 
 
 class LocalFileSystemBackend(CertificateStorageBackend):
@@ -204,32 +313,56 @@ class LocalFileSystemBackend(CertificateStorageBackend):
         self.cert_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"LocalFileSystemBackend initialized with cert_dir: {self.cert_dir}")
     
+    @staticmethod
+    def _atomic_write_bytes(path: Path, content: bytes, mode: int) -> None:
+        """Write bytes atomically at the given mode: create a temp sibling,
+        set its mode, fsync, then rename over the destination.
+
+        The previous open()-write-then-chmod pattern had two defects on the
+        DEFAULT backend: a crash / SIGKILL (OOM) / disk-full mid-write left a
+        truncated, unrecoverable privkey.pem or cert.pem in place; and the file
+        existed under the umask (often 0644) for the window between create and
+        chmod, briefly exposing the private key. mkstemp creates at 0600; the
+        rename is atomic so readers see either the old file or the whole new
+        one, never a partial write."""
+        fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix='.tmp-', suffix=path.name)
+        try:
+            os.chmod(tmp_name, mode)
+            with os.fdopen(fd, 'wb') as f:
+                f.write(content)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_name, path)
+        except Exception:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+
     def store_certificate(self, domain: str, cert_files: Dict[str, bytes], metadata: Dict[str, Any]) -> bool:
         """Store certificate files and metadata to local filesystem"""
         try:
             domain_dir = self.cert_dir / domain
             domain_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Store certificate files
+
+            # Store certificate files atomically. Private keys are 0600 from
+            # the first byte; the rest 0644.
             for filename, content in cert_files.items():
-                file_path = domain_dir / filename
-                with open(file_path, 'wb') as f:
-                    f.write(content)
-                # Set secure permissions for private keys
-                if 'key' in filename.lower() or filename == 'privkey.pem':
-                    os.chmod(file_path, 0o600)
-                else:
-                    os.chmod(file_path, 0o644)
-            
-            # Store metadata
-            metadata_file = domain_dir / 'metadata.json'
-            with open(metadata_file, 'w') as f:
-                json.dump(metadata, f, indent=2)
-            os.chmod(metadata_file, 0o600)
+                is_key = 'key' in filename.lower() or filename == 'privkey.pem'
+                self._atomic_write_bytes(domain_dir / filename, content,
+                                         0o600 if is_key else 0o644)
+
+            # Store metadata atomically too.
+            self._atomic_write_bytes(
+                domain_dir / 'metadata.json',
+                json.dumps(metadata, indent=2).encode('utf-8'),
+                0o600,
+            )
 
             logger.info(f"Certificate stored successfully for {domain}")
             return True
-            
+
         except Exception as e:
             logger.error(f"Failed to store certificate for {domain}: {e}")
             return False
@@ -563,13 +696,18 @@ class _AzureKeyVaultCertificateImporter:
             return False
 
     def exists(self, domain: str) -> bool:
-        """Return True if a Certificate object exists for the domain."""
+        """True, False, or CertificateExistenceUnknown. See that class."""
         cert_name = self._certificate_name(domain)
         try:
             self._get_cert_client().get_certificate(cert_name)
             return True
-        except Exception:
-            return False
+        except Exception as error:
+            if _looks_absent(error, codes=('404',),
+                             names=('ResourceNotFoundError',)):
+                return False
+            raise CertificateExistenceUnknown(
+                f'could not tell whether {domain} has a Key Vault certificate '
+                f'object: {error}') from error
 
     def verify_api_access(self) -> None:
         """Probe Certificate API access; propagates SDK exceptions to the caller.
@@ -685,7 +823,7 @@ class AzureKeyVaultBackend(CertificateStorageBackend):
         client = self._get_client()
         for filename, content in cert_files.items():
             secret_name = self._sanitize_secret_name(f"cert-{domain}-{filename.replace('.', '-')}")
-            client.set_secret(secret_name, content.decode('utf-8', errors='replace'))
+            client.set_secret(secret_name, _as_text(filename, content))
         metadata_name = self._sanitize_secret_name(f"cert-{domain}-metadata")
         client.set_secret(metadata_name, json.dumps(metadata))
         return True
@@ -785,6 +923,10 @@ class AzureKeyVaultBackend(CertificateStorageBackend):
             logger.debug(f"Metadata not found in Azure Key Vault for {domain}: {e}")
 
         return {'cert.pem': cert_pem}, metadata, cert_pem_update
+
+    # Never fetches key material on this path, so it cannot tell a missing
+    # key from one it did not ask for. See the base class.
+    info_includes_private_key = False
 
     def retrieve_certificate_info(self, domain: str) -> Optional[Tuple[Dict[str, bytes], Dict[str, Any]]]:
         """Retrieve only cert.pem and metadata for dashboard/listing paths."""
@@ -1022,20 +1164,35 @@ class AzureKeyVaultBackend(CertificateStorageBackend):
         return False
 
     def certificate_exists(self, domain: str) -> bool:
-        """Check if certificate exists in Azure Key Vault (in any active mode)."""
+        """True, False, or CertificateExistenceUnknown. See that class.
+
+        This method used to carry a comment saying a transient auth or network
+        failure was reported as "the certificate does not exist", which is how
+        a present certificate gets re-issued, and that it "cannot be narrowed
+        without importing the Azure SDK exceptions". It can: this file already
+        matches hvac's InvalidPath by class name for exactly that reason, and
+        the same technique reads azure.core's ResourceNotFoundError without an
+        import. The comment described the defect for as long as it survived.
+
+        Two surfaces can be active at once. Absent means absent on every active
+        surface; a surface that could not answer makes the whole answer
+        unknown, because "not on the surface I could read" is not an answer
+        about the certificate.
+        """
         if self.writes_secrets:
+            secret_name = self._sanitize_secret_name(f"cert-{domain}-cert-pem")
             try:
                 client = self._get_client()
-                secret_name = self._sanitize_secret_name(f"cert-{domain}-cert-pem")
                 client.get_secret(secret_name)
                 return True
-            except Exception:
-                pass
+            except Exception as error:
+                if not _looks_absent(error, codes=('404',),
+                                     names=('ResourceNotFoundError',)):
+                    raise CertificateExistenceUnknown(
+                        f'could not tell whether {domain} is in Azure Key '
+                        f'Vault: {error}') from error
         if self.writes_certificate:
-            try:
-                return self._get_cert_importer().exists(domain)
-            except Exception:
-                return False
+            return self._get_cert_importer().exists(domain)
         return False
 
     def get_backend_name(self) -> str:
@@ -1101,7 +1258,7 @@ class AWSSecretsManagerBackend(CertificateStorageBackend):
 
         # Combine all certificate data into a single secret
         secret_data = {
-            'files': {k: v.decode('utf-8', errors='replace') for k, v in cert_files.items()},
+            'files': {k: _as_text(k, v) for k, v in cert_files.items()},
             'metadata': metadata
         }
 
@@ -1187,14 +1344,23 @@ class AWSSecretsManagerBackend(CertificateStorageBackend):
             return False
     
     def certificate_exists(self, domain: str) -> bool:
-        """Check if certificate exists in AWS Secrets Manager"""
+        """True, False, or CertificateExistenceUnknown. See that class.
+
+        ResourceNotFoundException is the only answer that means absent; this
+        class already catches it by name on the retrieve path.
+        """
+        secret_name = f"certmate/certificates/{domain}"
         try:
             client = self._get_client()
-            secret_name = f"certmate/certificates/{domain}"
             client.describe_secret(SecretId=secret_name)
             return True
-        except Exception:
-            return False
+        except Exception as error:
+            if _looks_absent(error, codes=('ResourceNotFoundException', '404'),
+                             names=('ResourceNotFoundException',)):
+                return False
+            raise CertificateExistenceUnknown(
+                f'could not tell whether {domain} is in AWS Secrets Manager: '
+                f'{error}') from error
     
     def get_backend_name(self) -> str:
         return "aws_secrets_manager"
@@ -1257,7 +1423,7 @@ class HashiCorpVaultBackend(CertificateStorageBackend):
 
         # Prepare secret data
         secret_data = {
-            'files': {k: v.decode('utf-8', errors='replace') for k, v in cert_files.items()},
+            'files': {k: _as_text(k, v) for k, v in cert_files.items()},
             'metadata': metadata
         }
 
@@ -1340,7 +1506,35 @@ class HashiCorpVaultBackend(CertificateStorageBackend):
         try:
             client = self._get_client()
             secret_path = f"certmate/certificates/{domain}"
-            
+
+            # Vault's delete succeeds on a path that never existed, so ask
+            # first: the caller distinguishes "removed" from "there was nothing
+            # to remove", and warns an operator to check by hand on the latter.
+            #
+            # Not certificate_exists(): it swallows every exception, so an
+            # expired token would report "nothing to remove" for a secret that
+            # is still sitting there (Copilot, #559). InvalidPath is Vault's
+            # "no such secret"; anything else propagates.
+            # Matched by class name rather than by importing
+            # hvac.exceptions: hvac is an optional dependency, and the offline
+            # suite exercises this method with a fake client in an environment
+            # where the real package is absent. An `import hvac.exceptions`
+            # here turned every fake-backed delete into "No module named
+            # 'hvac'" — a hard dependency added to a path built to work
+            # without one.
+            try:
+                if self.engine_version == 'v2':
+                    client.secrets.kv.v2.read_secret_version(
+                        path=secret_path, mount_point=self.mount_point)
+                else:
+                    client.secrets.kv.v1.read_secret(
+                        path=secret_path, mount_point=self.mount_point)
+                existed = True
+            except Exception as probe_error:
+                if type(probe_error).__name__ != 'InvalidPath':
+                    raise
+                existed = False
+
             if self.engine_version == 'v2':
                 client.secrets.kv.v2.delete_metadata_and_all_versions(
                     path=secret_path,
@@ -1352,19 +1546,36 @@ class HashiCorpVaultBackend(CertificateStorageBackend):
                     mount_point=self.mount_point
                 )
             
-            logger.info(f"Certificate deleted from HashiCorp Vault for {domain}")
-            return True
+            if existed:
+                logger.info(f"Certificate deleted from HashiCorp Vault for {domain}")
+            else:
+                logger.info(
+                    f"No certificate in HashiCorp Vault to delete for {domain}")
+            return existed
             
         except Exception as e:
             logger.error(f"Failed to delete certificate from HashiCorp Vault for {domain}: {e}")
             return False
     
     def certificate_exists(self, domain: str) -> bool:
-        """Check if certificate exists in HashiCorp Vault"""
+        """True, False, or CertificateExistenceUnknown. See that class.
+
+        InvalidPath is Vault's "no such secret"; an expired token is a
+        Forbidden, and reporting that as "not there" is how a certificate
+        Vault still holds gets re-issued. The delete path in this class
+        already discriminates the same way.
+        """
+        secret_path = f"certmate/certificates/{domain}"
         try:
+            # Inside the try on purpose. hvac authenticates when the client is
+            # built, so a bad token fails here rather than at the read, and
+            # letting that escape as a raw ValueError would mean the one
+            # promise this method makes ("it answers, or it raises
+            # CertificateExistenceUnknown") held for some failures and not for
+            # others. boto3 builds a client without talking to anything and
+            # fails at the call instead; the contract should not depend on
+            # which SDK is underneath.
             client = self._get_client()
-            secret_path = f"certmate/certificates/{domain}"
-            
             if self.engine_version == 'v2':
                 client.secrets.kv.v2.read_secret_version(
                     path=secret_path,
@@ -1376,8 +1587,12 @@ class HashiCorpVaultBackend(CertificateStorageBackend):
                     mount_point=self.mount_point
                 )
             return True
-        except Exception:
-            return False
+        except Exception as error:
+            if _looks_absent(error, codes=('404',), names=('InvalidPath',)):
+                return False
+            raise CertificateExistenceUnknown(
+                f'could not tell whether {domain} is in Vault: {error}'
+            ) from error
     
     def get_backend_name(self) -> str:
         return "hashicorp_vault"
@@ -1434,7 +1649,7 @@ class InfisicalBackend(CertificateStorageBackend):
         # Store certificate files as individual secrets (upsert: update if exists, create otherwise)
         for filename, content in cert_files.items():
             secret_key = f"certmate-{domain}-{filename.replace('.', '-')}"
-            secret_value = content.decode('utf-8', errors='replace')
+            secret_value = _as_text(filename, content)
             try:
                 client.update_secret(
                     secret_name=secret_key,
@@ -1596,18 +1811,29 @@ class InfisicalBackend(CertificateStorageBackend):
             return False
     
     def certificate_exists(self, domain: str) -> bool:
-        """Check if certificate exists in Infisical"""
+        """True, False, or CertificateExistenceUnknown. See that class.
+
+        Answered by listing rather than by fetching one secret, which is the
+        opposite of what the other backends do, and deliberate. The other four
+        narrow to the exception their SDK raises for "no such thing"; the
+        shapes are verifiable here because azure-core, hvac and botocore are
+        installed. `infisical-python` is NOT: the pin is held back on purpose
+        (it has no manylinux x86_64 wheel and no sdist), so it cannot be
+        imported, and its not-found exception cannot be read off the library.
+        Guessing a class name is how a contract gets invented instead of
+        copied.
+
+        `_list_certificates_attempt()` needs no such guess. It is the
+        unswallowed form of `list_certificates()`, so a listing that returns
+        makes absence definite, and a listing that raises is the honest
+        unknown.
+        """
         try:
-            client = self._get_client()
-            secret_key = f"certmate-{domain}-cert-pem"
-            client.get_secret(
-                secret_name=secret_key,
-                project_id=self.project_id,
-                environment=self.environment
-            )
-            return True
-        except Exception:
-            return False
+            return domain in self._list_certificates_attempt()
+        except Exception as error:
+            raise CertificateExistenceUnknown(
+                f'could not tell whether {domain} is in Infisical: {error}'
+            ) from error
     
     def get_backend_name(self) -> str:
         return "infisical"
@@ -1670,7 +1896,7 @@ class S3CompatibleBackend(CertificateStorageBackend):
         _validate_storage_domain(domain)
         client = self._get_client()
         secret_data = {
-            'files': {k: v.decode('utf-8', errors='replace') for k, v in cert_files.items()},
+            'files': {k: _as_text(k, v) for k, v in cert_files.items()},
             'metadata': metadata,
         }
         client.put_object(
@@ -1722,22 +1948,58 @@ class S3CompatibleBackend(CertificateStorageBackend):
         return sorted(domains)
 
     def delete_certificate(self, domain: str) -> bool:
+        """True only when something was actually removed.
+
+        `delete_object` succeeds whether or not the key exists — S3 deletes are
+        idempotent — so returning True unconditionally told the caller a
+        certificate had been removed when there had never been one there. That
+        matters: CertificateManager warns "verify by hand that no private key
+        remains" on a False, and swallows that warning on a True. The local
+        filesystem backend already returned False in this case, so the same
+        deletion produced a different answer depending on which backend was
+        configured (found by tests/test_storage_backends_live.py).
+        """
         try:
             client = self._get_client()
+            # Not certificate_exists(): that returns False for *any* exception,
+            # so a timeout or a 403 would be reported as "there was nothing to
+            # delete" — a reassuring answer to a question we could not answer
+            # (Copilot, #559). Only a 404/NoSuchKey means absent; anything else
+            # propagates to the handler below, which says so.
+            try:
+                client.head_object(Bucket=self.bucket, Key=self._key(domain))
+                existed = True
+            except Exception as probe_error:
+                code = getattr(probe_error, "response", {}).get(
+                    "Error", {}).get("Code", "")
+                status = getattr(probe_error, "response", {}).get(
+                    "ResponseMetadata", {}).get("HTTPStatusCode")
+                if str(code) in ("404", "NoSuchKey", "NotFound") or status == 404:
+                    existed = False
+                else:
+                    raise
             client.delete_object(Bucket=self.bucket, Key=self._key(domain))
-            logger.info(f"Certificate deleted from S3 for {domain}")
-            return True
+            if existed:
+                logger.info(f"Certificate deleted from S3 for {domain}")
+            else:
+                logger.info(f"No certificate in S3 to delete for {domain}")
+            return existed
         except Exception as e:
             logger.error(f"Failed to delete certificate from S3 for {domain}: {e}")
             return False
 
     def certificate_exists(self, domain: str) -> bool:
+        """True, False, or CertificateExistenceUnknown. See that class."""
         try:
             client = self._get_client()
             client.head_object(Bucket=self.bucket, Key=self._key(domain))
             return True
-        except Exception:
-            return False
+        except Exception as error:
+            if _looks_absent(error, codes=('404', 'NoSuchKey', 'NotFound'),
+                             names=('NoSuchKey', '_NoSuchKey')):
+                return False
+            raise CertificateExistenceUnknown(
+                f'could not tell whether {domain} is in S3: {error}') from error
 
     def get_backend_name(self) -> str:
         return "s3_compatible"
@@ -1746,8 +2008,67 @@ class S3CompatibleBackend(CertificateStorageBackend):
 class StorageManager:
     """Manager class for certificate storage backends"""
 
-    def __init__(self, settings_manager):
+    #: What `certificate_storage.cert_dir` holds on an instance that never
+    #: chose one. It is written into settings.json with the rest of the
+    #: defaults, so "the operator did not choose" cannot be told from "the
+    #: operator chose this" by presence alone — which is why the method below
+    #: compares against it rather than just checking for a value.
+    DEFAULT_LOCAL_CERT_DIRNAME = 'certificates'
+
+    def local_cert_dir(self, storage_config):
+        """Where the local backend writes.
+
+        Public because it is the answer to "which directory", and three more
+        places were deriving it themselves: the storage info endpoint and the
+        test/migrate backends in `modules/api/resources_storage.py` each had
+        their own `Path(config.get('cert_dir', 'certificates'))`. #895 fixed
+        the manager and left those, so with CERTMATE_CERT_DIR set a migrate
+        from local read a relative ./certificates while issuance used the
+        volume.
+
+        `CERTMATE_CERT_DIR` moved `CertificateManager` and left this behind,
+        so an instance pointed at a volume kept a second tree under its
+        working directory — while `get_certificate_info` read through here
+        first and `_store_in_backend` wrote here. Not an ignored variable: a
+        split, with the README describing the half that moved.
+
+        The stored value could not simply be honoured, because the shipped
+        defaults persist `'certificates'` into every settings.json. Treating
+        that literal as "unset" is what lets an existing instance be fixed
+        without a migration, and without writing a machine-specific absolute
+        path into a settings file that gets backed up and restored elsewhere.
+
+        Anything else is a directory the operator typed, and wins.
+        """
+        chosen = (storage_config.get('cert_dir') or '').strip()
+        if chosen and chosen != self.DEFAULT_LOCAL_CERT_DIRNAME:
+            return Path(chosen)
+        return self._default_cert_dir
+
+    def __init__(self, settings_manager, default_cert_dir=None):
+        """*default_cert_dir* is where the local backend writes when the
+        settings do not name a directory of their own.
+
+        It used to be the literal `'certificates'`, relative to the working
+        directory — so `CERTMATE_CERT_DIR` moved `CertificateManager` and left
+        the storage layer behind. That is not "the variable is ignored": it is
+        a split. `get_certificate_info` reads through the storage manager
+        first and `_store_in_backend` writes to it, so with the variable set
+        an instance kept a second tree under its working directory while the
+        README said certificates lived where it was pointed.
+
+        An explicit `certificate_storage.cert_dir` still wins: an operator who
+        named a directory meant it. This only decides what "unset" means, and
+        the container's certificate directory is a better answer than a
+        relative path whose meaning depends on where the process was started.
+
+        Every fallback below uses it too. Landing on a *different* tree when a
+        cloud backend fails is how an instance loses sight of certificates it
+        already has, at the moment it is least able to cope.
+        """
         self.settings_manager = settings_manager
+        self._default_cert_dir = (Path(default_cert_dir) if default_cert_dir
+                                  else Path('certificates'))
         self._backend = None
         self._initialized = False
         # Snapshot of the certificate_storage subtree that was used to build
@@ -1756,6 +2077,11 @@ class StorageManager:
         # backend (or its config) is picked up without a process restart.
         self._config_signature = None
         self._lock = threading.RLock()
+        # Set to the configured backend name when init failed and we fell back
+        # to local disk, so /health can surface the split-brain (operator
+        # believes certs are in Azure/Vault/S3; they are on local disk, often
+        # ephemeral). None = the intended backend is active.
+        self._fallback_from = None
 
     def reload(self):
         """Force the next get_backend() to re-read settings and rebuild the
@@ -1793,7 +2119,7 @@ class StorageManager:
             logger.error("StorageManager could not read settings: %s", e)
             if self._initialized:
                 return
-            self._backend = LocalFileSystemBackend(Path('certificates'))
+            self._backend = LocalFileSystemBackend(self._default_cert_dir)
             self._initialized = True
             self._config_signature = None
             return
@@ -1805,10 +2131,11 @@ class StorageManager:
 
         try:
             backend_type = storage_config.get('backend', 'local_filesystem')
-            
+            self._fallback_from = None  # reset; set below only if we fall back
+
             if backend_type == 'local_filesystem':
                 # Default local filesystem backend
-                cert_dir = Path(storage_config.get('cert_dir', 'certificates'))
+                cert_dir = self.local_cert_dir(storage_config)
                 self._backend = LocalFileSystemBackend(cert_dir)
                 
             elif backend_type == 'azure_keyvault':
@@ -1833,9 +2160,10 @@ class StorageManager:
 
             else:
                 logger.warning(f"Unknown storage backend: {backend_type}, falling back to local filesystem")
-                cert_dir = Path('certificates')
+                cert_dir = self._default_cert_dir
                 self._backend = LocalFileSystemBackend(cert_dir)
-            
+                self._fallback_from = backend_type
+
             self._initialized = True
             self._config_signature = signature
             logger.info(f"Storage backend initialized: {self._backend.get_backend_name()}")
@@ -1847,11 +2175,22 @@ class StorageManager:
                 "Fix the configuration and restart to activate the intended backend.",
                 backend_type, e
             )
-            self._backend = LocalFileSystemBackend(Path('certificates'))
+            self._backend = LocalFileSystemBackend(self._default_cert_dir)
             self._initialized = True
             # Cache the signature even on the fallback path so a subsequent
             # call doesn't keep retrying the broken backend on every get.
             self._config_signature = signature
+            # Persist the split-brain so /health surfaces it (not just a log
+            # line the operator may never read).
+            self._fallback_from = storage_config.get('backend', 'unknown')
+
+    def get_fallback_backend(self) -> Optional[str]:
+        """Return the configured backend name if init failed and CertMate fell
+        back to local disk (so callers/monitoring can detect the split-brain),
+        else None. /health surfaces this as 'degraded'."""
+        with self._lock:
+            self._initialize_backend()
+            return self._fallback_from
 
     def get_backend(self) -> CertificateStorageBackend:
         """Get the current storage backend"""
@@ -1873,6 +2212,18 @@ class StorageManager:
         """Retrieve lightweight certificate info using the configured backend."""
         backend = self.get_backend()
         return backend.retrieve_certificate_info(domain)
+
+    def info_includes_private_key(self) -> bool:
+        """Does retrieve_certificate_info answer about private keys?
+
+        A method rather than an attribute because the backend is resolved per
+        call: get_backend() re-reads settings, so a storage reconfiguration
+        that swaps Azure for the local filesystem has to change this answer
+        too. Defaults to False for anything that does not say, since claiming
+        to know and being wrong is how a certificate with no key gets reported
+        as healthy (#830).
+        """
+        return bool(getattr(self.get_backend(), 'info_includes_private_key', False))
     
     def list_certificates(self) -> List[str]:
         """List certificates using the configured backend"""
@@ -1885,7 +2236,14 @@ class StorageManager:
         return backend.delete_certificate(domain)
     
     def certificate_exists(self, domain: str) -> bool:
-        """Check if certificate exists using the configured backend"""
+        """Whether the configured backend holds this domain's certificate.
+
+        Raises CertificateExistenceUnknown when the backend could not tell.
+        A caller that treats that as False is choosing to re-issue a
+        certificate the store may already hold; it should say so where it
+        makes that choice, rather than inheriting it from a swallowed
+        exception.
+        """
         backend = self.get_backend()
         return backend.certificate_exists(domain)
     
@@ -1924,8 +2282,23 @@ class StorageManager:
             
             successful = sum(1 for success in migration_results.values() if success)
             logger.info(f"Migration completed: {successful}/{len(domains)} certificates migrated successfully")
-            
+
         except Exception as e:
+            # Raised, not logged and swallowed. Everything above this line that
+            # can fail is per-certificate and is already recorded as False for
+            # that certificate; what reaches here is the enumeration of the
+            # source — an expired Vault token, a role without ListBucket, an
+            # unreachable endpoint — and returning the empty dict it had
+            # accumulated made the caller compute 0 of 0 and answer HTTP 200
+            # with success: true, "Migration completed: 0/0", and an audit
+            # record stamped status='success'. An operator migrating away from
+            # a backend before decommissioning it was told it had worked.
+            #
+            # "Enumerated nothing" and "could not enumerate" are different
+            # answers and must not share a return value. The route already has
+            # an arm for this: it answers with a failure status and writes a
+            # failure audit record.
             logger.error(f"Migration failed: {e}")
-        
+            raise
+
         return migration_results

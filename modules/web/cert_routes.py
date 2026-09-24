@@ -7,6 +7,7 @@ from flask import request, jsonify, send_file, after_this_request
 from ..core.certificates import DomainOperationInProgress
 from ..core.cert_service import CertificateService, DomainOutOfScope
 from ..core.audit_context import audit_context_from_request
+from modules.core.request_fields import json_booleans
 
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,7 @@ def register_cert_routes(app, managers, require_web_auth, auth_manager,
                 dns_provider=data.get('dns_provider'),
                 account_id=data.get('account_id'),
                 ca_provider=data.get('ca_provider'),
+                ca_account_id=data.get('ca_account_id'),
                 challenge_type=data.get('challenge_type'),
                 domain_alias=data.get('domain_alias'),
                 user=user,
@@ -54,7 +56,11 @@ def register_cert_routes(app, managers, require_web_auth, auth_manager,
             return jsonify(result)
         except DomainOutOfScope:
             return jsonify({'error': 'API key not authorized for this domain', 'code': 'DOMAIN_OUT_OF_SCOPE'}), 403
-        except (ValueError, FileExistsError) as e:
+        except FileExistsError:
+            # "Already exists" is a distinct, expected condition — 409 with a
+            # reissue hint, not a generic 400 (matches the flask-restx path).
+            return jsonify({'error': 'A certificate already exists for this domain. Use reissue to replace it.', 'code': 'CERTIFICATE_ALREADY_EXISTS'}), 409
+        except ValueError as e:
             # Log the specific reason; return a generic message so the caught
             # exception text never reaches the client (CodeQL py/stack-trace-exposure).
             logger.info("Certificate creation rejected: %s", e)
@@ -100,15 +106,20 @@ def register_cert_routes(app, managers, require_web_auth, auth_manager,
                     continue
                 # Structural validation BEFORE scope check so a poisoned
                 # entry (e.g. "../escape") never even reaches the cert
-                # manager or settings.json. Same gate the single-cert path
-                # now applies.
-                d_valid, d_msg = validate_domain(domain)
+                # manager or settings.json. This route calls create_certificate
+                # directly — it does NOT go through prepare_create — so it must
+                # normalise the domain itself: validate_domain returns the bare
+                # hostname (netloc extracted, lowercased) as its second value,
+                # and we use it from here on rather than the raw entry, which
+                # could be a URL form whose path component escapes cert_dir.
+                d_valid, d_normalized = validate_domain(domain)
                 if not d_valid:
                     results.append({
                         'domain': domain, 'success': False,
-                        'message': f'Invalid domain: {d_msg}',
+                        'message': f'Invalid domain: {d_normalized}',
                     })
                     continue
+                domain = d_normalized
                 if not auth_manager.domain_matches_scope(domain, scope):
                     if audit_logger:
                         audit_logger.log_authz_denied(
@@ -125,14 +136,61 @@ def register_cert_routes(app, managers, require_web_auth, auth_manager,
                     })
                     continue
                 try:
-                    result = certificate_manager.create_certificate(
+                    certificate_manager.create_certificate(
                         domain=domain, email=email,
                         dns_provider=dns_provider, ca_provider=ca_provider,
+                        ca_account_id=data.get('ca_account_id'),
                         challenge_type=challenge_type,
                     )
                     results.append({'domain': domain, 'success': True, 'message': 'Certificate created'})
                 except Exception as e:
-                    results.append({'domain': domain, 'success': False, 'message': str(e)})
+                    # Log the detail; return a generic per-item message so raw
+                    # exception text (non-certbot ValueError/IO) never reaches
+                    # the client. Mirrors the single-cert path's non-disclosure.
+                    logger.warning("Batch create failed for %s: %s",
+                                   str(domain).replace('\n', ' ').replace('\r', ' '),
+                                   str(e).replace('\n', ' ').replace('\r', ' '))
+                    results.append({'domain': domain, 'success': False, 'message': 'Certificate creation failed'})
+
+            # Register every successfully-created domain for automatic renewal.
+            # This path calls certificate_manager.create_certificate directly
+            # (fast, no per-domain settings write), but that low-level call does
+            # NOT append the domain to settings['domains'] — only
+            # CertificateService does. check_renewals iterates ONLY that list,
+            # so without this, batch-created certs were never renewed and
+            # expired ~90 days later with no warning. One settings.update (not
+            # one per domain) avoids running a full pre-save backup 50 times.
+            created_domains = [r['domain'] for r in results if r.get('success')]
+            if created_domains:
+                account_id = data.get('account_id')
+
+                def _register_batch(s):
+                    domains_list = s.get('domains', []) or []
+                    present = {
+                        (d if isinstance(d, str) else d.get('domain'))
+                        for d in domains_list
+                    }
+                    for d in created_domains:
+                        if d in present:
+                            continue
+                        domains_list.append({
+                            'domain': d,
+                            'dns_provider': dns_provider,
+                            'dns_account_id': account_id,
+                        })
+                        present.add(d)
+                    s['domains'] = domains_list
+
+                try:
+                    settings_manager.update(_register_batch, 'certificate_created')
+                except Exception as e:
+                    # Certs exist but tracking failed — surface it loudly rather
+                    # than let them silently fall out of the renewal loop.
+                    logger.error(
+                        "Batch certs created but domain registration for renewal "
+                        "failed (%d domains may not auto-renew): %s",
+                        len(created_domains), e,
+                    )
             return jsonify(results)
         except Exception as e:
             logger.error(f"Batch creation failed: {e}")
@@ -143,7 +201,7 @@ def register_cert_routes(app, managers, require_web_auth, auth_manager,
     def download_batch_web():
         """Download multiple certificates as zip"""
         try:
-            data = request.json
+            data = request.json or {}
             domains = data.get('domains', [])
             if not domains:
                 return jsonify({'error': 'Domains required'}), 400
@@ -170,10 +228,13 @@ def register_cert_routes(app, managers, require_web_auth, auth_manager,
                                 ip_address=request.remote_addr,
                             )
                         continue
-                    cert_path = certificate_manager.get_certificate_path(
-                        cert_dir.name)
-                    if os.path.exists(cert_path):
-                        zf.write(cert_path, arcname=f"{cert_dir.name}.crt")
+                    # Bundle the full chain (cert + intermediates) as
+                    # <domain>.crt. Cert-only by design — a bulk export must not
+                    # leak private keys. (Fixes a 500: certificate_manager has no
+                    # get_certificate_path(); cert_dir is already the domain dir.)
+                    cert_path = cert_dir / 'fullchain.pem'
+                    if cert_path.exists():
+                        zf.write(str(cert_path), arcname=f"{cert_dir.name}.crt")
 
             @after_this_request
             def cleanup(response):
@@ -206,15 +267,31 @@ def register_cert_routes(app, managers, require_web_auth, auth_manager,
     def test_dns_provider_web():
         """Test DNS provider configuration"""
         try:
-            data = request.json
+            data = request.json or {}
             provider = data.get('provider')
             config = data.get('config', {})
             if not provider:
                 return jsonify({'error': 'Provider name required'}), 400
 
+            # An explicit config always wins. Without one, test the stored
+            # account (body 'account_id', or the same default-account
+            # resolution issuance uses) so a preflight like
+            # `certmate dns test cloudflare` can succeed against a
+            # configured server instead of always failing on empty config.
+            # No stored account leaves config empty -> the usual 400.
+            used_account = None
+            if not config:
+                stored_config, used_account = dns_manager.get_dns_provider_account_config(
+                    provider, data.get('account_id'))
+                if stored_config:
+                    config = stored_config
+
             success, message = dns_manager.test_provider(provider, config)
             if success:
-                return jsonify({'message': message})
+                response = {'message': message}
+                if used_account:
+                    response['used_account'] = used_account
+                return jsonify(response)
             return jsonify({'error': message}), 400
         except Exception as e:
             logger.error(f"Provider test failed: {e}")
@@ -222,6 +299,7 @@ def register_cert_routes(app, managers, require_web_auth, auth_manager,
 
     @app.route('/api/web/certificates/<string:domain>/renew', methods=['POST'])
     @auth_manager.require_role('operator')
+    @json_booleans(force=False)
     def renew_certificate_web(domain):
         """Renew certificate via web"""
         try:
@@ -231,14 +309,20 @@ def register_cert_routes(app, managers, require_web_auth, auth_manager,
 
             # Use the directory name (domain) for renewal
             domain_name = cert_dir.name
-            force = bool((request.get_json(silent=True) or {}).get('force', False))
+            force = request.json_booleans['force']
             user = getattr(request, 'current_user', None) or {}
             result = cert_service.renew(
                 domain=domain_name, force=force,
                 user=user, ip_address=request.remote_addr,
                 audit_ctx=audit_context_from_request(),
             )
-            return jsonify({'message': result.get('message', 'Certificate renewed successfully')})
+            # 'renewed' distinguishes a real renewal from certbot's "not yet
+            # due" no-op; the manager's message already states which happened.
+            # Default True preserves the response contract for older results.
+            return jsonify({
+                'message': result.get('message', 'Certificate renewed successfully'),
+                'renewed': bool(result.get('renewed', True)),
+            })
         except DomainOutOfScope:
             return jsonify({'error': 'API key not authorized for this domain', 'code': 'DOMAIN_OUT_OF_SCOPE'}), 403
         except FileNotFoundError as e:
@@ -247,8 +331,12 @@ def register_cert_routes(app, managers, require_web_auth, auth_manager,
         except DomainOperationInProgress:
             return jsonify({'error': 'A certificate operation is already in progress for this domain', 'code': 'DOMAIN_OPERATION_IN_PROGRESS'}), 409
         except RuntimeError as e:
+            # Surface WHY (and flag the broken-renewal-config case with a reissue
+            # hint) instead of an opaque message. See classify_renewal_error.
             logger.error(f"Certificate renewal failed: {e}")
-            return jsonify({'error': 'Certificate renewal failed'}), 422
+            from ..core.utils import classify_renewal_error
+            message, code = classify_renewal_error(str(e))
+            return jsonify({'error': message, 'code': code}), 422
         except Exception as e:
             logger.error(f"Certificate renewal failed via web: {str(e)}")
             return jsonify({'error': 'Certificate renewal failed'}), 500

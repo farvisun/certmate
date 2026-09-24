@@ -46,7 +46,8 @@ def verify_bundle(bundle, expected_pubkey_pem=None):
     result = {
         "ok": False, "reason": None, "signed": False, "signature_ok": False,
         "fingerprint": None, "count": 0, "first_seq": None, "last_seq": None,
-        "head_hash": None, "error_seq": None,
+        "head_hash": None, "error_seq": None, "anchored": False,
+        "anchor_seq": None,
     }
     if not isinstance(bundle, dict) or "manifest" not in bundle or "entries" not in bundle:
         result["reason"] = "not an audit export bundle (missing manifest/entries)"
@@ -56,11 +57,36 @@ def verify_bundle(bundle, expected_pubkey_pem=None):
 
     # 0. Reject a format/algorithm this verifier does not understand, rather
     #    than silently mis-handling a future bundle version.
-    if manifest.get("format_version") != audit_chain.BUNDLE_FORMAT_VERSION:
+    if manifest.get("format_version") not in audit_chain.SUPPORTED_BUNDLE_FORMAT_VERSIONS:
         result["reason"] = f"unsupported bundle format_version {manifest.get('format_version')!r}"
         return result
     if manifest.get("algorithm") not in (None, "ed25519"):
         result["reason"] = f"unsupported signature algorithm {manifest.get('algorithm')!r}"
+        return result
+
+    # 0b. Anchor. A v2 bundle is a fragment that starts mid-chain and MUST
+    #     declare the predecessor hash it continues from; a v1 bundle must not
+    #     declare one, or a fragment could be passed off as a full chain by
+    #     downgrading its version. The anchor is inside the signed manifest, so
+    #     a valid signature attests it.
+    anchored = manifest.get("format_version") == audit_chain.ANCHORED_BUNDLE_FORMAT_VERSION
+    anchor_prev_hash = audit_chain.GENESIS_PREV
+    anchor_seq = None
+    if anchored:
+        anchor_prev_hash = manifest.get("anchor_prev_hash")
+        anchor_seq = manifest.get("anchor_seq")
+        if not anchor_prev_hash or not isinstance(anchor_seq, int):
+            result["reason"] = "anchored bundle without a usable anchor_prev_hash / anchor_seq"
+            return result
+        result["anchored"] = True
+        result["anchor_seq"] = anchor_seq
+    elif any(manifest.get(k) is not None for k in ("anchor_prev_hash", "anchor_seq")):
+        # Reject EVERY anchor field on a v1 bundle, not just anchor_prev_hash:
+        # a v2 slice downgraded by deleting one of the two fields would
+        # otherwise fall through to the link check and be reported as a broken
+        # chain — a tamper verdict on an intact record. Say what is actually
+        # wrong with it.
+        result["reason"] = "unanchored bundle declares anchor fields"
         return result
 
     # A bundle must carry either both a signature and a public key, or neither.
@@ -73,7 +99,8 @@ def verify_bundle(bundle, expected_pubkey_pem=None):
         return result
 
     # 1. Structural chain verification of the entries.
-    chain = audit_chain.verify_records(entries)
+    chain = audit_chain.verify_records(
+        entries, anchor_prev_hash=anchor_prev_hash, anchor_seq=anchor_seq)
     for k in ("count", "first_seq", "last_seq", "head_hash", "error_seq"):
         result[k] = chain.get(k)
     if not chain["ok"]:
@@ -117,7 +144,44 @@ def verify_bundle(bundle, expected_pubkey_pem=None):
 
     result["ok"] = True
     result["reason"] = "intact and signed" if result["signed"] else "intact (unsigned bundle)"
+    if result["anchored"]:
+        # Never let an anchored fragment read as "the whole record is intact".
+        # It attests the entries from the anchor forward; everything before the
+        # anchor is outside this bundle and unproven by it.
+        result["reason"] += f" from the declared anchor at seq {anchor_seq} (partial slice)"
     return result
+
+
+def _check_anchor_signature(result, chain_path, pubkey_path) -> None:
+    """Verify a pruned chain's anchor against a PEM public key, when one was
+    supplied. Without a key the chain is still structurally verified, but the
+    anchor is an unverified claim and the output has to say so — an anchored
+    chain that reports a bare "intact" is exactly the overclaim #445 is about."""
+    if not pubkey_path:
+        return
+    try:
+        anchor = audit_chain.read_anchor(audit_chain.anchor_path_for(chain_path))
+    except audit_chain.AnchorReadError as e:
+        result["ok"] = False
+        result["reason"] = str(e)
+        return
+    try:
+        pem = open(pubkey_path, "r", encoding="utf-8").read()
+    except OSError as e:
+        result["ok"] = False
+        result["reason"] = f"cannot read --pubkey: {e}"
+        return
+    signing = _import_signing()
+    signature = (anchor or {}).get("signature")
+    if not signature or not signing.verify_signature(
+        pem, signature, audit_chain.anchor_signing_bytes(anchor)
+    ):
+        result["ok"] = False
+        result["reason"] = (
+            f"the anchor at seq {result.get('anchor_seq')} is not signed by the "
+            f"pinned key: entries were removed without a valid attestation")
+        return
+    result["anchor_signature_ok"] = True
 
 
 def main(argv=None) -> int:
@@ -152,6 +216,10 @@ def main(argv=None) -> int:
             tag = f"signed by {result['fingerprint']}" if result["signed"] else "UNSIGNED"
             print(f"OK: audit bundle {result['reason']} "
                   f"({result['count']} entries, seq {result['first_seq']}..{result['last_seq']}; {tag})")
+            if result["anchored"]:
+                print(f"note: this is a PARTIAL slice verified from a declared anchor at seq "
+                      f"{result['anchor_seq']}, not from the start of the chain. Entries before "
+                      f"that seq are not covered by this bundle.", file=sys.stderr)
             if result["signed"] and expected_pem is None:
                 print("note: public key NOT pinned — the fingerprint is self-asserted by the "
                       "bundle. Pin the instance key with --pubkey to bind the attribution.",
@@ -163,11 +231,25 @@ def main(argv=None) -> int:
 
     # Chain mode (Phase 2).
     result = audit_chain.verify_chain(args.path)
+    if result["ok"] and result.get("anchored"):
+        # The structural check passed, but an anchored chain has had entries
+        # removed. Verify the anchor's signature if the operator supplied a key,
+        # and say plainly what is and is not covered either way (#445).
+        _check_anchor_signature(result, args.path, args.pubkey)
     if args.json:
         print(json.dumps(result, indent=2))
     elif result["ok"]:
-        print(f"OK: audit chain intact "
+        scope = ("intact" if not result.get("anchored")
+                 else f"intact from the anchor at seq {result['anchor_seq']}")
+        print(f"OK: audit chain {scope} "
               f"({result['count']} entries, seq {result['first_seq']}..{result['last_seq']})")
+        if result.get("anchored"):
+            print(f"note: this chain was PRUNED. Entries before seq "
+                  f"{result['anchor_seq']} are not in this file; they are attested "
+                  f"by the anchor and live only in the exported archive bundle. "
+                  f"Anchor signature: "
+                  f"{'verified' if result.get('anchor_signature_ok') else 'NOT verified (pass --pubkey)'}.",
+                  file=sys.stderr)
         if result.get("head_hash"):
             print(f"head_hash: {result['head_hash']}")
     else:
